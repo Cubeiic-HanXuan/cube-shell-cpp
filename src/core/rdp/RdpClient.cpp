@@ -440,6 +440,18 @@ private:
         freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE);
+#ifdef Q_OS_WIN
+        // TLS 上限压到 1.2：绕开 OpenSSL 在 Windows ARM64 Release 下的已知缺陷
+        // （OpenSSL #26239）——MSVC 为 ARM64 的 interlocked 操作生成了错误的栈帧，
+        // 握手中走到 tls_construct_compress_certificate()（RFC 8879 证书压缩）时
+        // 破坏栈并崩在库内。该扩展在 OpenSSL 里是 TLS 1.3 专属，ClientHello 仅在
+        // max_version >= TLS 1.3 时才构造它，故把上限设为 TLS 1.2 即整条路径不再
+        // 被触及，无需重编 OpenSSL。FreeRDP 3 会把此值透给
+        // SSL_CTX_set_max_proto_version()，TLS 与 NLA(CredSSP) 两条握手同时生效；
+        // RDP 服务端普遍支持 TLS 1.2，降级代价可接受。
+        // 0x0303 = TLS1_2_VERSION，直接写字面量以免此处引入 OpenSSL 头。
+        freerdp_settings_set_uint16(settings, FreeRDP_TLSMaxVersion, 0x0303);
+#endif
         // 嵌入式面板渲染：软件 GDI，忽略自签证书（与 Python 侧堡垒机场景一致）
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);

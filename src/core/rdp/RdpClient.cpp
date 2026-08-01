@@ -8,6 +8,12 @@
 #include <QStandardPaths>
 #include <QUrl>
 
+// winsock2.h 必须早于任何 windows.h（FreeRDP/WinPR 头会间接引入），
+// 否则 winsock.h 先被拉进来会与 winsock2 的宏/结构体定义冲突。
+#ifdef Q_OS_WIN
+#  include <winsock2.h>
+#endif
+
 #ifdef CUBESHELL_HAVE_FREERDP
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
@@ -21,6 +27,21 @@
 #endif
 
 namespace cubeshell {
+
+// Windows 下 Winsock 的一次性初始化。FreeRDP 自身不调用 WSAStartup，
+// 未初始化时其 getaddrinfo() 会直接失败，连数字 IP 也会报
+// ERRCONNECT_DNS_NAME_NOT_FOUND。对齐 SshClient::ensureLibssh2Init 的做法。
+static void ensureFreeRDPInit()
+{
+    static bool inited = false;
+    if (!inited) {
+#ifdef Q_OS_WIN
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+        inited = true;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // normalizeRdpHost
@@ -537,6 +558,7 @@ void RdpClient::setState(State state)
 
 void RdpClient::connectToHost(const RdpSettings &settings)
 {
+    ensureFreeRDPInit();
     if (m_state != State::Disconnected)
         disconnectFromHost();
     m_settings = settings;

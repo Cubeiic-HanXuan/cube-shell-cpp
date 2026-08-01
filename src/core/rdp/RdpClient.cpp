@@ -9,6 +9,7 @@
 #include <QUrl>
 
 #ifdef CUBESHELL_HAVE_FREERDP
+#include <freerdp/error.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/version.h>
@@ -20,6 +21,67 @@
 #endif
 
 namespace cubeshell {
+
+// ---------------------------------------------------------------------------
+// normalizeRdpHost
+// ---------------------------------------------------------------------------
+// 设备表/URL 分发路径下的 host 不经表单回读（main_window 直接
+// client->connectToHost(resolved)），存盘值里的空白、内联端口、整条
+// rdp:// URL 都会原样落到 getaddrinfo()上，此处统一洗干净。
+RdpHostPort normalizeRdpHost(const QString &rawHost, int defaultPort)
+{
+    RdpHostPort out;
+    out.port = defaultPort;
+
+    QString s = rawHost.trimmed();
+    // 整条 URL 被粘进主机框：剥 rdp:// / rdp+ntlm-password:// 前缀
+    const int schemeEnd = s.indexOf(QLatin1String("://"));
+    if (schemeEnd > 0)
+        s = s.mid(schemeEnd + 3);
+    // 剥 userinfo（user[:pwd]@）；IPv6 字面量本身不含 '@'，故可直接切
+    const int at = s.lastIndexOf(QLatin1Char('@'));
+    if (at >= 0)
+        s = s.mid(at + 1);
+    // 剥路径/参数尾巴
+    const int slash = s.indexOf(QLatin1Char('/'));
+    if (slash >= 0)
+        s = s.left(slash);
+    // 内嵌空白与控制字符（复制粘贴常带 \n / \t / U+00A0）全部剔除
+    QString cleaned;
+    cleaned.reserve(s.size());
+    for (const QChar c : s) {
+        if (!c.isSpace() && c.category() != QChar::Other_Control)
+            cleaned.append(c);
+    }
+    s = cleaned;
+
+    // 内联端口优先（与 SSH 侧 parseHostPort 一致：主机串写了端口就听它）
+    const auto takePort = [&out](const QString &text) {
+        bool ok = false;
+        const int p = text.toInt(&ok);
+        if (ok && p > 0 && p <= 65535)
+            out.port = p;
+    };
+
+    if (s.startsWith(QLatin1Char('['))) {           // [IPv6][:port]
+        const int end = s.indexOf(QLatin1Char(']'));
+        if (end > 0) {
+            out.host = s.mid(1, end - 1);
+            const QString rest = s.mid(end + 1);
+            if (rest.startsWith(QLatin1Char(':')))
+                takePort(rest.mid(1));
+            return out;
+        }
+    }
+    if (s.count(QLatin1Char(':')) == 1) {           // host:port
+        const int idx = s.indexOf(QLatin1Char(':'));
+        out.host = s.left(idx);
+        takePort(s.mid(idx + 1));
+        return out;
+    }
+    out.host = s;                                   // 裸主机名 / 裸 IPv6
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // buildRdpUrl
@@ -46,13 +108,14 @@ QString buildRdpUrl(const RdpSettings &settings, const QString &auth)
         userinfo += QLatin1Char('@');
     }
 
-    QString host = settings.host.trimmed();
+    const RdpHostPort target = normalizeRdpHost(settings.host, settings.port);
+    QString host = target.host;
     // 裸 IPv6 地址加方括号
     if (host.count(QLatin1Char(':')) >= 2 && !host.startsWith(QLatin1Char('[')))
         host = QLatin1Char('[') + host + QLatin1Char(']');
 
     return QStringLiteral("%1://%2%3:%4").arg(scheme, userinfo, host,
-                                              QString::number(settings.port));
+                                              QString::number(target.port));
 }
 
 // ---------------------------------------------------------------------------
@@ -134,10 +197,22 @@ protected:
         // 连接参数（对应 Python 侧 build_rdp_url 携带的 host/port/user/pwd/domain
         // 与 iosettings 的分辨率）
         rdpSettings *settings = instance->context->settings;
+        // ServerHostname 会被原样交给 getaddrinfo()：先归一化，再校验非空，
+        // 否则失败只会表现为一个含义误导的 DNS_NAME_NOT_FOUND 错误码。
+        const RdpHostPort target = normalizeRdpHost(m_settings.host, m_settings.port);
+        if (target.host.isEmpty()) {
+            emit m_client->errorOccurred(
+                QStringLiteral("RDP 主机地址为空（原始值：\"%1\"）").arg(m_settings.host));
+            freerdp_context_free(instance);
+            freerdp_free(instance);
+            m_instance = nullptr;
+            return;
+        }
+        const QByteArray hostUtf8 = target.host.toUtf8();
         freerdp_settings_set_string(settings, FreeRDP_ServerHostname,
-                                    m_settings.host.toUtf8().constData());
+                                    hostUtf8.constData());
         freerdp_settings_set_uint32(settings, FreeRDP_ServerPort,
-                                    static_cast<quint32>(m_settings.port));
+                                    static_cast<quint32>(target.port));
         if (!m_settings.username.isEmpty())
             freerdp_settings_set_string(settings, FreeRDP_Username,
                                         m_settings.username.toUtf8().constData());
@@ -151,15 +226,21 @@ protected:
                                     static_cast<quint32>(m_settings.width));
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
                                     static_cast<quint32>(m_settings.height));
+        // 安全层协商：NLA(NTLM)/TLS/RDP 三层全开由服务端挑选，对应 Python 侧
+        // build_rdp_url 的 rdp+ntlm-password（NLA）语义。三者与 Authentication
+        // 同为 FreeRDP 3 的默认值，显式写出以免换库版本/发行版后默认值漂移。
+        freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE);
+        freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
+        freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE);
+        freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE);
+        // 32bpp 与下面 gdi_init 的 PIXEL_FORMAT_BGRX32 对齐
+        freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
         // 嵌入式面板渲染：软件 GDI，忽略自签证书（与 Python 侧堡垒机场景一致）
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
 
         if (!freerdp_connect(instance)) {
-            const quint32 err = freerdp_get_last_error(instance->context);
-            emit m_client->errorOccurred(
-                QStringLiteral("RDP 连接失败 (FreeRDP error 0x%1)")
-                    .arg(err, 8, 16, QLatin1Char('0')));
+            emit m_client->errorOccurred(connectErrorMessage(instance, target));
             freerdp_context_free(instance);
             freerdp_free(instance);
             m_instance = nullptr;
@@ -206,6 +287,32 @@ private:
         rdpContext context;
         FreeRdpWorker *worker;
     };
+
+    // 建连失败诊断：错误码之外带上 FreeRDP 的符号名与描述，DNS 类错误再补一句
+    // 实际送给解析器的主机串（加引号，肉眼可见夹带的空白/端口/多余字符）。
+    static QString connectErrorMessage(freerdp *instance, const RdpHostPort &target)
+    {
+        const quint32 err = freerdp_get_last_error(instance->context);
+        QString message = QStringLiteral("RDP 连接失败 %1:%2")
+                              .arg(target.host)
+                              .arg(target.port);
+        if (err == 0)
+            return message + QStringLiteral("（FreeRDP 未报告错误码）");
+
+        const char *name = freerdp_get_last_error_name(err);
+        message += QStringLiteral(" (%1 0x%2)")
+                       .arg(QString::fromUtf8(name ? name : "UNKNOWN"))
+                       .arg(err, 8, 16, QLatin1Char('0'));
+        const char *text = freerdp_get_last_error_string(err);
+        if (text && *text)
+            message += QLatin1Char('\n') + QString::fromUtf8(text);
+        if (err == FREERDP_ERROR_DNS_NAME_NOT_FOUND || err == FREERDP_ERROR_DNS_ERROR) {
+            message += QStringLiteral("\n主机名解析失败：实际送入解析器的地址为 "
+                                      "\"%1\"，请确认它是纯主机名或 IP。")
+                           .arg(target.host);
+        }
+        return message;
+    }
 
     // 建连完成：初始化软件 GDI，挂 EndPaint 钩子取帧。
     static BOOL postConnect(freerdp *instance)
@@ -377,13 +484,14 @@ QString RdpClient::resolveCommandLineArgs(QStringList *args) const
     if (program.isEmpty())
         return QString();
 
-    // 与 buildRdpUrl 一致：裸 IPv6 地址加方括号，再拼 host:port
+    // 与 buildRdpUrl 一致：主机串归一化后，裸 IPv6 地址加方括号，再拼 host:port
     // （同时覆盖 open 的 rdp:// URL、xfreerdp 的 /v: 与 mstsc 的 /v:）
-    QString host = m_settings.host.trimmed();
+    const RdpHostPort target = normalizeRdpHost(m_settings.host, m_settings.port);
+    QString host = target.host;
     if (host.count(QLatin1Char(':')) >= 2 && !host.startsWith(QLatin1Char('[')))
         host = QLatin1Char('[') + host + QLatin1Char(']');
     const QString hostPort =
-        QStringLiteral("%1:%2").arg(host).arg(m_settings.port);
+        QStringLiteral("%1:%2").arg(host).arg(target.port);
 
 #if defined(Q_OS_WIN)
     // mstsc /v:host:port [/f | /w:.. /h:..]

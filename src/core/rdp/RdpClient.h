@@ -59,6 +59,19 @@ struct RdpMouseEvent {
     quint16 flags = 0;  // PTR_FLAGS_* 组合
 };
 
+// 归一化后的连接目标（主机串内联端口优先于 RdpSettings::port）。
+struct RdpHostPort {
+    QString host;
+    int port = 3389;
+};
+
+// 主机串归一化：去首尾/内嵌空白与控制字符、剥离 rdp[+xxx]:// 前缀与 userinfo
+// 及路径尾巴、脱掉 IPv6 方括号，并拆出 "host:port" 的内联端口。
+// FreeRDP 把 ServerHostname 原样交给 getaddrinfo()，主机串里任何多余字符都会
+// 让建连失败在 ERRCONNECT_DNS_NAME_NOT_FOUND(0x00020005)——它发生在安全层
+// 协商之前，与 NLA/TLS 配置无关，故所有入口统一在此收敛。
+RdpHostPort normalizeRdpHost(const QString &rawHost, int defaultPort = 3389);
+
 // 对应Python: core/rdp/rdp_client.py::build_rdp_url
 // 构造 rdp[+ntlm-password]://[domain\user[:pwd]@]host:port URL（密码
 // percent-encoding，IPv6 主机加方括号）。C++ 侧仅用于日志/诊断展示。

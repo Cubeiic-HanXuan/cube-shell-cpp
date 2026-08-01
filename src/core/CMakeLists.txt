@@ -205,4 +205,20 @@ if(CUBESHELL_WITH_RDP)
     else()
         message(STATUS "FreeRDP not found: RDP falls back to xfreerdp/mstsc command line")
     endif()
+
+    # FreeRDP's config lists `cjson` as a bare library name in its
+    # INTERFACE_LINK_LIBRARIES, so MSVC receives `cjson.lib` without a path.
+    # PUBLIC: cube_core is static, the search path must reach the final link
+    # of cube-shell.exe.
+    if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+        target_link_directories(cube_core PUBLIC
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib"
+        )
+    elseif(DEFINED CMAKE_PREFIX_PATH)
+        # Fallback: resolve cjson to an absolute path ourselves.
+        find_library(CJSON_LIBRARY NAMES cjson)
+        if(CJSON_LIBRARY)
+            target_link_libraries(cube_core PRIVATE ${CJSON_LIBRARY})
+        endif()
+    endif()
 endif()

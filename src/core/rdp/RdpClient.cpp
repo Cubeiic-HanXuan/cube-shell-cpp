@@ -24,6 +24,7 @@
 #include <QMutexLocker>
 #include <QQueue>
 #include <QThread>
+#include <exception>
 #endif
 
 namespace cubeshell {
@@ -197,7 +198,25 @@ public:
     }
 
 protected:
+    // FreeRDP 的回调由库代码在本线程内调用，C++ 异常一旦穿过中间的 C 栈帧
+    // 逃出 run()，Qt 会直接 terminate 整个进程，UI 侧连一个错误信号都收不到。
+    // 此处兜住并转成 errorOccurred + disconnected，让面板能正常收尾。
     void run() override
+    {
+        try {
+            runConnection();
+        } catch (const std::exception &e) {
+            emit m_client->errorOccurred(QStringLiteral("RDP 内部异常：%1")
+                                             .arg(QString::fromLocal8Bit(e.what())));
+            emit m_client->disconnected();
+        } catch (...) {
+            emit m_client->errorOccurred(QStringLiteral("RDP 未知内部异常"));
+            emit m_client->disconnected();
+        }
+    }
+
+private:
+    void runConnection()
     {
         freerdp *instance = freerdp_new();
         if (!instance) {
@@ -205,7 +224,9 @@ protected:
             return;
         }
         instance->ContextSize = sizeof(WorkerContext);
+        instance->PreConnect = &FreeRdpWorker::preConnect;
         instance->PostConnect = &FreeRdpWorker::postConnect;
+        instance->PostDisconnect = &FreeRdpWorker::postDisconnect;
 
         if (!freerdp_context_new(instance)) {
             freerdp_free(instance);
@@ -335,13 +356,61 @@ private:
         return message;
     }
 
-    // 建连完成：初始化软件 GDI，挂 EndPaint 钩子取帧。
+    // 建连前回调：FreeRDP 3 在此期望客户端完成虚拟通道/插件加载。本客户端只做
+    // 基础桌面投屏（剪贴板等通道尚未接入，见 flushInputQueue 的 TODO），无通道
+    // 可加载，但回调本身仍需存在——settings 缺失等异常状态在此提前判掉。
+    static BOOL preConnect(freerdp *instance)
+    {
+        if (!instance || !instance->context || !instance->context->settings)
+            return FALSE;
+        return TRUE;
+    }
+
+    // 建连完成：初始化软件 GDI，挂 Begin/EndPaint 钩子取帧、DesktopResize 跟随改尺寸。
     static BOOL postConnect(freerdp *instance)
     {
         if (!gdi_init(instance, PIXEL_FORMAT_BGRX32))
             return FALSE;
-        instance->context->update->EndPaint = &FreeRdpWorker::endPaint;
+        rdpUpdate *update = instance->context->update;
+        // BeginPaint 必挂：fastpath_recv_updates() 无条件经 IFCALLRET 调用它，
+        // 留空指针会在服务端送来第一帧时崩在库内。
+        update->BeginPaint = &FreeRdpWorker::beginPaint;
+        update->EndPaint = &FreeRdpWorker::endPaint;
+        update->DesktopResize = &FreeRdpWorker::desktopResize;
         return TRUE;
+    }
+
+    // 断连清理：释放 postConnect 里申请的 GDI（此回调在通道拆除前被调用）。
+    static void postDisconnect(freerdp *instance)
+    {
+        if (!instance || !instance->context)
+            return;
+        gdi_free(instance);
+    }
+
+    // 每帧更新开始：复位失效区域累积状态，与下面的 endPaint 成对。
+    static BOOL beginPaint(rdpContext *context)
+    {
+        rdpGdi *gdi = context ? context->gdi : nullptr;
+        if (!gdi || !gdi->primary || !gdi->primary->hdc)
+            return FALSE;
+        gdi->primary->hdc->hwnd->invalid->null = TRUE;
+        gdi->primary->hdc->hwnd->ninvalid = 0;
+        return TRUE;
+    }
+
+    // 服务端改变桌面尺寸：settings 里的新尺寸已由核心写好，重建 GDI 缓冲。
+    // 用 gdi_resize 而非 gdi_free+gdi_init：后者会连带拆掉 postConnect 挂的
+    // 回调与 gfx/video 通道上下文，而本回调正跑在库的更新栈里。
+    static BOOL desktopResize(rdpContext *context)
+    {
+        rdpGdi *gdi = context ? context->gdi : nullptr;
+        rdpSettings *settings = context ? context->settings : nullptr;
+        if (!gdi || !settings)
+            return FALSE;
+        const UINT32 width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+        const UINT32 height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+        return gdi_resize(gdi, width, height);
     }
 
     // 服务端矩形更新落到 GDI 缓冲后回调：整帧转 QImage 发给面板。

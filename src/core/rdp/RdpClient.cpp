@@ -298,8 +298,13 @@ private:
         while (!isInterruptionRequested()) {
             const DWORD count = freerdp_get_event_handles(instance->context, handles,
                                                           MAXIMUM_WAIT_OBJECTS);
-            if (count == 0)
-                break;
+            // 句柄集合可能在建连收尾/通道重建的间隙短暂为空，此时 break 会让
+            // 循环在连接仍活着时提前退出，随后 freerdp_disconnect() 打在半成品
+            // 状态上直接崩在库内。改为短睡重试。
+            if (count == 0) {
+                QThread::msleep(10);
+                continue;
+            }
             const DWORD status = WaitForMultipleObjects(count, handles, FALSE, 100);
             if (status == WAIT_FAILED)
                 break;
@@ -314,6 +319,16 @@ private:
             if (freerdp_shall_disconnect(instance))
                 break;
 #endif
+        }
+
+        // 循环退出可能源于服务端断开/协议错误，先取出错误码报给 UI，再断连。
+        const UINT32 lastError = freerdp_get_last_error(instance->context);
+        if (lastError != FREERDP_ERROR_SUCCESS) {
+            const char *errName = freerdp_get_last_error_name(lastError);
+            emit m_client->errorOccurred(
+                QStringLiteral("RDP 连接断开: %1 (0x%2)")
+                    .arg(QString::fromUtf8(errName ? errName : "UNKNOWN"))
+                    .arg(lastError, 8, 16, QLatin1Char('0')));
         }
 
         freerdp_disconnect(instance);
@@ -385,14 +400,18 @@ private:
     {
         if (!instance || !instance->context)
             return;
-        gdi_free(instance);
+        // postConnect 里 gdi_init 失败时 gdi 为空，此时 gdi_free 会解空指针
+        if (instance->context->gdi)
+            gdi_free(instance);
     }
 
     // 每帧更新开始：复位失效区域累积状态，与下面的 endPaint 成对。
+    // primary->hdc->hwnd->invalid 这条指针链上任一环为空都会崩在库内，逐级校验。
     static BOOL beginPaint(rdpContext *context)
     {
         rdpGdi *gdi = context ? context->gdi : nullptr;
-        if (!gdi || !gdi->primary || !gdi->primary->hdc)
+        if (!gdi || !gdi->primary || !gdi->primary->hdc
+            || !gdi->primary->hdc->hwnd || !gdi->primary->hdc->hwnd->invalid)
             return FALSE;
         gdi->primary->hdc->hwnd->invalid->null = TRUE;
         gdi->primary->hdc->hwnd->ninvalid = 0;
@@ -402,15 +421,29 @@ private:
     // 服务端改变桌面尺寸：settings 里的新尺寸已由核心写好，重建 GDI 缓冲。
     // 用 gdi_resize 而非 gdi_free+gdi_init：后者会连带拆掉 postConnect 挂的
     // 回调与 gfx/video 通道上下文，而本回调正跑在库的更新栈里。
+    // gdi_resize 在 3.28 之前的 FreeRDP 3 头里未导出（如 Windows vcpkg 的 3.26），
+    // 低版本回退到 gdi_free + gdi_init。
     static BOOL desktopResize(rdpContext *context)
     {
-        rdpGdi *gdi = context ? context->gdi : nullptr;
-        rdpSettings *settings = context ? context->settings : nullptr;
+        if (!context)
+            return FALSE;
+        rdpGdi *gdi = context->gdi;
+        rdpSettings *settings = context->settings;
         if (!gdi || !settings)
             return FALSE;
         const UINT32 width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
         const UINT32 height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+#if defined(FREERDP_VERSION_MAJOR) && (FREERDP_VERSION_MAJOR > 3 || \
+    (FREERDP_VERSION_MAJOR == 3 && FREERDP_VERSION_MINOR >= 28))
         return gdi_resize(gdi, width, height);
+#else
+        Q_UNUSED(width);
+        Q_UNUSED(height);
+        gdi_free(context->instance);
+        if (!gdi_init(context->instance, PIXEL_FORMAT_BGRX32))
+            return FALSE;
+        return TRUE;
+#endif
     }
 
     // 服务端矩形更新落到 GDI 缓冲后回调：整帧转 QImage 发给面板。
@@ -418,6 +451,8 @@ private:
     // result.emit(RDPImage)（帧合并/60fps 节流由面板侧处理，同 Python 版）
     static BOOL endPaint(rdpContext *context)
     {
+        if (!context)
+            return TRUE;
         rdpGdi *gdi = context->gdi;
         if (!gdi || !gdi->primary_buffer)
             return TRUE;

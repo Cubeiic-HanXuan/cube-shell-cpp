@@ -13,15 +13,61 @@
 #include <cstring>
 
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+
+#ifdef Q_OS_WIN
+// Windows 没有 mmap/unistd.h：文件映射用 Win32 API，低级 IO 用 CRT 的 <io.h>。
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <io.h>
+#include <windows.h>
+#else
+#include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #include <QDebug>
 
 #include "CharacterColor.h"
 
 namespace Konsole {
+
+namespace {
+
+// POSIX 低级 IO 在 MSVC 上只有下划线前缀版本，且未定义 ssize_t，
+// 这里统一包装供 HistoryFile 使用。
+inline qint64 histSeek(int fd, int offset)
+{
+#ifdef Q_OS_WIN
+    return ::_lseek(fd, offset, SEEK_SET);
+#else
+    return ::lseek(fd, offset, SEEK_SET);
+#endif
+}
+
+inline qint64 histWrite(int fd, const void *buf, int len)
+{
+#ifdef Q_OS_WIN
+    return ::_write(fd, buf, static_cast<unsigned int>(len));
+#else
+    return ::write(fd, buf, static_cast<size_t>(len));
+#endif
+}
+
+inline qint64 histRead(int fd, void *buf, int len)
+{
+#ifdef Q_OS_WIN
+    return ::_read(fd, buf, static_cast<unsigned int>(len));
+#else
+    return ::read(fd, buf, static_cast<size_t>(len));
+#endif
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Minimal BlockArray interface (module not yet ported — BlockArray.h/.cpp).
@@ -84,6 +130,27 @@ void HistoryFile::map()
         return;
 
     // 对应C++: fileMap = (char*)mmap(nullptr, length, PROT_READ, MAP_PRIVATE, ion, 0);
+#ifdef Q_OS_WIN
+    // Win32 等价实现：CreateFileMapping + MapViewOfFile（只读视图）。
+    void *mapResult = nullptr;
+    const HANDLE file = reinterpret_cast<HANDLE>(::_get_osfhandle(ion));
+    if (file != INVALID_HANDLE_VALUE) {
+        const HANDLE mapping = ::CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (mapping) {
+            mapResult = ::MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, static_cast<SIZE_T>(length));
+            // 视图自身持有映射对象的引用，句柄可以立即关闭。
+            ::CloseHandle(mapping);
+        }
+    }
+    if (!mapResult) {
+        // 映射失败，回退到 read/seek 组合
+        readWriteBalance = 0;
+        fileMap = nullptr;
+        qWarning() << "mmap history file failed: win32 error" << ::GetLastError();
+    } else {
+        fileMap = static_cast<uchar *>(mapResult);
+    }
+#else
     void *mapResult = mmap(nullptr, static_cast<size_t>(length), PROT_READ, MAP_PRIVATE, ion, 0);
     if (mapResult == MAP_FAILED) {
         // mmap 失败,回退到 read/seek 组合
@@ -93,13 +160,18 @@ void HistoryFile::map()
     } else {
         fileMap = static_cast<uchar *>(mapResult);
     }
+#endif
 }
 
 // 对应C++: void HistoryFile::unmap()
 void HistoryFile::unmap()
 {
     if (fileMap) {
+#ifdef Q_OS_WIN
+        ::UnmapViewOfFile(fileMap);
+#else
         munmap(fileMap, static_cast<size_t>(length));
+#endif
         fileMap = nullptr;
     }
 }
@@ -118,11 +190,11 @@ void HistoryFile::add(const unsigned char *bytes, int len)
 
     readWriteBalance++;
 
-    if (::lseek(ion, length, SEEK_SET) == -1) {
+    if (histSeek(ion, length) == -1) {
         qWarning() << "HistoryFile::add lseek error:" << strerror(errno);
         return;
     }
-    ssize_t written = ::write(ion, bytes, static_cast<size_t>(len));
+    const qint64 written = histWrite(ion, bytes, len);
     if (written < 0) {
         qWarning() << "HistoryFile::add write error:" << strerror(errno);
         return;
@@ -148,11 +220,11 @@ void HistoryFile::get(unsigned char *bytes, int len, int loc)
         std::memcpy(bytes, fileMap + loc, static_cast<size_t>(len));
     } else {
         // 传统 seek+read 方式
-        if (::lseek(ion, loc, SEEK_SET) == -1) {
+        if (histSeek(ion, loc) == -1) {
             qWarning() << "HistoryFile::get lseek error:" << strerror(errno);
             return;
         }
-        ssize_t rc = ::read(ion, bytes, static_cast<size_t>(len));
+        const qint64 rc = histRead(ion, bytes, len);
         if (rc < 0)
             qWarning() << "HistoryFile::get read error:" << strerror(errno);
     }

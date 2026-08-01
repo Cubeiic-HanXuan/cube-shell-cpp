@@ -7,6 +7,17 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 
+#ifdef Q_OS_WIN
+// MAX_PATH / UINT / GetSystemDirectoryW 由 Win32 API 提供。
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace Konsole {
 
 // 对应C++: static const char DUMMYENV[] = "_KPROCESS_DUMMY_";

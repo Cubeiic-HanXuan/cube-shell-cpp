@@ -173,6 +173,9 @@ if(CUBESHELL_WITH_RDP)
     target_compile_definitions(cube_core PUBLIC CUBESHELL_WITH_RDP=1)
 
     find_package(FreeRDP QUIET)
+    # FreeRDP links cJSON but does not export it transitively in static builds
+    # (Windows/vcpkg), so resolve it separately and link it explicitly below.
+    find_package(cJSON QUIET)
     if(NOT FreeRDP_FOUND)
         # Distro packages ship pkg-config files rather than a CMake config.
         find_package(PkgConfig QUIET)
@@ -185,6 +188,11 @@ if(CUBESHELL_WITH_RDP)
         message(STATUS "FreeRDP found (CMake config): RDP uses the library backend")
         target_compile_definitions(cube_core PRIVATE CUBESHELL_HAVE_FREERDP=1)
         target_link_libraries(cube_core PRIVATE freerdp winpr)
+        if(cJSON_FOUND)
+            target_link_libraries(cube_core PRIVATE cJSON::cJSON)
+        elseif(TARGET cjson)
+            target_link_libraries(cube_core PRIVATE cjson)
+        endif()
     elseif(FREERDP_FOUND)
         message(STATUS "FreeRDP found (pkg-config ${FREERDP_VERSION}): RDP uses the library backend")
         target_compile_definitions(cube_core PRIVATE CUBESHELL_HAVE_FREERDP=1)

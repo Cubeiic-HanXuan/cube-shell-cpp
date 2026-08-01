@@ -6,6 +6,7 @@
     "openssl",
     "yaml-cpp",
     "zlib",
-    "freerdp"
+    "freerdp",
+    "cjson"
   ]
 }

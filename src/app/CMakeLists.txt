@@ -30,6 +30,12 @@ set_target_properties(cube-shell PROPERTIES
     WIN32_EXECUTABLE TRUE
 )
 
+# MSVC：链接时生成 cube-shell.map（与 exe 同目录）。Release 崩溃只有模块偏移可用时，
+# 靠这张地址→函数名映射表定位崩溃函数。
+if(MSVC)
+    target_link_options(cube-shell PRIVATE "/MAP")
+endif()
+
 # --- 运行期资源部署（→ bundle Resources / 可执行文件旁 resources/） ---
 # 资源来源两处：
 #   * cpp/resources/            —— icons/ 与 translations/（非 qtermwidget 资源）

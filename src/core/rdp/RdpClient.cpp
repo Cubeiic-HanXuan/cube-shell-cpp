@@ -12,6 +12,10 @@
 // 否则 winsock.h 先被拉进来会与 winsock2 的宏/结构体定义冲突。
 #ifdef Q_OS_WIN
 #  include <winsock2.h>
+#  include <windows.h>
+// 异常处理器里只能用 C 风格 IO（见下），用 <stdio.h> 而非 <cstdio> 以确保
+// fopen/fprintf 落在全局命名空间。
+#  include <stdio.h>
 #endif
 
 #ifdef CUBESHELL_HAVE_FREERDP
@@ -55,7 +59,9 @@ static void ensureFreeRDPInit()
 // 【临时调试代码，定位 0xc0000005 后删除】
 // 崩溃发生在进程内且无栈回溯可用，改用落盘日志定位：每个关键点写一行并
 // 立即 flush，崩溃后日志最后一行即为最后执行到的位置。
-static void rdpLog(const QString &msg)
+// 日志路径集中一处算好：Windows 的向量化异常处理器里不能构造 QString/QFile
+// （异常上下文中走 Qt 分配器不安全），需要同一份路径的纯 C 串副本。
+static const QString &rdpLogPath()
 {
     static const QString path = [] {
         // 目录不存在时 QFile::open 会静默失败，表现为“没有日志”而非崩溃信息，
@@ -65,7 +71,12 @@ static void rdpLog(const QString &msg)
             return QStringLiteral("C:/dev/rdp_debug.log");
         return QDir::temp().filePath(QStringLiteral("rdp_debug.log"));
     }();
-    QFile f(path);
+    return path;
+}
+
+static void rdpLog(const QString &msg)
+{
+    QFile f(rdpLogPath());
     if (f.open(QIODevice::Append | QIODevice::Text)) {
         QTextStream ts(&f);
         ts << QDateTime::currentDateTime().toString(Qt::ISODateWithMs)
@@ -73,7 +84,43 @@ static void rdpLog(const QString &msg)
         ts.flush();
     }
 }
-#endif
+
+#ifdef Q_OS_WIN
+// 0xc0000005 是 SEH 异常，C++ 的 catch(...) 抓不到；__try/__except 又不允许与
+// 带析构的局部对象同处一个函数（runConnection 里满是 QString/QByteArray）。
+// 故改挂向量化异常处理器：它在异常分发的最早阶段被调用，返回
+// EXCEPTION_CONTINUE_SEARCH 不改变原有处理流程，只把异常码与出错地址落盘，
+// 崩溃后即可从日志读到确切的故障指令地址。
+// 处理器运行在异常上下文中，不可使用 Qt 容器与堆分配，全程 C 风格 IO。
+// 注意 VEH 是进程级且先于任何 handler 收到“首次机会”异常，日志里可能混入
+// 被正常捕获处理的异常（如 C++ 抛出的 0xE06D7363），只有崩溃后紧跟进程消失
+// 的那条才是真正的现场；故只在 freerdp_connect 前后短暂安装。
+static char g_rdpLogPathAnsi[MAX_PATH] = {};
+
+static LONG WINAPI rdpVectoredHandler(EXCEPTION_POINTERS *ep)
+{
+    if (ep && ep->ExceptionRecord && g_rdpLogPathAnsi[0]) {
+        FILE *f = fopen(g_rdpLogPathAnsi, "a");
+        if (f) {
+            fprintf(f, "!!! VECTORED EXCEPTION: code=0x%08lX addr=%p\n",
+                    static_cast<unsigned long>(ep->ExceptionRecord->ExceptionCode),
+                    ep->ExceptionRecord->ExceptionAddress);
+            fflush(f);
+            fclose(f);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// 处理器安装：路径转换必须在安装之前、异常之外完成（见上）。
+static void *rdpInstallVectoredHandler()
+{
+    const QByteArray local = rdpLogPath().toLocal8Bit();
+    qstrncpy(g_rdpLogPathAnsi, local.constData(), sizeof(g_rdpLogPathAnsi));
+    return AddVectoredExceptionHandler(1, &rdpVectoredHandler);
+}
+#endif // Q_OS_WIN
+#endif // CUBESHELL_HAVE_FREERDP
 
 // ---------------------------------------------------------------------------
 // normalizeRdpHost
@@ -252,6 +299,28 @@ private:
     void runConnection()
     {
         rdpLog(QStringLiteral("runConnection: start"));
+#ifdef CUBESHELL_HAVE_FREERDP_CLIENT
+        // 通道表、默认 settings、监视器数组等内部状态在 FreeRDP 3 里由高层客户端
+        // API 建立：裸 freerdp_new() + freerdp_context_new() 只得到半成品上下文，
+        // PreConnect 返回后核心紧接着做 monitor 校验与 utils_reload_channels()，
+        // 会崩在库内（0xc0000005）。故优先走 freerdp_client_context_new()，它还会
+        // 把 instance->LoadChannels 挂成 freerdp_client_load_channels。
+        RDP_CLIENT_ENTRY_POINTS entryPoints = {};
+        entryPoints.Size = sizeof(RDP_CLIENT_ENTRY_POINTS);
+        entryPoints.Version = RDP_CLIENT_INTERFACE_VERSION;
+        entryPoints.ContextSize = sizeof(WorkerContext);
+        // GlobalInit/GlobalUninit 与 ClientNew/ClientFree 库内均以 IFCALL 调用，
+        // 本客户端没有额外的全局/实例级初始化需求，留空即可。
+        rdpContext *context = freerdp_client_context_new(&entryPoints);
+        if (!context) {
+            rdpLog(QStringLiteral("runConnection: freerdp_client_context_new FAILED"));
+            emit m_client->errorOccurred(QStringLiteral("freerdp_client_context_new 失败"));
+            return;
+        }
+        rdpLog(QStringLiteral("runConnection: freerdp_client_context_new OK"));
+        freerdp *instance = context->instance;
+#else
+        // 构建里没有 freerdp-client（无高层 API 可链接）时退回低层建栈路径。
         freerdp *instance = freerdp_new();
         if (!instance) {
             rdpLog(QStringLiteral("runConnection: freerdp_new FAILED"));
@@ -260,6 +329,16 @@ private:
         }
         rdpLog(QStringLiteral("runConnection: freerdp_new OK"));
         instance->ContextSize = sizeof(WorkerContext);
+        if (!freerdp_context_new(instance)) {
+            rdpLog(QStringLiteral("runConnection: freerdp_context_new FAILED"));
+            freerdp_free(instance);
+            emit m_client->errorOccurred(QStringLiteral("freerdp_context_new 失败"));
+            return;
+        }
+        rdpLog(QStringLiteral("runConnection: context_new OK"));
+#endif
+        // 回调一律在上下文建好之后挂：高层 API 在 ContextNew 阶段会写入
+        // client_cli_* 系列默认回调（命令行交互式凭据/证书确认），先挂会被覆盖。
         instance->PreConnect = &FreeRdpWorker::preConnect;
         instance->PostConnect = &FreeRdpWorker::postConnect;
         instance->PostDisconnect = &FreeRdpWorker::postDisconnect;
@@ -273,14 +352,8 @@ private:
         instance->VerifyCertificateEx = &FreeRdpWorker::verifyCertificateEx;
         instance->VerifyChangedCertificateEx = &FreeRdpWorker::verifyChangedCertificateEx;
 
-        if (!freerdp_context_new(instance)) {
-            rdpLog(QStringLiteral("runConnection: freerdp_context_new FAILED"));
-            freerdp_free(instance);
-            emit m_client->errorOccurred(QStringLiteral("freerdp_context_new 失败"));
-            return;
-        }
-        rdpLog(QStringLiteral("runConnection: context_new OK"));
-        reinterpret_cast<WorkerContext *>(instance->context)->worker = this;
+        WorkerContext *wctx = reinterpret_cast<WorkerContext *>(instance->context);
+        wctx->worker = this;
         m_instance = instance;
 
         // 连接参数（对应 Python 侧 build_rdp_url 携带的 host/port/user/pwd/domain
@@ -293,8 +366,7 @@ private:
             rdpLog(QStringLiteral("runConnection: empty host, abort"));
             emit m_client->errorOccurred(
                 QStringLiteral("RDP 主机地址为空（原始值：\"%1\"）").arg(m_settings.host));
-            freerdp_context_free(instance);
-            freerdp_free(instance);
+            releaseInstance(instance);
             m_instance = nullptr;
             return;
         }
@@ -312,10 +384,55 @@ private:
         if (!m_settings.domain.isEmpty())
             freerdp_settings_set_string(settings, FreeRDP_Domain,
                                         m_settings.domain.toUtf8().constData());
+        // 分辨率：0/负数或越界值同样会被上述 monitor 校验拿去构造监视器定义，
+        // 故夹到协议允许区间并对齐（宽 4 的倍数、高 2 的倍数，与
+        // main_window::computeRdpTargetResolution 一致），再显式写入。
+        int width = m_settings.width > 0 ? m_settings.width : 1920;
+        int height = m_settings.height > 0 ? m_settings.height : 1080;
+        width = qBound(200, width, 8192) & ~3;
+        height = qBound(200, height, 8192) & ~1;
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,
-                                    static_cast<quint32>(m_settings.width));
+                                    static_cast<quint32>(width));
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
-                                    static_cast<quint32>(m_settings.height));
+                                    static_cast<quint32>(height));
+        // 32bpp 与下面 gdi_init 的 PIXEL_FORMAT_BGRX32 对齐
+        freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
+        // 监视器：单屏、非全屏，且监视器表自己预填好，不把分配交给库。
+        // PreConnect 返回后核心依次跑 freerdp_settings_enforce_monitor_exists()
+        // 与 freerdp_settings_check_client_after_preconnect()，后者按 MonitorCount
+        // 逐条取 MonitorDefArray[i] 直接解引用（越界时 get_pointer_array 返回
+        // nullptr，库内无判空），故这里让 MonitorCount 与数组长度严格一致：
+        // set_pointer_len 的 len 是元素个数（data 传 nullptr 即按零值分配），
+        // set_pointer_array 受 MonitorDefArraySize 边界检查，写不进去时返回 FALSE。
+        freerdp_settings_set_bool(settings, FreeRDP_UseMultimon, FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_Fullscreen, FALSE);
+        rdpMonitor monitor = {};
+        monitor.x = 0;
+        monitor.y = 0;
+        monitor.width = width;
+        monitor.height = height;
+        monitor.is_primary = TRUE;
+        monitor.orig_screen = 0;
+        // 缩放因子写死 100（[MS-RDPBCGR] 要求 desktopScaleFactor ∈ [100,500]），
+        // 与本客户端不做 HiDPI 缩放的 GDI 渲染路径一致。
+        monitor.attributes.desktopScaleFactor = 100;
+        monitor.attributes.deviceScaleFactor = 100;
+        const BOOL monitorReady =
+            freerdp_settings_set_pointer_len(settings, FreeRDP_MonitorDefArray, nullptr, 1)
+            && freerdp_settings_set_pointer_array(settings, FreeRDP_MonitorDefArray, 0, &monitor);
+        // 预填失败就退回 0：库在非全屏非多屏下仍会按桌面尺寸重建单监视器，
+        // 别留下 count=1 却没有对应条目的不一致状态。
+        freerdp_settings_set_uint32(settings, FreeRDP_MonitorCount, monitorReady ? 1 : 0);
+        rdpLog(QStringLiteral("runConnection: monitor configured: %1x%2 (%3)")
+                   .arg(width)
+                   .arg(height)
+                   .arg(monitorReady ? QStringLiteral("MonitorCount=1")
+                                     : QStringLiteral("prefill FAILED, MonitorCount=0")));
+        // 图形管线（EGFX/H.264）显式关掉：本客户端只挂了 GDI 的 Begin/EndPaint，
+        // 未初始化 gfx 编解码上下文，通道一旦协商成功，后续按空上下文取用即崩。
+        freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
         // 安全层协商：NLA(NTLM)/TLS/RDP 三层全开由服务端挑选，对应 Python 侧
         // build_rdp_url 的 rdp+ntlm-password（NLA）语义。三者与 Authentication
         // 同为 FreeRDP 3 的默认值，显式写出以免换库版本/发行版后默认值漂移。
@@ -323,20 +440,27 @@ private:
         freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE);
-        // 32bpp 与下面 gdi_init 的 PIXEL_FORMAT_BGRX32 对齐
-        freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
         // 嵌入式面板渲染：软件 GDI，忽略自签证书（与 Python 侧堡垒机场景一致）
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
 
-        rdpLog(QStringLiteral("runConnection: settings configured, calling freerdp_connect"));
+        rdpLog(QStringLiteral("runConnection: settings configured w=%1 h=%2, "
+                              "about to call freerdp_connect NOW")
+                   .arg(width)
+                   .arg(height));
+#ifdef Q_OS_WIN
+        void *veh = rdpInstallVectoredHandler();
+#endif
         const BOOL connected = freerdp_connect(instance);
+#ifdef Q_OS_WIN
+        if (veh)
+            RemoveVectoredExceptionHandler(veh);
+#endif
         rdpLog(QStringLiteral("runConnection: freerdp_connect returned %1")
                    .arg(connected ? QStringLiteral("TRUE") : QStringLiteral("FALSE")));
         if (!connected) {
             emit m_client->errorOccurred(connectErrorMessage(instance, target));
-            freerdp_context_free(instance);
-            freerdp_free(instance);
+            releaseInstance(instance);
             m_instance = nullptr;
             return;
         }
@@ -408,8 +532,7 @@ private:
         rdpLog(QStringLiteral("runConnection: calling freerdp_disconnect"));
         freerdp_disconnect(instance);
         rdpLog(QStringLiteral("runConnection: freerdp_disconnect done"));
-        freerdp_context_free(instance);
-        freerdp_free(instance);
+        releaseInstance(instance);
         m_instance = nullptr;
         rdpLog(QStringLiteral("runConnection: cleanup done, emitting disconnected"));
         emit m_client->disconnected();
@@ -417,10 +540,32 @@ private:
 
 private:
     // FreeRDP 实例扩展上下文：附带 worker 回指针供静态回调取回 this。
+    // 走高层 API 时首成员必须是 rdpClientContext（库内按此布局访问 thread/
+    // 触控等字段）；rdpContext 又是 rdpClientContext 的首成员，故回调里的
+    // rdpContext* → WorkerContext* 强转在两种布局下都成立。
     struct WorkerContext {
+#ifdef CUBESHELL_HAVE_FREERDP_CLIENT
+        rdpClientContext clientContext;
+#else
         rdpContext context;
+#endif
         FreeRdpWorker *worker;
     };
+
+    // 上下文销毁：与创建路径成对。高层 API 建出的实例须走
+    // freerdp_client_context_free()（内部含 pClientEntryPoints 释放与
+    // GlobalUninit 调用），低层路径仍是 context_free + free 组合。
+    static void releaseInstance(freerdp *instance)
+    {
+        if (!instance)
+            return;
+#ifdef CUBESHELL_HAVE_FREERDP_CLIENT
+        freerdp_client_context_free(instance->context);
+#else
+        freerdp_context_free(instance);
+        freerdp_free(instance);
+#endif
+    }
 
     // 建连失败诊断：错误码之外带上 FreeRDP 的符号名与描述，DNS 类错误再补一句
     // 实际送给解析器的主机串（加引号，肉眼可见夹带的空白/端口/多余字符）。
@@ -448,10 +593,12 @@ private:
         return message;
     }
 
-    // 建连前回调：FreeRDP 3 在此期望客户端完成虚拟通道/插件加载。本客户端只做
-    // 基础桌面投屏（剪贴板等通道尚未接入，见 flushInputQueue 的 TODO），但 settings
-    // 默认开启的通道仍须在此登记，否则库内后续按通道表取用时会拿到空指针；
-    // settings 缺失等异常状态同样在此提前判掉。
+    // 建连前回调：只做 settings 等基础状态校验。通道加载不在此处做——
+    // freerdp_client_context_new() 已把 instance->LoadChannels 挂成
+    // freerdp_client_load_channels，核心在 PreConnect 返回后的
+    // utils_reload_channels() 里会先释放旧通道、重建通道对象再调它一次；
+    // 若这里也调一次，等于双重初始化，第一次留下的状态在库内 free+重建后失效，
+    // Windows 上会崩在库内（0xc0000005）。
     static BOOL preConnect(freerdp *instance)
     {
         rdpLog(QStringLiteral("preConnect called"));
@@ -459,13 +606,6 @@ private:
             rdpLog(QStringLiteral("preConnect: null instance/context/settings, returning FALSE"));
             return FALSE;
         }
-        // 通道加载失败不影响纯桌面投屏，记一行日志后继续建连。
-#ifdef CUBESHELL_HAVE_FREERDP_CLIENT
-        rdpLog(QStringLiteral("preConnect: loading channels"));
-        if (!freerdp_client_load_channels(instance)) {
-            rdpLog(QStringLiteral("preConnect: freerdp_client_load_channels failed (non-fatal)"));
-        }
-#endif
         rdpLog(QStringLiteral("preConnect returning TRUE"));
         return TRUE;
     }

@@ -287,30 +287,101 @@ void Pty::dataReceived()
 
 #else // Q_OS_WIN
 
-// TODO(win32): Pty over ConPTY. The Windows session layer drives ConPTY and
-// forwards receivedData / sendData; this stub keeps the interface present.
+#include "ConPtyProcess.h"
+#include <QDir>
+#include <QHash>
+
 namespace Konsole {
-Pty::Pty(QObject *parent) : KPtyProcess(parent) {}
-Pty::Pty(int ptyMasterFd, QObject *parent) : KPtyProcess(ptyMasterFd, parent) {}
-Pty::~Pty() {}
-void Pty::init() {}
-int Pty::start(const QString &, const QStringList &, const QStringList &, int, bool) { return -1; }
+
+// Associate ConPtyProcess instances with Pty objects without modifying Pty.h
+static QHash<Pty*, ConPtyProcess*> s_conptyMap;
+
+Pty::Pty(QObject *parent) : KPtyProcess(parent) { init(); }
+Pty::Pty(int, QObject *parent) : KPtyProcess(parent) { init(); }
+
+void Pty::init()
+{
+    // Windows path: ConPtyProcess handles all I/O, no KPtyDevice needed
+}
+
+Pty::~Pty()
+{
+    auto *cp = s_conptyMap.take(this);
+    delete cp;
+}
+
+int Pty::start(const QString &program, const QStringList &programArguments,
+               const QStringList &environment, int /*winid*/, bool /*addToUtmp*/)
+{
+    auto *cp = new ConPtyProcess(this);
+    s_conptyMap[this] = cp;
+
+    // Forward ConPtyProcess signals to Pty signals
+    connect(cp, &ConPtyProcess::readyRead, this, [this](const QByteArray &data) {
+        Q_EMIT receivedData(data.constData(), data.size());
+    });
+    connect(cp, &ConPtyProcess::finished, this, [this](int code) {
+        // Session::done 会查询 _shellProcess->exitStatus(),而 QProcess::start()
+        // 从未调用,故走独立信号而非 QProcess::finished
+        Q_EMIT processExited(code, QProcess::NormalExit);
+    });
+
+    QString workDir = workingDirectory();
+    if (workDir.isEmpty())
+        workDir = QDir::homePath();
+
+    // Build program + args for ConPTY
+    // programArguments[0] is traditionally the program name itself
+    if (!cp->start(program, programArguments, environment, workDir,
+                   m_windowColumns > 0 ? m_windowColumns : 80,
+                   m_windowLines > 0 ? m_windowLines : 24))
+        return -1;
+
+    return 0;
+}
+
+void Pty::sendData(const char *data, int length)
+{
+    if (auto *cp = s_conptyMap.value(this))
+        cp->write(data, length);
+}
+
+void Pty::setWindowSize(int lines, int cols)
+{
+    m_windowLines = lines;
+    m_windowColumns = cols;
+    if (auto *cp = s_conptyMap.value(this))
+        cp->resize(cols, lines);
+}
+
 void Pty::setWriteable(bool) {}
+
 void Pty::setFlowControlEnabled(bool enable) { m_xonXoff = enable; }
-bool Pty::flowControlEnabled() const { return false; }
+bool Pty::flowControlEnabled() const { return m_xonXoff; }
+
 void Pty::setUtf8Mode(bool enable) { m_utf8 = enable; }
+
 void Pty::setErase(char eraseChar) { m_eraseChar = eraseChar; }
 char Pty::erase() const { return m_eraseChar; }
+
 void Pty::setEmptyPTYProperties() {}
 void Pty::addEnvironmentVariables(const QStringList &) {}
 void Pty::applyTerminalSettings() {}
-void Pty::setWindowSize(int lines, int cols) { m_windowLines = lines; m_windowColumns = cols; }
+
 QSize Pty::windowSize() const { return QSize(m_windowColumns, m_windowLines); }
+
 int Pty::foregroundProcessGroup() const { return 0; }
-void Pty::closePty() {}
+
+void Pty::closePty()
+{
+    if (auto *cp = s_conptyMap.value(this))
+        cp->terminate();
+}
+
 void Pty::lockPty(bool) {}
-void Pty::sendData(const char *, int) {}
-void Pty::dataReceived() {}
+
+void Pty::dataReceived() {} // Not used on Windows; ConPtyProcess::readyRead drives data
+
 } // namespace Konsole
 
 #endif // Q_OS_WIN

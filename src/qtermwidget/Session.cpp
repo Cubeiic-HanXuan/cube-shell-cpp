@@ -78,7 +78,11 @@ Session::Session(QObject *parent)
     // connect(_emulation, SIGNAL(useUtf8Request(bool)), _shellProcess, SLOT(setUtf8Mode(bool)));
     connect(_emulation, &Emulation::useUtf8Request, _shellProcess, &Pty::setUtf8Mode);
     // connect(_shellProcess, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(done(int,QProcess::ExitStatus)));
+#ifdef Q_OS_WIN
+    connect(_shellProcess, &Pty::processExited, this, &Session::done);
+#else
     connect(_shellProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &Session::done);
+#endif
 
     // ---- 监控定时器 (对应 _setupMonitorTimer) ----
     // 对应C++: _monitorTimer = new QTimer(this);

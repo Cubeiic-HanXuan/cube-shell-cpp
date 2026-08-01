@@ -72,6 +72,12 @@ endif()
 
 add_library(qtermwidget STATIC ${QTERMWIDGET_SOURCES})
 
+# Windows 走 ConPTY（CreatePseudoConsole 位于 kernel32.lib，MSVC 默认链接，
+# 无需额外 target_link_libraries）；其余平台继续使用 KPty 系列实现。
+if(WIN32)
+    target_sources(qtermwidget PRIVATE ConPtyProcess.cpp)
+endif()
+
 target_include_directories(qtermwidget PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )

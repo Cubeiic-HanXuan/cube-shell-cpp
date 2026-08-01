@@ -81,6 +81,10 @@ Q_SIGNALS:
     // 对应C++: void receivedData(const char* buffer, int length)
     void receivedData(const char *buffer, int length);
 
+    // Windows(ConPTY) 下进程退出通知;不复用 QProcess::finished,
+    // 因为 QProcess::start() 从未被调用,其 state()/exitStatus() 无效。
+    void processExited(int exitCode, QProcess::ExitStatus exitStatus);
+
 private Q_SLOTS:
     // 对应C++: void dataReceived()
     void dataReceived();

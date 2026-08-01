@@ -1,0 +1,161 @@
+// main.cpp — 应用入口：完整启动流程。
+// 对应Python: cube-shell.py 末尾 `if __name__ == "__main__":` 启动段
+//
+// 流程：GlobalState/theme.json 加载 → 主题应用 → 语言加载 → 单实例检查
+// (QLockFile) → 解析命令行 jms:// URL → 创建主窗口 → 处理 URL 事件 →
+// 进入事件循环。macOS 下额外安装 QFileOpenEvent 过滤器处理 URL Scheme。
+
+#include <QApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QFileOpenEvent>
+#include <QIcon>
+#include <QLockFile>
+#include <QMessageBox>
+#include <QStandardPaths>
+
+#ifndef Q_OS_WIN
+#include <csignal>
+#endif
+
+#include "main_window.h"
+#include "LanguageManager.h"
+
+#include "config/GlobalState.h"
+#include "util/ThemeManager.h"
+
+namespace {
+
+// macOS URL Scheme 事件（jms:// 由系统经 QFileOpenEvent 投递给运行中的应用）。
+// 对应Python: cube-shell.py::UrlSchemeApplication.event(QFileOpenEvent)
+class UrlOpenFilter : public QObject {
+public:
+    explicit UrlOpenFilter(cubeshell::MainWindow *window, QObject *parent = nullptr)
+        : QObject(parent)
+        , m_window(window)
+    {
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::FileOpen) {
+            auto *openEvent = static_cast<QFileOpenEvent *>(event);
+            const QString url = openEvent->url().isValid()
+                                    ? openEvent->url().toString()
+                                    : openEvent->file();
+            if (!url.isEmpty() && m_window) {
+                m_window->handleUrl(url);
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    cubeshell::MainWindow *m_window;
+};
+
+// theme.json 查找：用户配置目录优先，其次工程 conf/（与 Python 侧共用一份）。
+// 对应Python: function/util.py 里 THEME 的加载路径
+QString locateThemeJson()
+{
+    const QStringList candidates = {
+        cubeshell::GlobalState::configFilePath(QStringLiteral("theme.json")),
+        QDir::currentPath() + QStringLiteral("/conf/theme.json"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/conf/theme.json"),
+        // cpp/build/bin/xx.app/Contents/MacOS → 工程根/conf
+        QCoreApplication::applicationDirPath()
+            + QStringLiteral("/../../../../../conf/theme.json"),
+    };
+    for (const QString &path : candidates) {
+        if (QFileInfo::exists(path))
+            return QFileInfo(path).absoluteFilePath();
+    }
+    // 不存在时仍返回配置目录路径（saveTheme 落在这里）。
+    return candidates.first();
+}
+
+// 命令行里找 jms:// / ssh:// / cubeshell:// URL（含 -url 标志形式）。
+// 对应Python: core/url_dispatch/bastion_client.py::scan_argv_for_url
+QString urlFromArguments(const QStringList &args)
+{
+    for (int i = 1; i < args.size(); ++i) {
+        const QString &arg = args.at(i);
+        if (arg == QLatin1String("-url") && i + 1 < args.size())
+            return args.at(i + 1);
+        if (arg.startsWith(QLatin1String("jms://"))
+                || arg.startsWith(QLatin1String("ssh://"))
+                || arg.startsWith(QLatin1String("cubeshell://")))
+            return arg;
+#ifdef CUBESHELL_WITH_RDP
+        // rdp:// / rdp+ntlm-password:// → MainWindow::handleUrl 直开 RDP 标签
+        if (arg.startsWith(QLatin1String("rdp://"))
+                || arg.startsWith(QLatin1String("rdp+")))
+            return arg;
+#endif
+    }
+    return QString();
+}
+
+} // namespace
+
+int main(int argc, char *argv[])
+{
+#ifndef Q_OS_WIN
+    // Ignore SIGPIPE: libssh2 writes to SSH sockets that may already be closed
+    // by the remote end (e.g. during channel/session teardown when closing a
+    // tab). Without this, the default SIGPIPE handler terminates the process.
+    // macOS does not support MSG_NOSIGNAL, so process-level ignore is required.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+
+    QApplication app(argc, argv);
+    QApplication::setApplicationName(QStringLiteral("cube-shell"));
+    QApplication::setOrganizationName(QStringLiteral("CubeShell"));
+    // 窗口图标：resources/icons/icons.qrc 编译进二进制的 logo.png
+    //（macOS Dock 图标另由 bundle 的 logo.icns / Info.plist 接管）。
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/logo.png")));
+
+    // 1. 配置加载（theme.json → GlobalState 单例）。
+    // 对应Python: util.THEME 的初始化
+    cubeshell::GlobalState &state = cubeshell::GlobalState::instance();
+    state.loadTheme(locateThemeJson());
+
+    // 2. 主题应用（QSS + QPalette）。对应Python: applyAppearance
+    cubeshell::ThemeManager::applyTheme(&app, state.appearance());
+
+    // 3. 语言加载（复用 Python 侧 i18n/*.qm）。
+    // 对应Python: language_manager.initialize(app) + load_from_config
+    cubeshell::LanguageManager &lang = cubeshell::LanguageManager::instance();
+    lang.initialize(&app);
+    lang.loadFromConfig(state.language());
+
+    // 4. 单实例检查（QLockFile）。
+    // 对应Python: cube-shell.py 的单实例保护
+    QLockFile lock(QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                       .filePath(QStringLiteral("cube-shell.lock")));
+    lock.setStaleLockTime(30 * 1000);
+    if (!lock.tryLock(100)) {
+        QMessageBox::warning(nullptr, QObject::tr("CubeShell"),
+                             QObject::tr("CubeShell is already running."));
+        return 0;
+    }
+
+    // 5. 命令行 URL 参数（jms:// 直连）。
+    const QString startupUrl = urlFromArguments(QCoreApplication::arguments());
+
+    // 6. 创建主窗口。
+    cubeshell::MainWindow window;
+    window.show();
+
+    // 7. macOS QFileOpenEvent（应用已运行时系统投递的 URL Scheme 事件）。
+    auto *urlFilter = new UrlOpenFilter(&window, &app);
+    app.installEventFilter(urlFilter);
+
+    // 8. 启动参数里带 URL → 主窗口就绪后处理（BastionClient 解析并自动连接）。
+    if (!startupUrl.isEmpty())
+        window.handleUrl(startupUrl);
+
+    return QApplication::exec();
+}

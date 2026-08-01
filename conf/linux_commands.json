@@ -1,0 +1,301 @@
+{
+  "treeData": [
+    {
+      "command": "文件管理",
+      "option": "",
+      "description": "主要是对文件和文件夹的操作",
+      "children": [
+        {
+          "command": "cat",
+          "option": "-n：显示行号，会在输出的每一行前加上行号。\n-b：显示行号，但只对非空行进行编号。\n-s：压缩连续的空行，只显示一个空行。\n-E：在每一行的末尾显示 $ 符号。\n-T：将 Tab 字符显示为 ^I。\n-v：显示一些非打印字符。",
+          "description": "显示文件内容：cat filename 会将指定文件的内容输出到终端上。\n连接文件：cat file1 file2 > combined_file 可以将 file1 和 file2 的内容连接起来，并将结果输出到 combined_file 中。\n创建文件：可以使用 cat 命令来创建文件，例如 cat > filename，然后你可以输入文本，按 Ctrl+D 来保存并退出。\n在终端显示文件：可以将 cat 与管道（|）结合使用，用来显示其他命令的输出，例如 ls -l | cat 会将 ls -l 的输出通过 cat 打印到终端上。"
+        },
+        {
+          "command": "chattr",
+          "option": "　　-R 递归处理，将指定目录下的所有文件及子目录一并处理。\n　　-v<版本编号> 设置文件或目录版本。\n　　-V 显示指令执行过程。\n　　+<属性> 开启文件或目录的该项属性。\n　　-<属性> 关闭文件或目录的该项属性。\n　　=<属性> 指定文件或目录的该项属性。",
+          "description": "Linux chattr命令用于改变文件属性。\n\n这项指令可改变存放在ext2文件系统上的文件或目录属性，这些属性共有以下8种模式：\n\na：让文件或目录仅供附加用途。\nb：不更新文件或目录的最后存取时间。\nc：将文件或目录压缩后存放。\nd：将文件或目录排除在倾倒操作之外。\ni：不得任意更动文件或目录。\ns：保密性删除文件或目录。\nS：即时更新文件或目录。\nu：预防意外删除。"
+        },
+        {
+          "command": "chgrp",
+          "option": "-c 或 --changes：效果类似\"-v\"参数，但仅回报更改的部分。\n\n-f 或 --quiet 或 --silent： 　不显示错误信息。\n\n-h 或 --no-dereference： 　只对符号连接的文件作修改，而不改动其他任何相关文件。\n\n-R 或 --recursive： 　递归处理，将指定目录下的所有文件及子目录一并处理。\n\n-v 或 --verbose： 　显示指令执行过程。\n\n--help： 　在线帮助。\n\n--reference=<参考文件或目录>： 　把指定文件或目录的所属群组全部设成和参考文件或目录的所属群组相同。\n\n--version： 　显示版本信息。",
+          "description": "Linux chgrp（英文全拼：change group）命令用于变更文件或目录的所属群组。\n\n与 chown 命令不同，chgrp 允许普通用户改变文件所属的组，只要该用户是该组的一员。\n\n在 UNIX 系统家族里，文件或目录权限的掌控以拥有者及所属群组来管理。您可以使用 chgrp 指令去变更文件与目录的所属群组，设置方式采用群组名称或群组识别码皆可。\n\n语法\nchgrp [-cfhRv][--help][--version][所属群组][文件或目录...] 或 chgrp [-cfhRv][--help][--reference=<参考文件或目录>][--version][文件或目录...]"
+        },
+        {
+          "command": "chmod",
+          "option": "",
+          "description": "Linux chmod（英文全拼：change mode）命令是控制用户对文件的权限的命令\n\nLinux/Unix 的文件调用权限分为三级 : 文件所有者（Owner）、用户组（Group）、其它用户（Other Users）。"
+        },
+        {
+          "command": "chown",
+          "option": "user : 新的文件拥有者的使用者 ID\ngroup : 新的文件拥有者的使用者组(group)\n-c : 显示更改的部分的信息\n-f : 忽略错误信息\n-h :修复符号链接\n-v : 显示详细的处理信息\n-R : 处理指定目录以及其子目录下的所有文件\n--help : 显示辅助说明\n--version : 显示版本",
+          "description": "Linux chown（英文全拼：change owner）命令用于设置文件所有者和文件关联组的命令。\n\nLinux/Unix 是多人多工操作系统，所有的文件皆有拥有者。利用 chown 将指定文件的拥有者改为指定的用户或组，用户可以是用户名或者用户 ID，组可以是组名或者组 ID，文件是以空格分开的要改变权限的文件列表，支持通配符。 。\n\nchown 需要超级用户 root 的权限才能执行此命令。\n\n只有超级用户和属于组的文件所有者才能变更文件关联组。非超级用户如需要设置关联组可能需要使用 chgrp 命令。\n\n使用权限 : root\n\n语法\nchown [-cfhvR] [--help] [--version] user[:group] file..."
+        },
+        {
+          "command": "cksum",
+          "option": "--help：在线帮助。\n--version：显示版本信息。\n文件…:需要进行检查的文件路径",
+          "description": "Linux cksum命令用于检查文件的CRC是否正确。确保文件从一个系统传输到另一个系统的过程中不被损坏。\n\nCRC是一种排错检查方式，该校验法的标准由CCITT所指定，至少可检测到99.998%的已知错误。\n\n指定文件交由指令\"cksum\"进行校验后，该指令会返回校验结果供用户核对文件是否正确无误。若不指定任何文件名称或是所给予的文件名为\"-\"，则指令\"cksum\"会从标准输入设备中读取数据。\n\n语法\ncksum [--help][--version][文件...]"
+        },
+        {
+          "command": "cmp",
+          "option": "-c或--print-chars 　除了标明差异处的十进制字码之外，一并显示该字符所对应字符。\n-i<字符数目>或--ignore-initial=<字符数目> 　指定一个数目。\n-l或--verbose 　标示出所有不一样的地方。\n-s或--quiet或--silent 　不显示错误信息。\n-v或--version 　显示版本信息。\n--help 　在线帮助。",
+          "description": "Linux cmp 命令用于比较两个文件是否有差异。\n\n当相互比较的两个文件完全一样时，则该指令不会显示任何信息。若发现有所差异，预设会标示出第一个不同之处的字符和列数编号。若不指定任何文件名称或是所给予的文件名为\"-\"，则cmp指令会从标准输入设备读取数据。\n\n语法\ncmp [-clsv][-i <字符数目>][--help][第一个文件][第二个文件]"
+        },
+        {
+          "command": "diff",
+          "option": "-<行数> 　指定要显示多少行的文本。此参数必须与-c或-u参数一并使用。\n-a或--text 　diff预设只会逐行比较文本文件。\n-b或--ignore-space-change 　不检查空格字符的不同。\n-B或--ignore-blank-lines 　不检查空白行。\n-c 　显示全部内文，并标出不同之处。\n-C<行数>或--context<行数> 　与执行\"-c-<行数>\"指令相同。\n-d或--minimal 　使用不同的演算法，以较小的单位来做比较。\n-D<巨集名称>或ifdef<巨集名称> 　此参数的输出格式可用于前置处理器巨集。\n-e或--ed 　此参数的输出格式可用于ed的script文件。\n-f或-forward-ed 　输出的格式类似ed的script文件，但按照原来文件的顺序来显示不同处。\n-H或--speed-large-files 　比较大文件时，可加快速度。\n-I<字符或字符串>或--ignore-matching-lines<字符或字符串> 　若两个文件在某几行有所不同，而这几行同时都包含了选项中指定的字符或字符串，则不显示这两个文件的差异。\n-i或--ignore-case 　不检查大小写的不同。\n-l或--paginate 　将结果交由pr程序来分页。\n-n或--rcs 　将比较结果以RCS的格式来显示。\n-N或--new-file 　在比较目录时，若文件A仅出现在某个目录中，预设会显示：\nOnly in目录：文件A若使用-N参数，则diff会将文件A与一个空白的文件比较。\n-p 　若比较的文件为C语言的程序码文件时，显示差异所在的函数名称。\n-P或--unidirectional-new-file 　与-N类似，但只有当第二个目录包含了一个第一个目录所没有的文件时，才会将这个文件与空白的文件做比较。\n-q或--brief 　仅显示有无差异，不显示详细的信息。\n-r或--recursive 　比较子目录中的文件。\n-s或--report-identical-files 　若没有发现任何差异，仍然显示信息。\n-S<文件>或--starting-file<文件> 　在比较目录时，从指定的文件开始比较。\n-t或--expand-tabs 　在输出时，将tab字符展开。\n-T或--initial-tab 　在每行前面加上tab字符以便对齐。\n-u,-U<列数>或--unified=<列数> 　以合并的方式来显示文件内容的不同。\n-v或--version 　显示版本信息。\n-w或--ignore-all-space 　忽略全部的空格字符。\n-W<宽度>或--width<宽度> 　在使用-y参数时，指定栏宽。\n-x<文件名或目录>或--exclude<文件名或目录> 　不比较选项中所指定的文件或目录。\n-X<文件>或--exclude-from<文件> 　您可以将文件或目录类型存成文本文件，然后在=<文件>中指定此文本文件。\n-y或--side-by-side 　以并列的方式显示文件的异同之处。\n--help 　显示帮助。\n--left-column 　在使用-y参数时，若两个文件某一行内容相同，则仅在左侧的栏位显示该行内容。\n--suppress-common-lines 　在使用-y参数时，仅显示不同之处。",
+          "description": "Linux diff 命令用于比较文件的差异。\n\ndiff 以逐行的方式，比较文本文件的异同处。如果指定要比较目录，则 diff 会比较目录中相同文件名的文件，但不会比较其中子目录。\n\n语法\ndiff [-abBcdefHilnNpPqrstTuvwy][-<行数>][-C <行数>][-D <巨集名称>][-I <字符或字符串>][-S <文件>][-W <宽度>][-x <文件或目录>][-X <文件>][--help][--left-column][--suppress-common-line][文件或目录1][文件或目录2]"
+        },
+        {
+          "command": "diffstat",
+          "option": "-n<文件名长度> 　指定文件名长度，指定的长度必须大于或等于所有文件中最长的文件名。\n-p<文件名长度> 　与-n参数相同，但此处的<文件名长度>包括了文件的路径。\n-w 　指定输出时栏位的宽度。\n-V 　显示版本信息。",
+          "description": "Linux diffstat命令根据diff的比较结果，显示统计数字。\n\ndiffstat读取diff的输出结果，然后统计各文件的插入，删除，修改等差异计量。\n\n语法\ndiff [-wV][-n <文件名长度>][-p <文件名长度>]"
+        },
+        {
+          "command": "file",
+          "option": "-b 　列出辨识结果时，不显示文件名称。\n-c 　详细显示指令执行过程，便于排错或分析程序执行的情形。\n-f<名称文件> 　指定名称文件，其内容有一个或多个文件名称时，让file依序辨识这些文件，格式为每列一个文件名称。\n-L 　直接显示符号连接所指向的文件的类别。\n-m<魔法数字文件> 　指定魔法数字文件。\n-v 　显示版本信息。\n-z 　尝试去解读压缩文件的内容。\n[文件或目录...] 要确定类型的文件列表，多个文件之间使用空格分开，可以使用shell通配符匹配多个文件。",
+          "description": "Linux file命令用于辨识文件类型。\n\n通过file指令，我们得以辨识该文件的类型。\n\n语法\nfile [-bcLvz][-f <名称文件>][-m <魔法数字文件>...][文件或目录...]"
+        },
+        {
+          "command": "find",
+          "option": "",
+          "description": "Linux find 命令用于在指定目录下查找文件和目录。\n\n它可以使用不同的选项来过滤和限制查找的结果。\n\n语法\nfind [路径] [匹配条件] [动作]"
+        },
+        {
+          "command": "git",
+          "option": "F1 ：执行info指令，查询指令相关信息，会要求您输入欲查询的名称。\nF2 ：执行cat指令，列出文件内容。\nF3 ：执行gitview指令，观看文件内容。\nF4 ：执行vi指令，编辑文件内容。\nF5 ：执行cp指令，复制文件或目录，会要求您输入目标文件或目录。\nF6 ：执行mv指令，移动文件或目录，或是更改其名称，会要求您输入目标文件或目录。\nF7 ：执行mkdir指令，建立目录。\nF8 ：执行rm指令，删除文件或目录。\nF9 ：执行make指令，批处理执行指令或编译程序时，会要求您输入相关命令。\nF10 ：离开git文件管理员。",
+          "description": "Linux git命令是文字模式下的文件管理员。\n\ngit是用来管理文件的程序，它十分类似DOS下的Norton Commander，具有互动式操作界面。它的操作方法和Norton Commander几乎一样。\n\n语法\ngit"
+        },
+        {
+          "command": "gitview",
+          "option": "-b 　单色模式，不使用ANSI控制码显示彩色。\n-c 　彩色模式，使用ANSI控制码显示色彩。\n-h 　在线帮助。\n-i 　显示存放gitview程序的所在位置。\n-l 　不使用先前的显示字符。\n-v 　显示版本信息。",
+          "description": "Linux gitview命令用于观看文件的内容，它会同时显示十六进制和ASCII格式的字码。\n\n语法\ngitview [-bchilv][文件]"
+        },
+        {
+          "command": "indent",
+          "option": "-bad或--blank-lines-after-declarations 　在声明区段或加上空白行。\n-bap或--blank-lines-after-procedures 　在程序或加上空白行。\n-bbb或--blank-lines-after-block-comments 　在注释区段后加上空白行。\n-bc或--blank-lines-after-commas 　在声明区段中，若出现逗号即换行。\n-bl或--braces-after-if-line 　if(或是else,for等等)与后面执行区段的\"{\"不同行，且\"}\"自成一行。\n-bli<缩排格数>或--brace-indent<缩排格数> 　设置{ }缩排的格数。\n-br或--braces-on-if-line 　if(或是else,for等等)与后面执行跛段的\"{\"不同行，且\"}\"自成一行。\n-bs或--blank-before-sizeof 　在sizeof之后空一格。\n-c<栏数>或--comment-indentation<栏数> 　将注释置于程序码右侧指定的栏位。\n-cd<栏数>或--declaration-comment-column<栏数> 　将注释置于声明右侧指定的栏位。\n-cdb或--comment-delimiters-on-blank-lines 　注释符号自成一行。\n-ce或--cuddle-else 　将else置于\"}\"(if执行区段的结尾)之后。\n-ci<缩排格数>或--continuation-indentation<缩排格数> 　叙述过长而换行时，指定换行后缩排的格数。\n-cli<缩排格数>或--case-indentation-<缩排格数> 　使用case时，switch缩排的格数。\n-cp<栏数>或-else-endif-column<栏数> 　将注释置于else与elseif叙述右侧定的栏位。\n-cs或--space-after-cast 　在cast之后空一格。\n-d<缩排格数>或-line-comments-indentation<缩排格数> 　针对不是放在程序码右侧的注释，设置其缩排格数。\n-di<栏数>或--declaration-indentation<栏数> 　将声明区段的变量置于指定的栏位。\n-fc1或--format-first-column-comments 　针对放在每行最前端的注释，设置其格式。\n-fca或--format-all-comments 　设置所有注释的格式。\n-gnu或--gnu-style 　指定使用GNU的格式，此为预设值。\n-i<格数>或--indent-level<格数> 　设置缩排的格数。\n-ip<格数>或--parameter-indentation<格数> 　设置参数的缩排格数。\n-kr或--k-and-r-style 　指定使用Kernighan&Ritchie的格式。\n-lp或--continue-at-parentheses 　叙述过长而换行，且叙述中包含了括弧时，将括弧中的每行起始栏位内容垂直对其排列。\n-nbad或--no-blank-lines-after-declarations 　在声明区段后不要加上空白行。\n-nbap或--no-blank-lines-after-procedures 　在程序后不要加上空白行。\n-nbbb或--no-blank-lines-after-block-comments 　在注释区段后不要加上空白行。\n-nbc或--no-blank-lines-after-commas 　在声明区段中，即使出现逗号，仍旧不要换行。\n-ncdb或--no-comment-delimiters-on-blank-lines 　注释符号不要自成一行。\n-nce或--dont-cuddle-else 　不要将else置于\"}\"之后。\n-ncs或--no-space-after-casts 　不要在cast之后空一格。\n-nfc1或--dont-format-first-column-comments 　不要格式化放在每行最前端的注释。\n-nfca或--dont-format-comments 　不要格式化任何的注释。\n-nip或--no-parameter-indentation 　参数不要缩排。\n-nlp或--dont-line-up-parentheses 　叙述过长而换行，且叙述中包含了括弧时，不用将括弧中的每行起始栏位垂直对其排列。\n-npcs或--no-space-after-function-call-names 　在调用的函数名称之后，不要加上空格。\n-npro或--ignore-profile 　不要读取indent的配置文件.indent.pro。\n-npsl或--dont-break-procedure-type 　程序类型与程序名称放在同一行。\n-nsc或--dont-star-comments 　注解左侧不要加上星号(*)。\n-nsob或--leave-optional-semicolon 　不用处理多余的空白行。\n-nss或--dont-space-special-semicolon 　若for或while区段仅有一行时，在分号前不加上空格。\n-nv或--no-verbosity 　不显示详细的信息。\n-orig或--original 　使用Berkeley的格式。\n-pcs或--space-after-procedure-calls 　在调用的函数名称与\"{\"之间加上空格。\n-psl或--procnames-start-lines 　程序类型置于程序名称的前一行。\n-sc或--start-left-side-of-comments 　在每行注释左侧加上星号(*)。\n-sob或--swallow-optional-blank-lines 　删除多余的空白行。\n-ss或--space-special-semicolon 　若for或swile区段今有一行时，在分号前加上空格。\n-st或--standard-output 　将结果显示在标准输出设备。\n-T 　数据类型名称缩排。\n-ts<格数>或--tab-size<格数> 　设置tab的长度。\n-v或--verbose 　执行时显示详细的信息。\n-version 　显示版本信息。",
+          "description": "Linux indent命令用于调整C原始代码文件的格式。\n\nindent可辨识C的原始代码文件，并加以格式化，以方便程序设计师阅读。\n\n语法\nindent [参数][源文件] 或 indent [参数][源文件][-o 目标文件]"
+        },
+        {
+          "command": "cut",
+          "option": "-b ：以字节为单位进行分割。这些字节位置将忽略多字节字符边界，除非也指定了 -n 标志。\n-c ：以字符为单位进行分割。\n-d ：自定义分隔符，默认为制表符。\n-f ：与-d一起使用，指定显示哪个区域。\n-n ：取消分割多字节字符。仅和 -b 标志一起使用。如果字符的最后一个字节落在由 -b 标志的 List 参数指示的\n范围之内，该字符将被写出；否则，该字符将被排除",
+          "description": "Linux cut命令用于显示每行从开头算起 num1 到 num2 的文字。\n\n语法\ncut  [-bn] [file]\ncut [-c] [file]\ncut [-df] [file]\n使用说明:\n\ncut 命令从文件的每一行剪切字节、字符和字段并将这些字节、字符和字段写至标准输出。\n\n如果不指定 File 参数，cut 命令将读取标准输入。必须指定 -b、-c 或 -f 标志之一。"
+        },
+        {
+          "command": "ln",
+          "option": "",
+          "description": ""
+        },
+        {
+          "command": "",
+          "option": "",
+          "description": ""
+        },
+        {
+          "command": "",
+          "option": "",
+          "description": ""
+        },
+        {
+          "command": "",
+          "option": "",
+          "description": ""
+        }
+      ]
+    },
+    {
+      "command": "文档编辑",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "col",
+          "option": "-b 过滤掉所有的控制字符，包括RLF和HRLF。\n-f 滤除RLF字符，但允许将HRLF字符呈现出来。\n-x 以多个空格字符来表示跳格字符。\n-l<缓冲区列数> 预设的内存缓冲区有128列，您可以自行指定缓冲区的大小。",
+          "description": "Linux col命令用于过滤控制字符。\n\n在许多UNIX说明文件里，都有RLF控制字符。当我们运用shell特殊字符\">\"和\">>\"，把说明文件的内容输出成纯文本文件时，控制字符会变成乱码，col指令则能有效滤除这些控制字符。"
+        }
+      ]
+    },
+    {
+      "command": "文件传输",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "lprm",
+          "option": "",
+          "description": "Linux lprm命令用于将一个工作由打印机贮列中移除\n尚未完成的打印机工作会被放在打印机贮列之中，这个命令可用来将常未送到打印机的工作取消。由于每一个打印机都有一个独立的贮列，\n你可以用 -P 这个命令设定想要作用的印列机。如果没有设定的话，会使用系统预设的打印机。\n 这个命令会检查使用者是否有足够的权限删除指定的档案，\n一般而言，只有档案的拥有者或是系统管理员才有这个权限。"
+        }
+      ]
+    },
+    {
+      "command": "磁盘管理",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "cd",
+          "option": "",
+          "description": "Linux cd（英文全拼：change directory）\n命令用于改变当前工作目录的命令，切换到指定的路径。\n若目录名称省略，则变换至使用者的 home 目录 (也就是刚 login 时所在的目录)。\n另外，~ 也表示为 home 目录 的意思， \n. 则是表示目前所在的目录， \n.. 则表示目前目录位置的上一层目录。"
+        }
+      ]
+    },
+    {
+      "command": "磁盘维护",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "badblocks",
+          "option": "-b<区块大小> 指定磁盘的区块大小，单位为字节。\n-o<输出文件> 将检查的结果写入指定的输出文件。\n-s 在检查时显示进度。\n-v 执行时显示详细的信息。\n-w 在检查时，执行写入测试。\n[磁盘装置] 指定要检查的磁盘装置。\n[磁盘区块数] 指定磁盘装置的区块总数。\n[启始区块] 指定要从哪个区块开始检查。",
+          "description": "Linux badblocks命令用于检查磁盘装置中损坏的区块。\n执行指令时须指定所要检查的磁盘装置，及此装置的磁盘区块数。"
+        }
+      ]
+    },
+    {
+      "command": "网络通讯",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "apachectl",
+          "option": "configtest 检查设置文件中的语法是否正确。\nfullstatus 显示服务器完整的状态信息。\ngraceful 重新启动Apache服务器，但不会中断原有的连接。\nhelp 显示帮助信息。\nrestart 重新启动Apache服务器。\nstart 启动Apache服务器。\nstatus 显示服务器摘要的状态信息。\nstop 停止Apache服务器。",
+          "description": "Linux apachectl命令可用来控制Apache HTTP服务器的程序。\napachectl是slackware内附Apache HTTP服务器的script文件，\n可供管理员控制服务器，但在其他Linux的Apache HTTP服务器不一定有这个文件。"
+        }
+      ]
+    },
+    {
+      "command": "系统管理",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "adduser",
+          "option": "-c comment 新使用者位于密码档（通常是 /etc/passwd）的注解资料\n-d home_dir 设定使用者的家目录为 home_dir ，预设值为预设的 home 后面加上使用者帐号 loginid\n-e expire_date 设定此帐号的使用期限（格式为 YYYY-MM-DD），预设值为永久有效\n-f inactive_time 范例：",
+          "description": "Linux adduser 命令用于新增使用者帐号或更新预设的使用者资料。\n\nadduser 与 useradd 指令为同一指令（经由符号连结 symbolic link）。\n使用权限：系统管理员。\nadduser 是增加使用者。相对的，也有删除使用者的指令 userdel，语法为 userdel [login ID]。"
+        }
+      ]
+    },
+    {
+      "command": "系统设置",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "adduser",
+          "option": "-p 　将终端机类别显示在屏幕上，但不做设定的动作。这个命令可以用来取得目前终端机的类别。\n-e ch 　将 erase 字元设成 ch\n-i ch 　将中断字元设成 ch\n-k ch 　将删除一行的字元设成 ch\n-I 　不要做设定的动作，如果没有使用选项 -Q 的话，erase、中断及删除字元的目前值依然会送到屏幕上。\n-Q 　不要显示 erase、中断及删除字元的值到屏幕上。\n-r 　将终端机类别印在屏幕上。\n-s 　将设定 TERM 用的命令用字串的型式送到终端机中，通常在 .login 或 .profile 中用。",
+          "description": "Linux reset命令其实和 tset 是一同个命令，它的用途是设定终端机的状态。一般而言，\n这个命令会自动的从环境变数、命令列或是其它的组态档决定目前终端机的型态。如果指定型态是 '?' 的话，这个程序会要求使用者输入终端机的型别。\n由于这个程序会将终端机设回原始的状态，除了在 login 时使用外，当系统终端机因为程序不正常执行而进入一些奇怪的状态时，\n你也可以用它来重设终端机o 例如不小心把二进位档用 cat 指令进到终端机，常会有终端机不再回应键盘输入，\n或是回应一些奇怪字元的问题。此时就可以用 reset 将终端机回复至原始状态。"
+        }
+      ]
+    },
+    {
+      "command": "备份压缩",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "ar",
+          "option": "-d 　删除备存文件中的成员文件。\n-m 　变更成员文件在备存文件中的次序。\n-p 　显示备存文件中的成员文件内容。\n-q 　将文件附加在备存文件末端。\n-r 　将文件插入备存文件中。\n-t 　显示备存文件中所包含的文件。\n-x 　自备存文件中取出成员文件。",
+          "description": "Linux ar命令用于建立或修改备存文件，或是从备存文件中抽取文件。\nar可让您集合许多文件，成为单一的备存文件。在备存文件中，所有成员文件皆保有原来的属性与权限。"
+        },
+        {
+          "command": "bunzip2",
+          "option": "-f或--force 　解压缩时，若输出的文件与现有文件同名时，预设不会覆盖现有的文件。若要覆盖，请使用此参数。\n-k或--keep 　在解压缩后，预设会删除原来的压缩文件。若要保留压缩文件，请使用此参数。\n-s或--small 　降低程序执行时，内存的使用量。\n-v或--verbose 　解压缩文件时，显示详细的信息。\n-L,--license,-V或--version 　显示版本信息。",
+          "description": "Linux bunzip2命令是.bz2文件的解压缩程序。\n\nbunzip2可解压缩.bz2格式的压缩文件。bunzip2实际上是bzip2的符号连接，执行bunzip2与bzip2 -d的效果相同。\n\n语法：bunzip2 [-fkLsvV][.bz2压缩文件]"
+        },
+        {
+          "command": "bzip2",
+          "option": "-d：解压缩一个 .bz2 文件。相当于使用 bunzip2 命令。\n-k：保留原始文件，不删除。\n-v：显示详细的压缩或解压缩过程。\n-z：强制压缩，即使文件已经被压缩。\n-t：测试压缩文件的完整性。\n-1 到 -9：指定压缩比。-1 是最快的压缩，压缩率最低；-9 是最慢的压缩，压缩率最高。默认是 -9。",
+          "description": "Linux bzip2 命令用于压缩文件。\n\n与 gzip 类似，bzip2 通过采用更高效的压缩算法（Burrows-Wheeler算法）提供更好的压缩率，但通常压缩速度稍慢。\n\n语法\nbzip2 [options] [file...]\nfile...：要压缩的文件。bzip2 会将指定的文件压缩，并生成一个 .bz2 后缀的压缩文件，同时删除原始文件。"
+        },
+        {
+          "command": "bzip2recover",
+          "option": "",
+          "description": "Linux bzip2recover命令用来修复损坏的.bz2文件。\n\nbzip2是以区块的方式来压缩文件，每个区块视为独立的单位。因此，当某一区块损坏时，便可利用bzip2recover，试着将文件中的区块隔开来，以便解压缩正常的区块。通常只适用在压缩文件很大的情况。\n\n语法\nbzip2recover [.bz2 压缩文件]"
+        },
+        {
+          "command": "gunzip",
+          "option": "-c：将解压缩后的文件内容输出到标准输出（而不是写入文件）。\n-d：解压缩文件。这是默认的行为，可以省略。\n-f：强制解压缩，即使已存在同名的解压缩文件。\n-h：显示帮助信息。\n-k：保留原始的压缩文件。解压缩后的文件会保留在同一目录下，而不会删除原始文件。\n-l：显示压缩文件的详细信息，包括压缩前后的文件大小、压缩比等。\n-n：不覆盖已存在的解压缩文件。如果已存在同名文件，则不会进行解压缩操作。\n-q：静默模式，不显示解压缩进度和错误信息。\n-r：递归地解压缩指定目录下的所有文件。\n-t：测试压缩文件的完整性，而不进行实际的解压缩操作。\n-v：显示详细的解压缩信息，包括解压缩的文件名、压缩比等。\n--help：显示帮助信息。\n--version：显示 gunzip 命令的版本信息。",
+          "description": "Linux gunzip 命令用于解压文件。\n\ngunzip 是个使用广泛的解压缩程序，它用于解开被 gzip 压缩过的文件，这些压缩文件预设最后的扩展名为 .gz。事实上 gunzip 就是 gzip 的硬连接，因此不论是压缩或解压缩，都可通过 gzip 指令单独完成。\n\n语法\n参数：\n\ngunzip [选项] 压缩文件"
+        },
+        {
+          "command": "unarj",
+          "option": "e 解压缩.arj文件。\nl 显示压缩文件内所包含的文件。\nt 检查压缩文件是否正确。\nx 解压缩时保留原有的路径。",
+          "description": "Linux unarj命令用于解压缩.arj文件。\n\nunarj为.arj压缩文件的压缩程序。"
+        },
+        {
+          "command": "compress",
+          "option": "c 输出结果至标准输出设备（一般指荧幕）\nf 强迫写入档案，若目的档已经存在，则会被覆盖 (force)\nv 将程序执行的讯息印在荧幕上 (verbose)\nb 设定共同字串数的上限，以位元计算，可以设定的值为 9 至 16 bits 。由于值越大，能使用的共同字串就 越多，压缩比例就越大，所以一般使用预设值 16 bits (bits)\nd 将压缩档解压缩\nV 列出版本讯息",
+          "description": "Linux compress命令是一个相当古老的 unix 档案压缩指令，压缩后的档案会加上一个 .Z 延伸档名以区别未压缩的档案，压缩后的档案可以以 uncompress 解压。若要将数个档案压成一个压缩档，必须先将档案 tar 起来再压缩。由于 gzip 可以产生更理想的压缩比例，一般人多已改用 gzip 为档案压缩工具。\n\n语法\ncompress [-dfvcV] [-b maxbits] [file ...]"
+        },
+        {
+          "command": "cpio",
+          "option": "-0或--null 　接受新增列控制字符，通常配合find指令的\"-print0\"参数使用。\n-a或--reset-access-time 　重新设置文件的存取时间。\n-A或--append 　附加到已存在的备份档中，且这个备份档必须存放在磁盘上，而不能放置于磁带机里。\n-b或--swap 　此参数的效果和同时指定\"-sS\"参数相同。\n-B 　将输入/输出的区块大小改成5210 Bytes。\n-c 　使用旧ASCII备份格式。\n-C<区块大小>或--io-size=<区块大小> 　设置输入/输出的区块大小，单位是Byte。\n-d或--make-directories 　如有需要cpio会自行建立目录。\n-E<范本文件>或--pattern-file=<范本文件> 　指定范本文件，其内含有一个或多个范本样式，让cpio解开符合范本条件的文件，格式为每列一个范本样式。\n-f或--nonmatching 　让cpio解开所有不符合范本条件的文件。\n-F<备份档>或--file=<备份档> 　指定备份档的名称，用来取代标准输入或输出，也能借此通过网络使用另一台主机的保存设备存取备份档。\n-H<备份格式> 　指定备份时欲使用的文件格式。\n-i或--extract 　执行copy-in模式，还原备份档。\n-l<备份档> 　指定备份档的名称，用来取代标准输入，也能借此通过网络使用另一台主机的保存设备读取备份档。\n-k 　此参数将忽略不予处理，仅负责解决cpio不同版本间的兼容性问题。\n-l或--link 　以硬连接的方式取代复制文件，可在copy-pass模式下运用。\n-L或--dereference 　不建立符号连接，直接复制该连接所指向的原始文件。\n-m或preserve-modification-time 　不去更换文件的更改时间。\n-M<回传信息>或--message=<回传信息> 　设置更换保存媒体的信息。\n-n或--numeric-uid-gid 　使用\"-tv\"参数列出备份档的内容时，若再加上参数\"-n\"，则会以用户识别码和群组识别码替代拥有者和群组名称列出文件清单。\n-o或--create 　执行copy-out模式，建立备份档。\n-O<备份档> 　指定备份档的名称，用来取代标准输出，也能借此通过网络　使用另一台主机的保存设备存放备份档。\n-p或--pass-through 　执行copy-pass模式，略过备份步骤，直接将文件复制到目的目录。\n-r或--rename 　当有文件名称需要更动时，采用互动模式。\n-R<拥有者><:/.><所属群组>或\n----owner<拥有者><:/.><所属群组> 　在copy-in模式还原备份档，或copy-pass模式复制文件时，可指定这些备份，复制的文件的拥有者与所属群组。\n-s或--swap-bytes 　交换每对字节的内容。\n-S或--swap-halfwords 　交换每半个字节的内容。\n-t或--list 　将输入的内容呈现出来。\n-u或--unconditional 　置换所有文件，不论日期时间的新旧与否，皆不予询问而直接覆盖。\n-v或--verbose 　详细显示指令的执行过程。\n-V或--dot 　执行指令时，在每个文件的执行程序前面加上\".\"号\n--block-size=<区块大小> 　设置输入/输出的区块大小，假如设置数值为5，则区块大小为2500，若设置成10，则区块大小为5120，依次类推。\n--force-local 　强制将备份档存放在本地主机。\n--help 　在线帮助。\n--no-absolute-filenames 　使用相对路径建立文件名称。\n--no-preserve-owner 　不保留文件的拥有者，谁解开了备份档，那些文件就归谁所有。\n-only-verify-crc 　当备份档采用CRC备份格式时，可使用这项参数检查备份档内的每个文件是否正确无误。\n--quiet 　不显示复制了多少区块。\n--sparse 　倘若一个文件内含大量的连续0字节，则将此文件存成稀疏文件。\n--version 　显示版本信息。",
+          "description": "Linux cpio命令用于备份文件。\n\ncpio 是用来建立，还原备份档的工具程序，它可以加入，解开 cpio 或 tar 备份档内的文件。\n\n语法\ncpio [-0aABckLovV][-C <输入/输出大小>][-F <备份档>][-H <备份格式>][-O <备份档>][--block-size=<区块大小>][--force-local][--help][--quiet][--version] 或 cpio [-bBcdfikmnrsStuvV][-C <输入/输出大小>][-E <范本文件>][-F <备份档>][-H <备份格式>][-I <备份档>][-M <回传信息>][-R <拥有者><:/.><所属群组>][--block-size=<区块大小>][--force-local][--help][--no-absolute-filenames][--no-preserve-owner][--only-verify-crc][--quiet][--sparse][--version][范本样式...] 或 cpio [-0adkiLmpuvV][-R <拥有者><:/.><所属群组>][--help][--no-preserve-owner][--quiet][--sparse][--version][目的目]"
+        },
+        {
+          "command": "dump",
+          "option": "-0123456789 　备份的层级。\n-b<区块大小> 　指定区块的大小，单位为KB。\n-B<区块数目> 　指定备份卷册的区块数目。\n-c 　修改备份磁带预设的密度与容量。\n-d<密度> 　设置磁带的密度。单位为BPI。\n-f<设备名称> 　指定备份设备。\n-h<层级> 　当备份层级等于或大于指定的层级时，将不备份用户标示为\"nodump\"的文件。\n-n 　当备份工作需要管理员介入时，向所有\"operator\"群组中的使用者发出通知。\n-s<磁带长度> 　备份磁带的长度，单位为英尺。\n-T<日期> 　指定开始备份的时间与日期。\n-u 　备份完毕后，在/etc/dumpdates中记录备份的文件系统，层级，日期与时间等。\n-w 　与-W类似，但仅显示需要备份的文件。\n-W 　显示需要备份的文件及其最后一次备份的层级，时间与日期。",
+          "description": "Linux dump命令用于备份文件系统。\n\ndump为备份工具程序，可将目录或整个文件系统备份至指定的设备，或备份成一个大文件。\n\n语法\ndump [-cnu][-0123456789][-b <区块大小>][-B <区块数目>][-d <密度>][-f <设备名称>][-h <层级>][-s <磁带长度>][-T <日期>][目录或文件系统] 或 dump [-wW]"
+        },
+        {
+          "command": "uuencode",
+          "option": "input-file：要转换的二进制文件。\noutput-file：转换后的文件名，也可以是邮件中的附件名。",
+          "description": "Linux uuencode 命令用于将二进制文件转换为 ASCII 文本格式，以便通过电子邮件或其他传输方式发送。\n\n这种转换使得文件能够通过仅支持文本传输的通道（如电子邮件）进行发送，并在接收端使用 uudecode 命令将其还原为原始的二进制文件。"
+        },
+        {
+          "command": "gzexe",
+          "option": "-d 　解开压缩文件。",
+          "description": "Linux gzexe命令用于压缩执行文件。\n\ngzexe是用来压缩执行文件的程序。当您去执行被压缩过的执行文件时，该文件会自动解压然后继续执行，和使用一般的执行文件相同。\n\n"
+        },
+        {
+          "command": "gzip",
+          "option": "-d：解压缩 .gz 文件。相当于使用 gunzip 命令。\n-k：保留原始文件，不删除。\n-r：递归压缩目录下的所有文件。\n-v：显示详细的压缩或解压缩过程。\n-l：显示压缩文件的详细信息，如压缩率、原始大小等。\n-1 到 -9：指定压缩比。-1 是最快的压缩，压缩率最低；-9 是最慢的压缩，压缩率最高。默认是 -6。\n-t：测试压缩文件的完整性。",
+          "description": "Linux gzip 命令用于压缩文件。\n\ngzip 是个使用广泛的压缩程序，文件经它压缩过后，其名称后面会多出 .gz 的扩展名。\n\ngzip 使用 DEFLATE 压缩算法，通常比 bzip2 更快，但压缩比稍低。\n\n语法\ngzip [options] [file...]\nfile...：要压缩的文件。gzip 会将指定的文件压缩，并生成一个 .gz 后缀的压缩文件，同时删除原始文件。"
+        },
+        {
+          "command": "tar",
+          "option": "-c：创建一个新的归档文件。\n-x：解压归档文件。\n-t：列出归档文件的内容。\n-r：向现有归档文件中追加文件。\n-u：仅追加比归档文件中已有文件更新的文件。\n-d：找到归档文件中与文件系统不同步的差异。\n-A：将一个 .tar 文件追加到另一个 .tar 文件中。",
+          "description": "Linux tar（英文全拼：tape archive ）命令用于备份文件。\n\ntar 是 Linux 和 Unix 系统中用于归档文件和目录的强大命令行工具。\n\ntar 名字来自 \"tape archive\"（磁带归档），最初用于将文件打包到磁带设备中，但现在广泛用于在文件系统中打包和压缩文件。\n\ntar 通常用于将多个文件和目录打包成一个归档文件，称为 \"tarball\"（通常带有 .tar 扩展名）。\n\ntar 本身不压缩文件，但可以与压缩工具（如 gzip 或 bzip2）结合使用，创建压缩的归档文件（如 .tar.gz 或 .tar.bz2）。\n\n语法\ntar [options] -f archive.tar [files...]\n-f archive.tar：指定归档文件的名称。\n[files...]：要打包的文件和目录。"
+        },
+        {
+          "command": "unzip",
+          "option": "-d <directory>：将解压缩的文件放入指定的目录。\n-l：列出 .zip 文件中的内容，但不解压。\n-v：显示详细信息，包括 .zip 文件的结构和压缩率等信息。\n-t：测试 .zip 文件的完整性，但不解压。\n-n：解压时不覆盖已存在的文件。\n-o：解压时覆盖已存在的文件，而不提示。\n-x <pattern>：解压时排除指定的文件或目录。\n-j：解压时不保留目录结构，将所有文件解压到当前目录中。",
+          "description": "Linux unzip 命令用于解压缩 .zip 格式的压缩文件。\n\nunzip 工具能够解压缩包含多个文件和目录的 .zip 文件，并且广泛用于处理跨平台压缩文件。\n\n语法\nunzip [options] file.zip"
+        },
+        {
+          "command": "zip",
+          "option": "-r：递归压缩目录及其子目录中的所有文件。\n-e：为压缩文件设置密码保护。\n-q：静默模式，不显示压缩过程。\n-v：显示详细的压缩过程。\n-x：排除某些文件或目录，不进行压缩。\n-m：压缩后删除原始文件。\n-0 到 -9：指定压缩级别，-0 表示存储不压缩，-9 表示最高压缩率，默认是 -6。",
+          "description": "Linux zip 命令用于压缩文件。\n\nzip 是个使用广泛的压缩程序，压缩后的文件后缀名为 .zip。\n\n与 gzip 或 bzip2 不同，zip 可以压缩多个文件或整个目录，并保留文件的目录结构。\n\nzip 在跨平台（如 Windows、macOS）上也广泛支持。\n\n语法\nzip [options] output.zip file1 file2 ...\noutput.zip：生成的压缩文件名。\nfile1 file2 ...：要压缩的文件或目录。"
+        },
+        {
+          "command": "zipinfo",
+          "option": "-1：仅列出 .zip 文件中的文件名，每个文件占一行。\n-t：显示每个文件的总数和未压缩后的总大小。\n-h：以更加可读的格式（人性化的格式）显示文件大小（如 KB, MB）。\n-m：显示 .zip 文件中每个文件的权限信息（Unix 格式）。\n-v：显示更详细的信息，包括压缩方式、版本、压缩比等。\n-s：总结 .zip 文件的总体信息，如文件数量、总大小等。\n-l：详细列出 .zip 文件的内容，包括文件大小、日期、时间等。",
+          "description": "Linux zipinfo 命令用于显示 .zip 压缩文件的详细信息，而不解压文件。\n\nzipinfo 提供了有关压缩文件的内容、压缩比、时间戳等详细信息，是检查 .zip 文件内容的常用工具。\n\n语法\nzipinfo [options] file.zip\nfile.zip：要查看信息的 .zip 文件。"
+        }
+      ]
+    },
+    {
+      "command": "设备管理",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "setleds",
+          "option": "-F：预设的选项，设定虚拟主控台的状态。\n-D：除了改变虚拟主控台的状态外，还改变预设的状态。\n-L：不改变虚拟主控台的状态，但直接改变 LED 显示的状态。这会使得 LDE 显示和目前虚拟主控台的状态不符合。我们可以在稍后用 -L 且不含其它选项的 setleds 命令回复正常状态。\n-num +num：将数字键打开或关闭。\n-caps +caps：把大小写键打开或关闭。\n-scroll +scroll：把选项键打开或关闭。",
+          "description": "Linux setleds命令用来设定键盘上方三个 LED 的状态。在 Linux 中，每一个虚拟主控台都有独立的设定。"
+        }
+      ]
+    },
+    {
+      "command": "其它命令",
+      "option": "",
+      "description": "",
+      "children": [
+        {
+          "command": "bc",
+          "option": "-i：强制进入交互式模式；\n-l：定义使用的标准数学库\n； -w：对POSIX bc的扩展给出警告信息；\n-q：不打印正常的GNU bc环境信息；\n-v：显示指令版本信息；\n-h：显示指令的帮助信息。",
+          "description": "bc 命令是任意精度计算器语言，通常在linux下当计算器用。\n\n它类似基本的计算器, 使用这个计算器可以做基本的数学运算。\n\n常用的运算：\n\n+ 加法\n- 减法\n* 乘法\n/ 除法\n^ 指数\n% 余数"
+        }
+      ]
+    }
+  ]
+}

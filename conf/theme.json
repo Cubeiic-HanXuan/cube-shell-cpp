@@ -1,0 +1,10 @@
+{
+    "appearance": "dark",
+    "font": "Monaco",
+    "font_size": 14,
+    "language": "zh_CN",
+    "terminal_theme": "Tango",
+    "theme": "rrt",
+    "theme_color": "#000000",
+    "version": "2.8.0"
+}

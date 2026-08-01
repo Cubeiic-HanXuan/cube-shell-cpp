@@ -1,0 +1,185 @@
+# ---------------------------------------------------------------------------
+# Build directories
+# ---------------------------------------------------------------------------
+build/
+build*/
+cmake-build-*/
+/out/
+/bin/
+/lib/
+/install/
+_deps/
+
+# ---------------------------------------------------------------------------
+# CMake generated files
+# (project-owned modules under cmake/ are kept via the exception below)
+# ---------------------------------------------------------------------------
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+cmake_install.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CTestTestfile.cmake
+Makefile
+!cmake/*.cmake
+!CMakeLists.txt
+
+# CMake/Qt autogen intermediates
+*_autogen/
+mocs_compilation.cpp
+compile_commands.json
+.cache/
+
+# ---------------------------------------------------------------------------
+# Compiled objects, libraries and executables
+# ---------------------------------------------------------------------------
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.la
+*.lai
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app/
+*.gch
+*.pch
+*.pdb
+*.ilk
+*.idb
+
+# ---------------------------------------------------------------------------
+# Qt generated files (translation sources *.ts and resources *.qrc are kept)
+# ---------------------------------------------------------------------------
+moc_*.cpp
+moc_*.h
+moc_predefs.h
+ui_*.h
+qrc_*.cpp
+
+# Compiled translations are build output, except the ones shipped under
+# resources/translations/ which are loaded at runtime by LanguageManager
+# and are not produced by any CMake lrelease step.
+*.qm
+!resources/translations/**/*.qm
+.qmake.stash
+.qmake.cache
+Makefile.Debug
+Makefile.Release
+object_script.*.Debug
+object_script.*.Release
+qmake_qmake_immediate.pri
+
+# ---------------------------------------------------------------------------
+# IDE and editor configuration
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/c_cpp_properties.json
+*.user
+*.user.*
+*.creator
+*.creator.user
+*.creator.user.*
+*.files
+*.includes
+CMakeLists.txt.user
+CMakeLists.txt.user.*
+cmake-variants.yaml
+
+# ---------------------------------------------------------------------------
+# macOS
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+
+# ---------------------------------------------------------------------------
+# Windows / Linux desktop cruft
+# ---------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.directory
+.fuse_hidden*
+.nfs*
+
+# ---------------------------------------------------------------------------
+# Editor temporary files
+# ---------------------------------------------------------------------------
+*.swp
+*.swo
+*.swn
+*~
+*.bak
+*.orig
+*.rej
+*.kate-swp
+.#*
+\#*#
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+/logs/
+/log/
+/core
+core.[0-9]*
+crash*.dmp
+
+# ---------------------------------------------------------------------------
+# Testing artifacts
+# ---------------------------------------------------------------------------
+Testing/
+LastTest.log
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+
+# ---------------------------------------------------------------------------
+# Package / install artifacts (root level only)
+# ---------------------------------------------------------------------------
+/*.deb
+/*.rpm
+/*.dmg
+/*.pkg
+/*.tar.gz
+/*.tar.bz2
+/*.tar.xz
+/*.tgz
+/*.zip
+/*.7z
+/*.AppImage
+/*.msi
+/*.exe
+
+# ---------------------------------------------------------------------------
+# Local environment / secrets
+# ---------------------------------------------------------------------------
+.env
+.env.local
+*.pem
+*.key
+!resources/**/*.key

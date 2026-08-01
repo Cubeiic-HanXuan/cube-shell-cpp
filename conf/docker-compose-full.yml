@@ -1,0 +1,449 @@
+version: '3.5'
+services:
+  nacos:
+    labels:
+     description: "用于服务注册和服务发现的中间件"
+    image: nacos/nacos-server:v2.4.3
+    container_name: nacos-server
+    ports:
+    - 8848:8848
+    - 9848:9848
+    environment:
+      PREFER_HOST_MODE: hostname
+      MODE: standalone
+    volumes:
+    - ./logs/nacos/:/home/nacos/logs
+    - ./data/nacos/:/home/nacos/data
+  seata:
+    labels:
+      description: "Seata 是阿里巴巴开源的一个分布式事务解决方案，致力于解决跨服务的事务一致性问题"
+    image: seataio/seata-server:2.0.0
+    ports:
+      - "7091:7091"
+      - "8091:8091"
+    environment:
+      - STORE_MODE=db
+      # 以SEATA_IP作为host注册seata server
+      - SEATA_IP=10.0.0.74
+      - SEATA_PORT=8091
+    volumes:
+      - "/usr/share/zoneinfo/Asia/Shanghai:/etc/localtime"        #设置系统时区
+      - "/usr/share/zoneinfo/Asia/Shanghai:/etc/timezone"  #设置时区
+      # 假设我们通过docker cp命令把资源文件拷贝到相对路径`./seata-server/resources`中
+      - "./resources/application.yml:/seata-server/resources/application.yml"
+  redis:
+    labels:
+      description: "Redis 是一个开源的、基于内存的数据结构存储系统，通常用作数据库、缓存和消息代理"
+    image: redis:latest
+    container_name: redis
+    restart: always
+    ports:
+    - 6379:6379
+    volumes:
+    - ./services/redis/redis.conf:/usr/local/etc/redis/redis.conf:rw
+    - ./data/redis:/data:rw
+    environment:
+    - REDIS_PASSWORD=cube@123456
+    command: redis-server --requirepass $${REDIS_PASSWORD}
+    networks:
+    - cube-test
+  elasticsearch:
+    labels:
+      description: "Elasticsearch 是一个开源的分布式搜索引擎和分析引擎"
+    container_name: elasticsearch
+    build:
+      context: services/elasticsearch/
+      args:
+      - ES_VER=7.5.0
+    ports:
+    - 9200:9200
+    - 9300:9300
+    environment:
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      discovery.type: single-node
+    volumes:
+    - ./data/elasticsearch/plugins/:/usr/share/elasticsearch/plugins/
+    - ./data/elasticsearch/:/usr/share/elasticsearch/data/
+    - ./logs/elasticsearch/:/usr/share/elasticsearch/logs/
+    - ./services/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+    networks:
+    - zz-test
+  logstash:
+    labels:
+      description: "Logstash 是 Elastic Stack（以前称为 ELK Stack）中的一个开源数据收集和处理管道工具，主要用于实时采集、转换和传输日志及各种数据"
+    build:
+      context: services/logstash/
+      args:
+      - LOGSTASH_VER=7.5.0
+    environment:
+      LS_JAVA_OPTS: -Xmx256m -Xms256m
+    volumes:
+    - ./data/logstash/:/usr/share/logstash/data/
+    - ./logs/logstash/:/usr/share/logstash/logs/
+    - ./services/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
+    - ./services/logstash/config/pipelines.yml:/usr/share/logstash/config/pipeline.yml
+    - ./services/logstash/pipeline/:/usr/share/logstash/pipeline/
+    networks:
+    - zz-test
+    depends_on:
+    - elasticsearch
+    - kafka
+  kibana:
+    labels:
+      description: "Kibana 是 Elastic Stack（以前称为 ELK Stack）中的一个开源数据可视化和探索工具，专门用于对存储在 Elasticsearch 中的数据进行交互式分析和展示"
+    container_name: kibana
+    build:
+      context: services/kibana/
+      args:
+      - KIBANA_VER=7.5.0
+    ports:
+    - 5601:5601
+    volumes:
+    - ./services/kibana/kibana.yml:/usr/share/kibana/config/kibana.yml
+    networks:
+    - zz-test
+    depends_on:
+    - elasticsearch
+  zookeeper:
+    labels:
+      description: "ZooKeeper 是一个开源的分布式协调服务，主要用于分布式系统中提供高可靠性的协调和管理功能"
+    image: zookeeper:3.5.9
+    ports:
+    - 2181:2181
+    volumes:
+    - ./logs/zookeeper/:/data
+    - ./data/zookeeper/:/datalog
+    networks:
+    - zz-test
+  kafka:
+    labels:
+      description: "Kafka 是一个开源的分布式流处理平台。它主要用来构建实时数据管道和流应用，能够高效、可靠地处理大量的实时数据流。"
+    image: wurstmeister/kafka:2.12-2.4.0
+    ports:
+    - 9092:9092
+    expose:
+    - '9093'
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9093,OUTSIDE://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9092
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+    volumes:
+    - ./data/kafka/:/kafka
+    networks:
+    - zz-test
+    depends_on:
+    - zookeeper
+  minio:
+    labels:
+      description: "MinIO 是一个开源的、高性能的分布式对象存储服务"
+    image: minio/minio:latest
+    environment:
+    - MINIO_ACCESS_KEY=admin
+    - MINIO_SECRET_KEY=admin123456
+    volumes:
+    - ./data/minio:/data
+    - ./services/minio/config:/root/.minio
+    ports:
+    - 19000:9000
+    - 19001:9001
+    command: server /data --console-address ":9001"
+  rmqnamesrv:
+    labels:
+      description: "RocketMQ 是阿里巴巴开源的一款分布式消息中间件"
+    image: foxiswho/rocketmq:server-4.7.0
+    container_name: rmqnamesrv
+    ports:
+    - 9876:9876
+    volumes:
+    - ./logs/rocketmq/server:/home/rocketmq/logs
+    - ./data/rocketmq/server/store:/home/rocketmq/store
+    environment:
+      JAVA_OPT_EXT: ' -Xms128m -Xmx128m -Xmn128m'
+    networks:
+      rmq:
+        aliases:
+        - rmqnamesrv
+  rmqbroker:
+    labels:
+      description: "RocketMQ 是阿里巴巴开源的一款分布式消息中间件"
+    image: foxiswho/rocketmq:broker-4.7.0
+    container_name: rmqbroker
+    ports:
+    - 10909:10909
+    - 10911:10911
+    volumes:
+    - ./logs/rocketmq/broker:/home/rocketmq/logs
+    - ./data/rocketmq/broker/store:/home/rocketmq/store
+    - ./services/rocketmq/brokerconf/broker.conf:/etc/rocketmq/broker.conf
+    environment:
+      NAMESRV_ADDR: rmqnamesrv:9876
+      JAVA_OPT_EXT: -server -Xms128m -Xmx128m -Xmn128m
+    command: mqbroker -c /etc/rocketmq/broker.conf
+    depends_on:
+    - rmqnamesrv
+    networks:
+      rmq:
+        aliases:
+        - rmqbroker
+  postgresql:
+    labels:
+      description: "PostgreSQL（简称 Postgres）是一个功能强大且开源的对象-关系型数据库管理系统（ORDBMS）"
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      PGUSER: ${PGUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_DB: ${POSTGRES_DB:-cube}
+      PGDATA: ${PGDATA:-/var/lib/postgresql/data/pgdata}
+    command: >
+      postgres -c 'max_connections=${POSTGRES_MAX_CONNECTIONS:-100}'
+               -c 'shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}'
+               -c 'work_mem=${POSTGRES_WORK_MEM:-4MB}'
+               -c 'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}'
+               -c 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-4096MB}'
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [ 'CMD', 'pg_isready' ]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    ports:
+      - '${EXPOSE_DB_PORT:-5432}:5432'
+  mysql:
+    labels:
+      description: "MySQL 是一种开源的关系型数据库管理系统，它是目前世界上最流行的数据库之一"
+    image: mysql:8.0.37
+    container_name: mysql8-server  # 明确指定容器名称
+    restart: unless-stopped       # 更灵活的自动重启策略
+    environment:
+      - MYSQL_ROOT_PASSWORD=your_strong_password_here  # 实际密码需替换
+      - MYSQL_USER=app_user                            # 创建应用用户
+      - MYSQL_PASSWORD=app_password
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/var/lib/mysql
+      - ./conf:/etc/mysql/conf.d
+      - ./logs:/var/log/mysql
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --lower_case_table_names=1
+      - --explicit_defaults_for_timestamp=1
+  dmdb:
+    labels:
+      description: "达梦数据库（简称 DM，英文名 DaMeng Database）是一款由中国企业自主研发的国产高性能关系型数据库管理系统（RDBMS）"
+    image: dm8:dm8_20241230_rev255012_x86_rh6_64  # 使用达梦数据库的官方镜像或自定义镜像
+    container_name: dmdb8
+    ports:
+      - "5236:5236"  # 达梦数据库默认端口
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - PAGE_SIZE=4
+      - LD_LIBRARY_PATH=/opt/dmdbms/bin
+      - INSTANCE_NAME=dm8
+      - CASE_SENSITIVE=0
+      - UNICODE_FLAG=1
+      - COMPATIBLE_MODE=4
+      - ORDER_BY_NULLS_FLAG=2
+      - SYSDBA_PWD=123456789
+      - MY_STRICT_TABLES=1
+    volumes:
+      - /data/nt_cloud/dmdb/data:/opt/dmdbms/data  # 挂载数据目录到宿主机
+      - /data/nt_cloud/dmdb/logs:/opt/dmdbms/log   # 挂载日志目录到宿主机
+  kingbase:
+    labels:
+      description: "KingBase 是一款由kingbase软件公司开发的开源关系型数据库管理系统"
+    image: kingbase/kingbase_docker:latest
+    container_name: kingbase_container
+    environment:
+      - POSTGRES_PASSWORD=your_password  # 设置数据库密码
+    volumes:
+      - kingbase_data:/var/lib/postgresql/data  # 持久化数据卷
+    ports:
+      - "5432:5432"  # 映射端口，默认人大金库使用5432端口
+    restart: always
+  opengauss:
+    labels:
+      description: "OpenGauss 是一个开源的关系型数据库管理系统"
+    image: opengausstech/open-gauss
+    container_name: opengauss_db
+    environment:
+      POSTGRES_USER: gaussdb
+      POSTGRES_PASSWORD: yourpassword
+      POSTGRES_DB: mydatabase
+    ports:
+      - "5432:5432"
+    volumes:
+      - opengauss_data:/var/lib/postgresql/12/main
+    restart: unless-stopped
+  oceanbase:
+    labels:
+      description: "OceanBase 是一个开源的关系型数据库管理系统"
+    container_name: obstandalone
+    image: quay.io/oceanbase/oceanbase-ce:latest
+    ports:
+      - 2881:2881
+    restart: always
+    hostname: obstandalone
+    volumes:
+      - /home/oceanbase/ob:/root/ob
+      - /home/oceanbase/obd/cluster:/root/.obd/cluster
+    environment:
+      # 部署 mini 的独立实例
+      - MODE=MINI
+      - OB_TENANT_PASSWORD=Lu234567
+  nginx:
+    labels:
+      description: "Nginx 是一个高性能的 HTTP 和反向代理服务器，同时也作为 IMAP/POP3/SMTP 等协议服务器"
+    image: nginx:1.23-alpine
+    container_name: nginx-1.23
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/conf.d:/etc/nginx/conf.d
+      - ./html:/usr/share/nginx/html
+      - ./logs:/var/log/nginx
+      - ./certs:/etc/ssl/certs
+    environment:
+      - TZ=Asia/Shanghai
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d
+    networks:
+      - frontend
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 512M
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost" ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+  jenkins:
+    labels:
+      description: "Jenkins 是一个开源的持续集成工具"
+    image: jenkins/jenkins:2.204
+    container_name: jenkins
+    restart: unless-stopped
+    hostname: jenkins
+    network_mode: bridge
+    ports:
+      - "8080:8080/tcp"
+    volumes:
+      - /var/lib/jenkins:/var/jenkins_home
+  grafana:
+    labels:
+      description: "Grafana 是一个开源的监控平台"
+    image: grafana/grafana:6.4.4
+    container_name: grafana
+    restart: unless-stopped
+    hostname: grafana
+    network_mode: bridge
+    ports:
+      - 3000:3000/tcp
+    volumes:
+      # mkdir /var/lib/grafana && chown -R 472:472 /var/lib/grafana
+      - /var/lib/grafana:/var/lib/grafana
+      # mkdir /var/log/grafana && chown -R 472:472 /var/log/grafana
+      - /var/log/grafana:/var/log/grafana
+      - /etc/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      GF_SERVER_ROOT_URL: http://127.0.0.1
+      #GF_SECURITY_ADMIN_PASSWORD: changeme
+      #GF_INSTALL_PLUGINS: 'grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel,grafana-clock-panel,grafana-piechart-panel,grafana-influxdb-flux-datasource,grafana-kubernetes-app,grafana-polystat-panel'
+
+      #GF_PATHS_CONFIG: /etc/grafana/grafana.ini
+      #GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      #GF_PATHS_HOME: /usr/share/grafana
+      #GF_PATHS_LOGS: /var/log/grafana
+      #GF_PATHS_DATA: /var/lib/grafana
+      #GF_PATHS_PLUGINS: /var/lib/grafana/plugins
+
+      #GF_AWS_PROFILES: default
+      #GF_AWS_default_ACCESS_KEY_ID: YOUR_ACCESS_KEY
+      #GF_AWS_default_SECRET_ACCESS_KEY: YOUR_SECRET_KEY
+      #GF_AWS_default_REGION: us-east-1
+  clickhouse:
+    labels:
+      description: "ClickHouse 是一个开源的列式数据库管理系统"
+    image: yandex/clickhouse-server:19.16
+    container_name: clickhouse
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      # HTTP API
+      - 8123:8123/tcp
+      # Native API
+      - 9000:9000/tcp
+      # Cluster Replication
+      - 9009:9009/tcp
+    volumes:
+      - /var/lib/clickhouse:/var/lib/clickhouse
+      - /var/log/clickhouse-server:/var/log/clickhouse-server
+  mongodb:
+    labels:
+      description: "MongoDB 是一个开源的 NoSQL 高性能数据库"
+    image: mongo:latest       # 使用官方 MongoDB 镜像
+    container_name: mongodb   # 容器名字
+    restart: unless-stopped   # 容器异常停止后自动重启
+    ports:
+      - 27017:27017         # 映射主机27017端口到容器27017端口
+    environment:
+      TZ: Asia/Shanghai
+      MONGO_INITDB_ROOT_USERNAME: root   # 设置MongoDB root用户
+      MONGO_INITDB_ROOT_PASSWORD: examplepassword # 设置密码
+    volumes:
+    - ./data/mongodb:/data/db # 持久化数据
+  consul:
+    labels:
+      description: "Consul 是一个开源的分布式配置中心"
+    container_name: consul
+    image: "consul:1.15.4"
+    network_mode: "host"
+    restart: always
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    volumes:
+      - /data/docker/consul/data:/consul/data
+      - /data/docker/consul/config:/consul/config
+    command: consul agent -server -ui -bootstrap-expect=1 -data-dir=/consul/data -client=0.0.0.0 -bind=当前服务器IP地址（ip addr查看） -node=consul-node-1
+  etcd:
+    labels:
+      description: "Etcd 是一个开源的分布式键值存储"
+    image: quay.srebro.site/coreos/etcd:v3.3.8
+    container_name: etcd
+    ports:
+      - 2379:2379
+      - 2380:2380
+    restart: always
+    environment:
+      - ETCD_NAME=etcd
+      - ETCD_DATA_DIR=/var/etcd
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://172.22.33.213:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://172.22.33.213:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER=etcd=http://172.22.33.213:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_LOGGER=zap
+      - ETCD_LOG_LeveL=info
+    volumes:
+      - /home/application/etcd/data:/var/etcd
+      - /etc/localtime:/etc/localtime:ro
+
+networks:
+  zz-test:
+    driver: bridge
+  rmq:
+    name: rmq
+    driver: bridge

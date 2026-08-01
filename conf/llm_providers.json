@@ -1,0 +1,90 @@
+[
+  {
+    "key": "anthropic",
+    "name": "Anthropic (默认)",
+    "base_url": "",
+    "anthropic_base_url": "",
+    "models": ["sonnet", "opus", "haiku"],
+    "supports_thinking": true
+  },
+  {
+    "key": "zhipuai",
+    "name": "智谱 GLM",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "anthropic_base_url": "https://open.bigmodel.cn/api/anthropic",
+    "models": ["glm-5.2[1m]", "glm-5.1", "glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo"],
+    "supports_thinking": true
+  },
+  {
+    "key": "deepseek",
+    "name": "DeepSeek",
+    "base_url": "https://api.deepseek.com/v1",
+    "anthropic_base_url": "https://api.deepseek.com/anthropic",
+    "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+    "supports_thinking": true
+  },
+  {
+    "key": "aliyun",
+    "name": "通义千问",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "anthropic_base_url": "https://dashscope.aliyuncs.com/compatible-mode/anthropic",
+    "models": ["qwen-max", "qwen-plus", "qwen-turbo"],
+    "supports_thinking": false
+  },
+  {
+    "key": "moonshot",
+    "name": "Kimi (月之暗面)",
+    "base_url": "https://api.moonshot.cn/v1",
+    "anthropic_base_url": "",
+    "models": ["kimi-k2.7", "kimi-k2.6", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    "supports_thinking": false
+  },
+  {
+    "key": "spark",
+    "name": "讯飞星火",
+    "base_url": "https://spark-api-open.xf-yun.com/v1",
+    "anthropic_base_url": "",
+    "models": ["general", "generalv3", "generalv3.5"],
+    "supports_thinking": false
+  },
+  {
+    "key": "baichuan",
+    "name": "百川",
+    "base_url": "https://api.baichuan-ai.com/v1",
+    "anthropic_base_url": "",
+    "models": ["Baichuan4", "Baichuan3-Turbo"],
+    "supports_thinking": false
+  },
+  {
+    "key": "minimax",
+    "name": "MiniMax",
+    "base_url": "https://api.minimax.chat/v1",
+    "anthropic_base_url": "",
+    "models": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-Text-01", "abab6.5s-chat", "abab5.5-chat"],
+    "supports_thinking": false
+  },
+  {
+    "key": "xiaomi",
+    "name": "小米 MiLM",
+    "base_url": "https://api.xiaomi.com/v1",
+    "anthropic_base_url": "",
+    "models": ["MiLM-1"],
+    "supports_thinking": false
+  },
+  {
+    "key": "doubao",
+    "name": "豆包 (火山引擎)",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "anthropic_base_url": "https://ark.cn-beijing.volces.com/api/v3/anthropic",
+    "models": ["doubao-seed-2-0-code-preview-260215", "doubao-seed-2-0-mini-260215", "doubao-seed-2-0-pro-260215"],
+    "supports_thinking": true
+  },
+  {
+    "key": "custom",
+    "name": "自定义",
+    "base_url": "",
+    "anthropic_base_url": "",
+    "models": [],
+    "supports_thinking": false
+  }
+]

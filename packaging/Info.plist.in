@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Info.plist.in — CMake configure_file 模板（macOS .app bundle）。
+
+    由 cpp/CMakeLists.txt 通过 MACOSX_BUNDLE_INFO_PLIST 属性套用，@VAR@ 占位符
+    在配置期展开。核心作用是声明 CFBundleURLTypes（jms / ssh / cubeshell），
+    使系统把这三个 URL Scheme 关联到本 .app —— 即 macOS 的 URL Scheme 注册路径
+    （对应 core/url_dispatch/url_scheme_register.py 里 Darwin 分支"由 Info.plist
+    处理"的说明，以及 conf/macos_url_scheme.plist 的内容）。
+
+    注：Nuitka 不支持 --macos-app-url-scheme，Python 版靠打包后手工/脚本
+    合并 plist；C++/CMake 侧在配置期直接生成，无此限制。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>@MACOSX_BUNDLE_EXECUTABLE_NAME@</string>
+    <key>CFBundleName</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
+    <key>CFBundleDisplayName</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
+    <key>CFBundleIdentifier</key>
+    <string>@MACOSX_BUNDLE_GUI_IDENTIFIER@</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
+    <key>CFBundleVersion</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_VERSION@</string>
+    <key>CFBundleIconFile</key>
+    <string>@MACOSX_BUNDLE_ICON_FILE@</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>@CUBESHELL_MACOS_MIN_VERSION@</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>@MACOSX_BUNDLE_COPYRIGHT@</string>
+
+    <!-- URL Scheme 注册：浏览器/Finder workflow 点击这些链接即唤起本应用，
+         应用侧由 QFileOpenEvent（src/app/main.cpp）接收并交 UrlHandler 解析。 -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>JumpServer Connection</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>jms</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>SSH Connection</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>ssh</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>CubeShell Local Terminal</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>cubeshell</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

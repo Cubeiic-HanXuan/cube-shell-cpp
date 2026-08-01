@@ -55,6 +55,16 @@ qt_standard_project_setup()
 option(CUBESHELL_WITH_SSH "Build SSH support (libssh2)" ON)
 option(CUBESHELL_WITH_RDP "Build RDP support (FreeRDP)" OFF)
 
+# cJSON —— 必须在任何 add_subdirectory() / FreeRDP 查找之前导入。
+# WinPR 的 imported target 把 `cjson` 写进了 INTERFACE_LINK_LIBRARIES。若此时
+# cjson 不是已知的 imported target，CMake 就把它当普通库名原样传给链接器
+#（MSVC 下变成不带路径的 `cjson.lib` → LNK1181）；一旦目标存在，CMake 会替换
+# 成 vcpkg 里的绝对路径。放在根作用域是为了让 src/core（链接 winpr）与 src/app
+#（最终链接 cube-shell.exe）两个目录都能看见这个目标。
+if(CUBESHELL_WITH_RDP)
+    find_package(cJSON CONFIG QUIET)
+endif()
+
 if(CUBESHELL_WITH_SSH)
     # Resolve libssh2. Order of preference:
     #   1. a caller-provided static lib (LIBSSH2_LIBRARY / LIBSSH2_INCLUDE_DIR)
@@ -151,6 +161,18 @@ if(APPLE)
     else()
         set(CUBESHELL_MACOS_MIN_VERSION "11.0")
     endif()
+endif()
+
+# 兜底：即使上面的 find_package(cJSON) 没能创建 imported target（vcpkg 布局差异
+# 等原因），也让链接器能在 vcpkg 的 lib 目录里找到裸名 cjson.lib。
+# 必须写在 add_subdirectory() 之前——link_directories 只影响之后创建的目标。
+# 用 CMAKE_BINARY_DIR 而非 VCPKG_INSTALLED_DIR：manifest 模式下后者可能为空。
+# 非 Windows 平台不需要：WinPR 走 pkg-config 或动态链接自行解析依赖。
+if(WIN32 AND VCPKG_TARGET_TRIPLET)
+    link_directories(
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib"
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/lib"
+    )
 endif()
 
 add_subdirectory(src/qtermwidget)   # terminal emulator widget
@@ -267,5 +289,14 @@ message(STATUS "  Qt version      : ${Qt6_VERSION}")
 message(STATUS "  Build type      : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  SSH (libssh2)   : ${CUBESHELL_WITH_SSH}")
 message(STATUS "  RDP (FreeRDP)   : ${CUBESHELL_WITH_RDP}")
+if(CUBESHELL_WITH_RDP)
+    # 诊断用：cjson 目标存在时 CMake 会把 WinPR 传递过来的裸名 cjson 解析成绝对
+    # 路径；不存在时就只能靠上面的 link_directories 兜底。
+    if(TARGET cjson)
+        message(STATUS "  cJSON target    : cjson (裸名依赖将解析为绝对路径)")
+    else()
+        message(STATUS "  cJSON target    : 未找到，依赖 link_directories 兜底")
+    endif()
+endif()
 message(STATUS "  Install prefix  : ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")

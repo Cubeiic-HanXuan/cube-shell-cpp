@@ -172,10 +172,11 @@ endif()
 if(CUBESHELL_WITH_RDP)
     target_compile_definitions(cube_core PUBLIC CUBESHELL_WITH_RDP=1)
 
-    # cJSON must be imported BEFORE FreeRDP: FreeRDP's CMake config references
-    # the bare `cjson` target as a dependency. Without the imported target CMake
-    # treats "cjson" as a plain library name and hands `cjson.lib` (no path) to
-    # the linker — LNK1181 on Windows/vcpkg. CONFIG mode is required for vcpkg.
+    # cJSON 已由根 CMakeLists 在 add_subdirectory() 之前导入（那里才能让 src/app
+    # 的最终链接也看见 cjson 目标）。这里再调一次只为让本目录单独配置时
+    # 仍能拿到目标；根作用域已找到时此调用是无副作用的重复。
+    # 关键约束不变：必须先于 find_package(FreeRDP)，否则 WinPR 的
+    # INTERFACE_LINK_LIBRARIES 里的裸名 `cjson` 会变成不带路径的 cjson.lib。
     find_package(cJSON CONFIG QUIET)
 
     find_package(FreeRDP CONFIG QUIET)
@@ -206,10 +207,9 @@ if(CUBESHELL_WITH_RDP)
         message(STATUS "FreeRDP not found: RDP falls back to xfreerdp/mstsc command line")
     endif()
 
-    # FreeRDP's config lists `cjson` as a bare library name in its
-    # INTERFACE_LINK_LIBRARIES, so MSVC receives `cjson.lib` without a path.
-    # PUBLIC: cube_core is static, the search path must reach the final link
-    # of cube-shell.exe.
+    # 第三道兜底：若调用方自定义了 VCPKG_INSTALLED_DIR（不在根 CMakeLists 的
+    # ${CMAKE_BINARY_DIR}/vcpkg_installed 下），根里的 link_directories 就指不到位。
+    # PUBLIC：cube_core 是静态库，搜索路径必须传递到 cube-shell.exe 的最终链接。
     if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
         target_link_directories(cube_core PUBLIC
             "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib"

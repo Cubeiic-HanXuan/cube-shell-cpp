@@ -1,0 +1,11 @@
+{
+  "name": "cube-shell-cpp",
+  "version": "1.0.0",
+  "dependencies": [
+    "libssh2",
+    "openssl",
+    "yaml-cpp",
+    "zlib",
+    "freerdp"
+  ]
+}

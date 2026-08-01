@@ -22,6 +22,7 @@
 #include <QResizeEvent>
 #include <QRegularExpression>
 #include <QSizePolicy>
+#include <QStandardPaths>
 #include <QTextStream>
 #include <QTranslator>
 #include <QVBoxLayout>
@@ -65,11 +66,25 @@ struct TermWidgetImpl {
 
         session->setTitle(Session::NameRole, QStringLiteral("QTermWidget"));
 
-        // 设置 shell 程序 — 优先使用环境变量 SHELL。
+        // 设置 shell 程序 — 各平台的默认 shell 完全不同,必须分开处理。
+        QString shellProgram;
+#ifdef Q_OS_WIN
+        // Windows: 优先 PowerShell 7+ (pwsh),其次系统自带 powershell.exe。
+        shellProgram = QStandardPaths::findExecutable(QStringLiteral("pwsh.exe"));
+        if (shellProgram.isEmpty())
+            shellProgram = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+        if (shellProgram.isEmpty()) {
+            // 最后兜底:System32 下的 cmd.exe。
+            const QString sysRoot = qEnvironmentVariable("SYSTEMROOT", QStringLiteral("C:\\Windows"));
+            shellProgram = sysRoot + QStringLiteral("\\System32\\cmd.exe");
+        }
+#else
+        // Unix: 优先使用环境变量 SHELL。
         const QByteArray shellEnv = qgetenv("SHELL");
-        const QString shellProgram = shellEnv.isEmpty()
+        shellProgram = shellEnv.isEmpty()
             ? QStringLiteral("/bin/bash")
             : QString::fromLocal8Bit(shellEnv);
+#endif
         session->setProgram(shellProgram);
 
         // 修复(Python 移植 bug):不应传递空字符串参数,而是空列表。

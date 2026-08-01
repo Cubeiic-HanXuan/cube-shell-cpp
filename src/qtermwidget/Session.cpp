@@ -573,8 +573,11 @@ void Session::run()
     // 对应C++注释中的shell检查逻辑
     QString exec = _program;
 
+#ifndef Q_OS_WIN
     // 只有当exec是绝对路径或为空时才检查文件存在性;
     // 对于非绝对路径(如ssh),直接使用,让系统在PATH中查找。
+    // Windows 无 /bin/sh 之类的回退目标,qtermwidget.cpp 已选好可用的 shell,
+    // 这里必须原样透传给 ConPtyProcess,否则会退化成不存在的 Unix 路径。
     if (exec.startsWith(QLatin1Char('/')) || exec.isEmpty()) {
         const QString defaultShell = QStringLiteral("/bin/sh");
 
@@ -584,7 +587,13 @@ void Session::run()
         if (exec.isEmpty() || (exec.startsWith(QLatin1Char('/')) && !QFileInfo::exists(exec)))
             exec = defaultShell;
     }
+#endif
 
+#ifdef Q_OS_WIN
+    // Windows: ConPtyProcess 用 CreateProcessW 拼命令行时已自行放入程序路径,
+    // 若再按 Unix 的 argv[0] 约定补一个程序名,程序名会被重复传成第一个参数。
+    const QStringList arguments = _arguments;
+#else
     // arguments[0]是程序名,arguments[1:]是实际参数
     const QString argsTmp = _arguments.join(QLatin1Char(' ')).trimmed();
     // argv[0]应该是程序的基本名称,不是完整路径
@@ -592,6 +601,7 @@ void Session::run()
     QStringList arguments{programName};
     if (!argsTmp.isEmpty())
         arguments.append(_arguments);
+#endif
 
     // 设置工作目录
     const QString cwd = QDir::currentPath();
@@ -610,8 +620,9 @@ void Session::run()
         : QStringLiteral("COLORFGBG=0;15");
 
     // int result = _shellProcess->start(exec, arguments, _environment << backgroundColorHint, windowId(), _addToUtmp);
-    // Pty::start 期望 programArguments[0] 是程序名、[1:] 是实际参数(它内部做 .mid(1))。
+    // Unix 下 Pty::start 期望 programArguments[0] 是程序名、[1:] 是实际参数(它内部做 .mid(1))。
     // 因此这里要传完整的 arguments(含程序名),不能再 .mid(1) 剥掉程序名,否则参数会被剥离两次。
+    // Windows 下 Pty::start 原样转交给 ConPtyProcess,故上面只传实际参数。
     QStringList environment = _environment;
     environment << backgroundColorHint;
 

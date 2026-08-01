@@ -17,12 +17,19 @@
 #ifdef CUBESHELL_HAVE_FREERDP
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
+#ifdef CUBESHELL_HAVE_FREERDP_CLIENT
+#include <freerdp/client.h>
+#endif
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/version.h>
 #include <winpr/synch.h>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQueue>
+#include <QTextStream>
 #include <QThread>
 #include <exception>
 #endif
@@ -43,6 +50,30 @@ static void ensureFreeRDPInit()
         inited = true;
     }
 }
+
+#ifdef CUBESHELL_HAVE_FREERDP
+// 【临时调试代码，定位 0xc0000005 后删除】
+// 崩溃发生在进程内且无栈回溯可用，改用落盘日志定位：每个关键点写一行并
+// 立即 flush，崩溃后日志最后一行即为最后执行到的位置。
+static void rdpLog(const QString &msg)
+{
+    static const QString path = [] {
+        // 目录不存在时 QFile::open 会静默失败，表现为“没有日志”而非崩溃信息，
+        // 先建目录；非 Windows 上回退到临时目录以便本地验证。
+        QDir().mkpath(QStringLiteral("C:/dev"));
+        if (QDir(QStringLiteral("C:/dev")).exists())
+            return QStringLiteral("C:/dev/rdp_debug.log");
+        return QDir::temp().filePath(QStringLiteral("rdp_debug.log"));
+    }();
+    QFile f(path);
+    if (f.open(QIODevice::Append | QIODevice::Text)) {
+        QTextStream ts(&f);
+        ts << QDateTime::currentDateTime().toString(Qt::ISODateWithMs)
+           << " | " << msg << "\n";
+        ts.flush();
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // normalizeRdpHost
@@ -206,10 +237,12 @@ protected:
         try {
             runConnection();
         } catch (const std::exception &e) {
+            rdpLog(QStringLiteral("EXCEPTION: %1").arg(QString::fromLocal8Bit(e.what())));
             emit m_client->errorOccurred(QStringLiteral("RDP 内部异常：%1")
                                              .arg(QString::fromLocal8Bit(e.what())));
             emit m_client->disconnected();
         } catch (...) {
+            rdpLog(QStringLiteral("UNKNOWN EXCEPTION"));
             emit m_client->errorOccurred(QStringLiteral("RDP 未知内部异常"));
             emit m_client->disconnected();
         }
@@ -218,21 +251,35 @@ protected:
 private:
     void runConnection()
     {
+        rdpLog(QStringLiteral("runConnection: start"));
         freerdp *instance = freerdp_new();
         if (!instance) {
+            rdpLog(QStringLiteral("runConnection: freerdp_new FAILED"));
             emit m_client->errorOccurred(QStringLiteral("freerdp_new 失败"));
             return;
         }
+        rdpLog(QStringLiteral("runConnection: freerdp_new OK"));
         instance->ContextSize = sizeof(WorkerContext);
         instance->PreConnect = &FreeRdpWorker::preConnect;
         instance->PostConnect = &FreeRdpWorker::postConnect;
         instance->PostDisconnect = &FreeRdpWorker::postDisconnect;
+        // 凭据与证书回调必挂：NLA/TLS 协商阶段库内经 IFCALLRET 直接调用，
+        // 缺一个就会在 freerdp_connect() 内部解空指针（0xc0000005）。
+#if FREERDP_VERSION_MAJOR >= 3
+        instance->AuthenticateEx = &FreeRdpWorker::authenticateEx;
+#else
+        instance->Authenticate = &FreeRdpWorker::authenticate;
+#endif
+        instance->VerifyCertificateEx = &FreeRdpWorker::verifyCertificateEx;
+        instance->VerifyChangedCertificateEx = &FreeRdpWorker::verifyChangedCertificateEx;
 
         if (!freerdp_context_new(instance)) {
+            rdpLog(QStringLiteral("runConnection: freerdp_context_new FAILED"));
             freerdp_free(instance);
             emit m_client->errorOccurred(QStringLiteral("freerdp_context_new 失败"));
             return;
         }
+        rdpLog(QStringLiteral("runConnection: context_new OK"));
         reinterpret_cast<WorkerContext *>(instance->context)->worker = this;
         m_instance = instance;
 
@@ -243,6 +290,7 @@ private:
         // 否则失败只会表现为一个含义误导的 DNS_NAME_NOT_FOUND 错误码。
         const RdpHostPort target = normalizeRdpHost(m_settings.host, m_settings.port);
         if (target.host.isEmpty()) {
+            rdpLog(QStringLiteral("runConnection: empty host, abort"));
             emit m_client->errorOccurred(
                 QStringLiteral("RDP 主机地址为空（原始值：\"%1\"）").arg(m_settings.host));
             freerdp_context_free(instance);
@@ -281,7 +329,11 @@ private:
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
 
-        if (!freerdp_connect(instance)) {
+        rdpLog(QStringLiteral("runConnection: settings configured, calling freerdp_connect"));
+        const BOOL connected = freerdp_connect(instance);
+        rdpLog(QStringLiteral("runConnection: freerdp_connect returned %1")
+                   .arg(connected ? QStringLiteral("TRUE") : QStringLiteral("FALSE")));
+        if (!connected) {
             emit m_client->errorOccurred(connectErrorMessage(instance, target));
             freerdp_context_free(instance);
             freerdp_free(instance);
@@ -294,10 +346,19 @@ private:
         // 事件循环。对应Python: rdpconnection() 的 ext_out_queue 消费循环 +
         // inputhandler 线程的 in_q 消费（lines 420-426），C++ 侧合并为单循环：
         // 100ms 超时唤醒后 poll 输入队列并调用 FreeRDP input API 派发。
+        rdpLog(QStringLiteral("runConnection: entering event loop"));
         HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {};
+        int loopCount = 0;
         while (!isInterruptionRequested()) {
             const DWORD count = freerdp_get_event_handles(instance->context, handles,
                                                           MAXIMUM_WAIT_OBJECTS);
+            // 只记前 10 轮，避免日志无限膨胀
+            if (loopCount < 10) {
+                rdpLog(QStringLiteral("runConnection: loop iteration %1, handle count=%2")
+                           .arg(loopCount)
+                           .arg(count));
+                loopCount++;
+            }
             // 句柄集合可能在建连收尾/通道重建的间隙短暂为空，此时 break 会让
             // 循环在连接仍活着时提前退出，随后 freerdp_disconnect() 打在半成品
             // 状态上直接崩在库内。改为短睡重试。
@@ -306,35 +367,51 @@ private:
                 continue;
             }
             const DWORD status = WaitForMultipleObjects(count, handles, FALSE, 100);
-            if (status == WAIT_FAILED)
+            if (status == WAIT_FAILED) {
+                rdpLog(QStringLiteral("runConnection: WaitForMultipleObjects WAIT_FAILED"));
                 break;
+            }
             // 对应Python: loop.call_soon_threadsafe(conn.ext_in_queue.put_nowait, data)
             flushInputQueue(instance);
-            if (!freerdp_check_event_handles(instance->context))
+            if (!freerdp_check_event_handles(instance->context)) {
+                rdpLog(QStringLiteral("runConnection: freerdp_check_event_handles FALSE"));
                 break;
+            }
 #if FREERDP_VERSION_MAJOR >= 3
-            if (freerdp_shall_disconnect_context(instance->context))
+            if (freerdp_shall_disconnect_context(instance->context)) {
+                rdpLog(QStringLiteral("runConnection: shall_disconnect TRUE"));
                 break;
+            }
 #else
-            if (freerdp_shall_disconnect(instance))
+            if (freerdp_shall_disconnect(instance)) {
+                rdpLog(QStringLiteral("runConnection: shall_disconnect TRUE"));
                 break;
+            }
 #endif
         }
+
+        rdpLog(QStringLiteral("runConnection: event loop exited"));
 
         // 循环退出可能源于服务端断开/协议错误，先取出错误码报给 UI，再断连。
         const UINT32 lastError = freerdp_get_last_error(instance->context);
         if (lastError != FREERDP_ERROR_SUCCESS) {
             const char *errName = freerdp_get_last_error_name(lastError);
+            rdpLog(QStringLiteral("runConnection: lastError=0x%1 (%2)")
+                       .arg(lastError, 8, 16, QLatin1Char('0'))
+                       .arg(QString::fromUtf8(errName ? errName : "UNKNOWN")));
             emit m_client->errorOccurred(
                 QStringLiteral("RDP 连接断开: %1 (0x%2)")
                     .arg(QString::fromUtf8(errName ? errName : "UNKNOWN"))
                     .arg(lastError, 8, 16, QLatin1Char('0')));
         }
 
+        rdpLog(QStringLiteral("runConnection: calling freerdp_disconnect"));
         freerdp_disconnect(instance);
+        rdpLog(QStringLiteral("runConnection: freerdp_disconnect done"));
         freerdp_context_free(instance);
         freerdp_free(instance);
         m_instance = nullptr;
+        rdpLog(QStringLiteral("runConnection: cleanup done, emitting disconnected"));
         emit m_client->disconnected();
     }
 
@@ -372,49 +449,145 @@ private:
     }
 
     // 建连前回调：FreeRDP 3 在此期望客户端完成虚拟通道/插件加载。本客户端只做
-    // 基础桌面投屏（剪贴板等通道尚未接入，见 flushInputQueue 的 TODO），无通道
-    // 可加载，但回调本身仍需存在——settings 缺失等异常状态在此提前判掉。
+    // 基础桌面投屏（剪贴板等通道尚未接入，见 flushInputQueue 的 TODO），但 settings
+    // 默认开启的通道仍须在此登记，否则库内后续按通道表取用时会拿到空指针；
+    // settings 缺失等异常状态同样在此提前判掉。
     static BOOL preConnect(freerdp *instance)
     {
-        if (!instance || !instance->context || !instance->context->settings)
+        rdpLog(QStringLiteral("preConnect called"));
+        if (!instance || !instance->context || !instance->context->settings) {
+            rdpLog(QStringLiteral("preConnect: null instance/context/settings, returning FALSE"));
             return FALSE;
+        }
+        // 通道加载失败不影响纯桌面投屏，记一行日志后继续建连。
+#ifdef CUBESHELL_HAVE_FREERDP_CLIENT
+        rdpLog(QStringLiteral("preConnect: loading channels"));
+        if (!freerdp_client_load_channels(instance)) {
+            rdpLog(QStringLiteral("preConnect: freerdp_client_load_channels failed (non-fatal)"));
+        }
+#endif
+        rdpLog(QStringLiteral("preConnect returning TRUE"));
         return TRUE;
     }
 
     // 建连完成：初始化软件 GDI，挂 Begin/EndPaint 钩子取帧、DesktopResize 跟随改尺寸。
     static BOOL postConnect(freerdp *instance)
     {
-        if (!gdi_init(instance, PIXEL_FORMAT_BGRX32))
+        rdpLog(QStringLiteral("postConnect called"));
+        rdpLog(QStringLiteral("postConnect: calling gdi_init"));
+        if (!gdi_init(instance, PIXEL_FORMAT_BGRX32)) {
+            rdpLog(QStringLiteral("postConnect: gdi_init FAILED"));
             return FALSE;
+        }
+        rdpLog(QStringLiteral("postConnect: gdi_init OK, setting callbacks"));
         rdpUpdate *update = instance->context->update;
         // BeginPaint 必挂：fastpath_recv_updates() 无条件经 IFCALLRET 调用它，
         // 留空指针会在服务端送来第一帧时崩在库内。
         update->BeginPaint = &FreeRdpWorker::beginPaint;
         update->EndPaint = &FreeRdpWorker::endPaint;
         update->DesktopResize = &FreeRdpWorker::desktopResize;
+        rdpLog(QStringLiteral("postConnect: all callbacks set, returning TRUE"));
         return TRUE;
     }
 
     // 断连清理：释放 postConnect 里申请的 GDI（此回调在通道拆除前被调用）。
     static void postDisconnect(freerdp *instance)
     {
+        rdpLog(QStringLiteral("postDisconnect called"));
         if (!instance || !instance->context)
             return;
         // postConnect 里 gdi_init 失败时 gdi 为空，此时 gdi_free 会解空指针
         if (instance->context->gdi)
             gdi_free(instance);
+        rdpLog(QStringLiteral("postDisconnect done"));
+    }
+
+    // 凭据回调：所需凭据不全或被服务端拒绝时由库调用。用户名/口令/域已在
+    // runConnection 里写进 settings，这里不改传入串、直接返回 TRUE 表示
+    // “就用当前凭据继续”，FreeRDP 随后从 settings 取值。
+    // 注意 FreeRDP 3 的 Authenticate(offset 50) 自 3.25 起标记废弃，由多一个
+    // reason 参数的 AuthenticateEx(offset 69) 取代，两者签名不同，按版本分挂。
+#if FREERDP_VERSION_MAJOR >= 3
+    static BOOL authenticateEx(freerdp *instance, char **username, char **password,
+                               char **domain, rdp_auth_reason reason)
+    {
+        Q_UNUSED(instance)
+        Q_UNUSED(username)
+        Q_UNUSED(password)
+        Q_UNUSED(domain)
+        rdpLog(QStringLiteral("authenticateEx called, reason=%1")
+                   .arg(static_cast<int>(reason)));
+        return TRUE;
+    }
+#else
+    static BOOL authenticate(freerdp *instance, char **username, char **password,
+                             char **domain)
+    {
+        Q_UNUSED(instance)
+        Q_UNUSED(username)
+        Q_UNUSED(password)
+        Q_UNUSED(domain)
+        rdpLog(QStringLiteral("authenticate called"));
+        return TRUE;
+    }
+#endif
+
+    // 未知证书确认：返回 1=接受并写入指纹库，2=仅本次会话接受，0=拒绝。
+    // 已设 IgnoreCertificate=TRUE（堡垒机自签场景），落盘指纹没有意义且要写
+    // 用户配置目录，故一律返回 2：接受当次连接，不产生持久化副作用。
+    static DWORD verifyCertificateEx(freerdp *instance, const char *host, UINT16 port,
+                                     const char *commonName, const char *subject,
+                                     const char *issuer, const char *fingerprint,
+                                     DWORD flags)
+    {
+        Q_UNUSED(instance)
+        Q_UNUSED(commonName)
+        Q_UNUSED(subject)
+        Q_UNUSED(issuer)
+        Q_UNUSED(flags)
+        rdpLog(QStringLiteral("verifyCertificateEx called for %1:%2 fingerprint=%3")
+                   .arg(QString::fromUtf8(host ? host : ""))
+                   .arg(port)
+                   .arg(QString::fromUtf8(fingerprint ? fingerprint : "")));
+        return 2;
+    }
+
+    // 证书与已存指纹不一致时的确认，与 verifyCertificateEx 同策略。
+    static DWORD verifyChangedCertificateEx(freerdp *instance, const char *host, UINT16 port,
+                                            const char *commonName, const char *subject,
+                                            const char *issuer, const char *newFingerprint,
+                                            const char *oldSubject, const char *oldIssuer,
+                                            const char *oldFingerprint, DWORD flags)
+    {
+        Q_UNUSED(instance)
+        Q_UNUSED(commonName)
+        Q_UNUSED(subject)
+        Q_UNUSED(issuer)
+        Q_UNUSED(newFingerprint)
+        Q_UNUSED(oldSubject)
+        Q_UNUSED(oldIssuer)
+        Q_UNUSED(oldFingerprint)
+        Q_UNUSED(flags)
+        rdpLog(QStringLiteral("verifyChangedCertificateEx called for %1:%2")
+                   .arg(QString::fromUtf8(host ? host : ""))
+                   .arg(port));
+        return 2;
     }
 
     // 每帧更新开始：复位失效区域累积状态，与下面的 endPaint 成对。
     // primary->hdc->hwnd->invalid 这条指针链上任一环为空都会崩在库内，逐级校验。
     static BOOL beginPaint(rdpContext *context)
     {
+        rdpLog(QStringLiteral("beginPaint called"));
         rdpGdi *gdi = context ? context->gdi : nullptr;
         if (!gdi || !gdi->primary || !gdi->primary->hdc
-            || !gdi->primary->hdc->hwnd || !gdi->primary->hdc->hwnd->invalid)
+            || !gdi->primary->hdc->hwnd || !gdi->primary->hdc->hwnd->invalid) {
+            rdpLog(QStringLiteral("beginPaint: null gdi pointer chain, returning FALSE"));
             return FALSE;
+        }
         gdi->primary->hdc->hwnd->invalid->null = TRUE;
         gdi->primary->hdc->hwnd->ninvalid = 0;
+        rdpLog(QStringLiteral("beginPaint returning TRUE"));
         return TRUE;
     }
 
@@ -425,23 +598,33 @@ private:
     // 低版本回退到 gdi_free + gdi_init。
     static BOOL desktopResize(rdpContext *context)
     {
-        if (!context)
+        if (!context) {
+            rdpLog(QStringLiteral("desktopResize called with null context"));
             return FALSE;
+        }
         rdpGdi *gdi = context->gdi;
         rdpSettings *settings = context->settings;
-        if (!gdi || !settings)
+        if (!gdi || !settings) {
+            rdpLog(QStringLiteral("desktopResize: null gdi/settings, returning FALSE"));
             return FALSE;
+        }
         const UINT32 width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
         const UINT32 height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+        rdpLog(QStringLiteral("desktopResize called w=%1 h=%2").arg(width).arg(height));
 #if defined(FREERDP_VERSION_MAJOR) && (FREERDP_VERSION_MAJOR > 3 || \
     (FREERDP_VERSION_MAJOR == 3 && FREERDP_VERSION_MINOR >= 28))
-        return gdi_resize(gdi, width, height);
+        const BOOL resized = gdi_resize(gdi, width, height);
+        rdpLog(QStringLiteral("desktopResize: gdi_resize returned %1")
+                   .arg(resized ? QStringLiteral("TRUE") : QStringLiteral("FALSE")));
+        return resized;
 #else
-        Q_UNUSED(width);
-        Q_UNUSED(height);
+        rdpLog(QStringLiteral("desktopResize: gdi_free + gdi_init fallback"));
         gdi_free(context->instance);
-        if (!gdi_init(context->instance, PIXEL_FORMAT_BGRX32))
+        if (!gdi_init(context->instance, PIXEL_FORMAT_BGRX32)) {
+            rdpLog(QStringLiteral("desktopResize: gdi_init FAILED"));
             return FALSE;
+        }
+        rdpLog(QStringLiteral("desktopResize: gdi re-init OK"));
         return TRUE;
 #endif
     }
@@ -451,20 +634,31 @@ private:
     // result.emit(RDPImage)（帧合并/60fps 节流由面板侧处理，同 Python 版）
     static BOOL endPaint(rdpContext *context)
     {
+        rdpLog(QStringLiteral("endPaint called"));
         if (!context)
             return TRUE;
         rdpGdi *gdi = context->gdi;
-        if (!gdi || !gdi->primary_buffer)
+        if (!gdi || !gdi->primary_buffer) {
+            rdpLog(QStringLiteral("endPaint: no gdi/primary_buffer, skip frame"));
             return TRUE;
+        }
         FreeRdpWorker *worker = reinterpret_cast<WorkerContext *>(context)->worker;
-        if (!worker)
+        if (!worker) {
+            rdpLog(QStringLiteral("endPaint: worker back-pointer NULL, skip frame"));
             return TRUE;
+        }
+        rdpLog(QStringLiteral("endPaint: creating QImage w=%1 h=%2 stride=%3")
+                   .arg(gdi->width)
+                   .arg(gdi->height)
+                   .arg(gdi->stride));
         const QImage frame(gdi->primary_buffer,
                            static_cast<int>(gdi->width),
                            static_cast<int>(gdi->height),
                            static_cast<int>(gdi->stride),
                            QImage::Format_RGB32);
+        rdpLog(QStringLiteral("endPaint: emitting frameUpdated"));
         emit worker->m_client->frameUpdated(frame.copy());
+        rdpLog(QStringLiteral("endPaint: done"));
         return TRUE;
     }
 
@@ -669,6 +863,7 @@ void RdpClient::connectToHost(const RdpSettings &settings)
     setState(State::Connecting);
 
 #ifdef CUBESHELL_HAVE_FREERDP
+    rdpLog(QStringLiteral("connectToHost: starting worker thread"));
     m_worker = new FreeRdpWorker(this, settings);
     m_worker->start();
 #else
@@ -750,10 +945,13 @@ void RdpClient::disconnectFromHost()
 {
 #ifdef CUBESHELL_HAVE_FREERDP
     if (m_worker) {
+        rdpLog(QStringLiteral("disconnectFromHost: stopping worker"));
         // 先清空未派发输入，再终止事件循环，避免残留事件打到断连过程
         m_worker->clearInputQueue();
         m_worker->requestStop();
-        m_worker->wait(3000);
+        const bool finished = m_worker->wait(3000);
+        rdpLog(QStringLiteral("disconnectFromHost: worker wait %1")
+                   .arg(finished ? QStringLiteral("finished") : QStringLiteral("TIMED OUT")));
         m_worker->deleteLater();
         m_worker = nullptr;
     }

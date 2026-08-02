@@ -9,6 +9,8 @@ cmake-build-*/
 /lib/
 /install/
 _deps/
+/vcpkg-ports
+/vcpkg-triplets
 
 # ---------------------------------------------------------------------------
 # CMake generated files

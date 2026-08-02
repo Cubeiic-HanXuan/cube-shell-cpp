@@ -56,26 +56,41 @@ static void ensureFreeRDPInit()
 }
 
 #ifdef CUBESHELL_HAVE_FREERDP
-// 【临时调试代码，定位 0xc0000005 后删除】
-// 崩溃发生在进程内且无栈回溯可用，改用落盘日志定位：每个关键点写一行并
-// 立即 flush，崩溃后日志最后一行即为最后执行到的位置。
+// 崩溃落盘日志：每个关键点写一行并立即 flush，崩溃后日志最后一行即为最后
+// 执行到的位置。进程在 FreeRDP/OpenSSL 库内以 SEH（0xc0000005）死掉时，
+// C++ catch 与 Qt 信号都来不及反应，这份日志 + 下面的向量化异常处理器（VEH）
+// 是定位现场的唯一手段（曾靠它定位到 MSVC ARM64 误编译 OpenSSL 的崩溃，
+// 见 vcpkg-ports/openssl/windows/portfile.cmake 的说明）。
 // 日志路径集中一处算好：Windows 的向量化异常处理器里不能构造 QString/QFile
 // （异常上下文中走 Qt 分配器不安全），需要同一份路径的纯 C 串副本。
 static const QString &rdpLogPath()
 {
     static const QString path = [] {
-        // 目录不存在时 QFile::open 会静默失败，表现为“没有日志”而非崩溃信息，
-        // 先建目录；非 Windows 上回退到临时目录以便本地验证。
-        QDir().mkpath(QStringLiteral("C:/dev"));
-        if (QDir(QStringLiteral("C:/dev")).exists())
-            return QStringLiteral("C:/dev/rdp_debug.log");
+        const QString dir =
+            QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        // 目录不存在时 QFile::open 会静默失败，表现为“没有日志”而非崩溃信息，先建目录。
+        if (!dir.isEmpty() && QDir().mkpath(dir))
+            return dir + QStringLiteral("/rdp_debug.log");
         return QDir::temp().filePath(QStringLiteral("rdp_debug.log"));
     }();
     return path;
 }
 
+#ifdef Q_OS_WIN
+// 崩溃现场标记：每次 rdpLog 写日志时同步更新这个纯 C 串副本（异常上下文中不能
+// 构造 QString）。VEH 触发时把它一并落盘，日志里“崩溃码 + 最后执行到的位置”
+// 配对出现，一眼定位故障点。异常处理器只读它，不写。
+// 声明须在 rdpLog 之前（rdpLog 内会写它）。
+static char g_rdpLastStep[160] = {};
+#endif
+
 static void rdpLog(const QString &msg)
 {
+#ifdef Q_OS_WIN
+    // 同步更新崩溃现场标记（纯 C 串，VEH 里安全可读）。只取消息本体，不含时间戳。
+    const QByteArray local = msg.toLocal8Bit();
+    qstrncpy(g_rdpLastStep, local.constData(), sizeof(g_rdpLastStep));
+#endif
     QFile f(rdpLogPath());
     if (f.open(QIODevice::Append | QIODevice::Text)) {
         QTextStream ts(&f);
@@ -94,7 +109,10 @@ static void rdpLog(const QString &msg)
 // 处理器运行在异常上下文中，不可使用 Qt 容器与堆分配，全程 C 风格 IO。
 // 注意 VEH 是进程级且先于任何 handler 收到“首次机会”异常，日志里可能混入
 // 被正常捕获处理的异常（如 C++ 抛出的 0xE06D7363），只有崩溃后紧跟进程消失
-// 的那条才是真正的现场；故只在 freerdp_connect 前后短暂安装。
+// 的那条才是真正的现场。
+// 覆盖范围：从 freerdp_connect 之前一直挂到会话结束（事件循环 + 断连 + 上下文
+// 释放）之后。静默退出的崩溃恰恰发生在连接成功后的会话期——那里是 C++ catch
+// 抓不到的 SEH 区域，也是此前唯一没有防护罩覆盖的代码路径，故必须全程安装。
 static char g_rdpLogPathAnsi[MAX_PATH] = {};
 
 static LONG WINAPI rdpVectoredHandler(EXCEPTION_POINTERS *ep)
@@ -102,9 +120,10 @@ static LONG WINAPI rdpVectoredHandler(EXCEPTION_POINTERS *ep)
     if (ep && ep->ExceptionRecord && g_rdpLogPathAnsi[0]) {
         FILE *f = fopen(g_rdpLogPathAnsi, "a");
         if (f) {
-            fprintf(f, "!!! VECTORED EXCEPTION: code=0x%08lX addr=%p\n",
+            fprintf(f, "!!! VECTORED EXCEPTION: code=0x%08lX addr=%p last=\"%s\"\n",
                     static_cast<unsigned long>(ep->ExceptionRecord->ExceptionCode),
-                    ep->ExceptionRecord->ExceptionAddress);
+                    ep->ExceptionRecord->ExceptionAddress,
+                    g_rdpLastStep);
             fflush(f);
             fclose(f);
         }
@@ -118,6 +137,13 @@ static void *rdpInstallVectoredHandler()
     const QByteArray local = rdpLogPath().toLocal8Bit();
     qstrncpy(g_rdpLogPathAnsi, local.constData(), sizeof(g_rdpLogPathAnsi));
     return AddVectoredExceptionHandler(1, &rdpVectoredHandler);
+}
+
+// 处理器拆除：与安装成对，会话彻底结束（上下文已释放）后调用。
+static void rdpRemoveVectoredHandler(void *veh)
+{
+    if (veh)
+        RemoveVectoredExceptionHandler(veh);
 }
 #endif // Q_OS_WIN
 #endif // CUBESHELL_HAVE_FREERDP
@@ -279,6 +305,8 @@ protected:
     // FreeRDP 的回调由库代码在本线程内调用，C++ 异常一旦穿过中间的 C 栈帧
     // 逃出 run()，Qt 会直接 terminate 整个进程，UI 侧连一个错误信号都收不到。
     // 此处兜住并转成 errorOccurred + disconnected，让面板能正常收尾。
+    // 注意：这只覆盖 C++ 异常；会话期 FreeRDP 库内的访问冲突是 SEH（0xc0000005），
+    // catch 抓不到，须靠 runConnection 里全程挂的向量化异常处理器（VEH）落盘定位。
     void run() override
     {
         try {
@@ -436,22 +464,17 @@ private:
         // 安全层协商：NLA(NTLM)/TLS/RDP 三层全开由服务端挑选，对应 Python 侧
         // build_rdp_url 的 rdp+ntlm-password（NLA）语义。三者与 Authentication
         // 同为 FreeRDP 3 的默认值，显式写出以免换库版本/发行版后默认值漂移。
+        // Windows ARM64 特别注意：NLA/TLS 走 OpenSSL，MSVC ARM64 Release 会误编译
+        // OpenSSL（上游 #26239/#27030），握手期栈/寄存器被破坏后崩在 libssl 内
+        // （0xC0000005，曾定位于 tls_parse_all_extensions）。修复在构建侧：
+        // vcpkg-triplets/ 的 overlay triplet 加 NO_INTERLOCKEDOR64，
+        // vcpkg-ports/openssl 的 overlay port 把 Release 优化降为 /Od。
+        // 此前“TLS 上限压 1.2 可绕过”的诊断是错误的（该服务器本就只协商
+        // TLS 1.2，崩溃依旧），故不再限制协议版本。
         freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE);
-#ifdef Q_OS_WIN
-        // TLS 上限压到 1.2：绕开 OpenSSL 在 Windows ARM64 Release 下的已知缺陷
-        // （OpenSSL #26239）——MSVC 为 ARM64 的 interlocked 操作生成了错误的栈帧，
-        // 握手中走到 tls_construct_compress_certificate()（RFC 8879 证书压缩）时
-        // 破坏栈并崩在库内。该扩展在 OpenSSL 里是 TLS 1.3 专属，ClientHello 仅在
-        // max_version >= TLS 1.3 时才构造它，故把上限设为 TLS 1.2 即整条路径不再
-        // 被触及，无需重编 OpenSSL。FreeRDP 3 会把此值透给
-        // SSL_CTX_set_max_proto_version()，TLS 与 NLA(CredSSP) 两条握手同时生效；
-        // RDP 服务端普遍支持 TLS 1.2，降级代价可接受。
-        // 0x0303 = TLS1_2_VERSION，直接写字面量以免此处引入 OpenSSL 头。
-        freerdp_settings_set_uint16(settings, FreeRDP_TLSMaxVersion, 0x0303);
-#endif
         // 嵌入式面板渲染：软件 GDI，忽略自签证书（与 Python 侧堡垒机场景一致）
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
@@ -461,19 +484,21 @@ private:
                    .arg(width)
                    .arg(height));
 #ifdef Q_OS_WIN
+        // 从建连前一直挂到会话结束（事件循环 + 断连 + 上下文释放）之后才拆除。
+        // 静默退出正是发生在连接成功后的会话期，若像原来那样 connected 一发就拆，
+        // 那段 SEH 崩溃就完全无人记录、进程直接消失。
         void *veh = rdpInstallVectoredHandler();
 #endif
         const BOOL connected = freerdp_connect(instance);
-#ifdef Q_OS_WIN
-        if (veh)
-            RemoveVectoredExceptionHandler(veh);
-#endif
         rdpLog(QStringLiteral("runConnection: freerdp_connect returned %1")
                    .arg(connected ? QStringLiteral("TRUE") : QStringLiteral("FALSE")));
         if (!connected) {
             emit m_client->errorOccurred(connectErrorMessage(instance, target));
             releaseInstance(instance);
             m_instance = nullptr;
+#ifdef Q_OS_WIN
+            rdpRemoveVectoredHandler(veh);
+#endif
             return;
         }
 
@@ -546,6 +571,10 @@ private:
         rdpLog(QStringLiteral("runConnection: freerdp_disconnect done"));
         releaseInstance(instance);
         m_instance = nullptr;
+#ifdef Q_OS_WIN
+        // 会话彻底结束、上下文已释放，此处才拆除异常处理器。
+        rdpRemoveVectoredHandler(veh);
+#endif
         rdpLog(QStringLiteral("runConnection: cleanup done, emitting disconnected"));
         emit m_client->disconnected();
     }
@@ -730,7 +759,6 @@ private:
     // primary->hdc->hwnd->invalid 这条指针链上任一环为空都会崩在库内，逐级校验。
     static BOOL beginPaint(rdpContext *context)
     {
-        rdpLog(QStringLiteral("beginPaint called"));
         rdpGdi *gdi = context ? context->gdi : nullptr;
         if (!gdi || !gdi->primary || !gdi->primary->hdc
             || !gdi->primary->hdc->hwnd || !gdi->primary->hdc->hwnd->invalid) {
@@ -739,7 +767,6 @@ private:
         }
         gdi->primary->hdc->hwnd->invalid->null = TRUE;
         gdi->primary->hdc->hwnd->ninvalid = 0;
-        rdpLog(QStringLiteral("beginPaint returning TRUE"));
         return TRUE;
     }
 
@@ -786,7 +813,6 @@ private:
     // result.emit(RDPImage)（帧合并/60fps 节流由面板侧处理，同 Python 版）
     static BOOL endPaint(rdpContext *context)
     {
-        rdpLog(QStringLiteral("endPaint called"));
         if (!context)
             return TRUE;
         rdpGdi *gdi = context->gdi;
@@ -799,18 +825,12 @@ private:
             rdpLog(QStringLiteral("endPaint: worker back-pointer NULL, skip frame"));
             return TRUE;
         }
-        rdpLog(QStringLiteral("endPaint: creating QImage w=%1 h=%2 stride=%3")
-                   .arg(gdi->width)
-                   .arg(gdi->height)
-                   .arg(gdi->stride));
         const QImage frame(gdi->primary_buffer,
                            static_cast<int>(gdi->width),
                            static_cast<int>(gdi->height),
                            static_cast<int>(gdi->stride),
                            QImage::Format_RGB32);
-        rdpLog(QStringLiteral("endPaint: emitting frameUpdated"));
         emit worker->m_client->frameUpdated(frame.copy());
-        rdpLog(QStringLiteral("endPaint: done"));
         return TRUE;
     }
 

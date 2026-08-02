@@ -16,6 +16,14 @@ qt_add_executable(cube-shell
     ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
 )
 
+# Windows 可执行文件图标：.rc 由 rc.exe 编译嵌入 exe（资源管理器/任务栏图标），
+# 与 qrc 里的运行时图标是两回事——没有它 exe 在系统里显示为默认空白图标。
+if(WIN32)
+    target_sources(cube-shell PRIVATE
+        ${CMAKE_SOURCE_DIR}/resources/icons/cube-shell.rc
+    )
+endif()
+
 target_link_libraries(cube-shell PRIVATE
     Qt6::Core
     Qt6::Gui

@@ -1,0 +1,4 @@
+// Windows 可执行文件图标：由 rc.exe 编译进 cube-shell.exe，
+// 资源管理器 / 任务栏 / 快捷方式显示的图标即取自此处。
+// 路径相对于本 .rc 文件所在目录。
+IDI_ICON1 ICON DISCARDABLE "logo.ico"

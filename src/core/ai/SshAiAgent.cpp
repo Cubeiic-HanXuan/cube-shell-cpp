@@ -4,6 +4,7 @@
 
 #include "SshAiAgent.h"
 
+#include "TerminalExecutor.h"
 #include "ssh/CommandExecutor.h"
 
 #include <QElapsedTimer>
@@ -34,10 +35,12 @@ void registerAiMetaTypes()
 // ---------------------------------------------------------------------------
 
 AiCommandExecThread::AiCommandExecThread(CommandExecutor *executor,
+                                         TerminalExecutor *terminalExecutor,
                                          const QList<AiCommand> &commands,
                                          QObject *parent)
     : QThread(parent)
     , m_executor(executor)
+    , m_terminalExecutor(terminalExecutor)
     , m_commands(commands)
 {
 }
@@ -76,17 +79,27 @@ void AiCommandExecThread::run()
         result.description = cmdInfo.description;
         result.allowFailure = cmdInfo.allowFailure;
 
-        if (!m_executor) {
+        // 超时选择 — 对应Python: timeout = 600 if long_running else 120
+        const int timeoutMs =
+            CommandExecutor::isLongRunningCommand(cmdInfo.cmd)
+                ? CommandExecutor::kLongRunningTimeoutMs
+                : CommandExecutor::kNormalStreamTimeoutMs;
+
+        if (m_terminalExecutor) {
+            // 强制通过终端执行（与 Python 一致），天然支持交互式命令
+            //（密码提示、y/n 确认、分页器等）。
+            // 对应Python: _TerminalExecutor.run_blocking（强制 interactive=True）
+            auto [exitCode, output] =
+                m_terminalExecutor->runBlocking(cmdInfo.cmd, timeoutMs);
+            result.exitCode = exitCode;
+            // 终端模式不区分 stdout/stderr，统一到 stdoutText
+            result.stdoutText = output;
+        } else if (!m_executor) {
             result.exitCode = -1;
             result.stderrText = QStringLiteral(
                 "(未绑定 SSH 连接，无法执行命令)");
         } else {
-            // 超时选择 — 对应Python: timeout = 600 if long_running else 120
-            const int timeoutMs =
-                CommandExecutor::isLongRunningCommand(cmdInfo.cmd)
-                    ? CommandExecutor::kLongRunningTimeoutMs
-                    : CommandExecutor::kNormalStreamTimeoutMs;
-
+            // 降级路径：无终端时使用 libssh2 exec channel（非交互）
             ExecResult exec;
             if (sudoRe.match(cmdInfo.cmd).hasMatch()) {
                 // sudo 命令：剥离前导 sudo 后走 sudoExec（-S + stdin 密码）。
@@ -136,6 +149,7 @@ SshAiAgent::SshAiAgent(CommandExecutor *executor, const AiPreferences &prefs,
     , m_prefs(prefs)
     , m_aiWorker(new AiChatWorker(this))
     , m_conversation(QString(), ChatHistory::kMaxHistoryRounds)
+    , m_terminalExecutor(new TerminalExecutor(this))
 {
     registerAiMetaTypes();
 
@@ -161,6 +175,12 @@ void SshAiAgent::setPreferences(const AiPreferences &prefs)
 {
     m_prefs = prefs;
     m_aiWorker->setPreferences(prefs);
+}
+
+// 对应Python: SSHAIAgent 内部 _TerminalExecutor 的终端绑定
+void SshAiAgent::setTerminal(QTermWidget *terminal)
+{
+    m_terminalExecutor->setTerminal(terminal);
 }
 
 // 对应Python: SSHAIAgent.process_user_input
@@ -200,7 +220,8 @@ void SshAiAgent::executeCommands(const QList<AiCommand> &commands)
     }
 
     m_lastDispatchedCount = commands.size();
-    m_execThread = new AiCommandExecThread(m_executor, commands, this);
+    m_execThread = new AiCommandExecThread(m_executor, m_terminalExecutor,
+                                           commands, this);
 
     // 跨线程信号 — 全链路显式 Qt::QueuedConnection
     // 对应Python: execute_commands 里的 Qt.QueuedConnection 连接
@@ -244,6 +265,9 @@ void SshAiAgent::stop()
 {
     if (m_aiWorker->isRunning())
         m_aiWorker->stop();
+    // 终端执行中的命令：唤醒阻塞的执行线程（哨兵永远等不到时的出口）。
+    if (m_terminalExecutor)
+        m_terminalExecutor->cancel();
     if (m_execThread && m_execThread->isRunning())
         m_execThread->requestStop();
 }

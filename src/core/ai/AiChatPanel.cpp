@@ -360,6 +360,8 @@ void AiChatPanel::buildUi()
 
     // 上下文模式选择（C++ 新增：普通聊天 / SSH 代理）
     m_modeCombo = new QComboBox(inputFrame);
+    m_modeCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    m_modeCombo->setMinimumWidth(140);
     m_modeCombo->addItem(QStringLiteral("SSH 代理"),
                          QVariant::fromValue(int(ChatMode::SshAgent)));
     m_modeCombo->addItem(QStringLiteral("普通聊天"),

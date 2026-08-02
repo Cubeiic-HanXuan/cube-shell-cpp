@@ -44,6 +44,9 @@ public:
 signals:
     void channelClosed();
     void dataReceived(const QByteArray &data);           // queued to Session::onReceiveBlock
+    // 过滤前的原始数据（含 __CUBE_AI_END__ 哨兵），供 TerminalExecutor 检测命令结束。
+    // 从读线程发出，接收方在主线程时 Qt 自动排队。
+    void rawDataForAi(const QString &text);
     void cwdChanged(const QString &path);                // OSC 7 cwd report
     void shellMfaPromptDetected(const QString &prompt);  // MFA/OTP prompt in shell stream
 

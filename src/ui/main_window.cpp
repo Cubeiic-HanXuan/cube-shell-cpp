@@ -58,10 +58,12 @@
 #include "ai/ServerProfileBuilder.h"
 #include "ai/AiChatWorker.h"
 #include "ai/SshAiAgent.h"
+#include "ai/TerminalExecutor.h"
 #include "claude_code/ClaudeCodePanel.h"
 #include "docker/DockerManager.h"
 #include "hermes/HermesPanel.h"
 #include "ssh/CommandExecutor.h"
+#include "ssh/SshBridge.h"
 #include "ssh/RemoteMonitor.h"
 #include "ssh/TunnelPool.h"
 #include "update/UpdateChecker.h"
@@ -613,6 +615,16 @@ void MainWindow::connectAiToCurrentTab()
         }
         agent = new SshAiAgent(executor, AiPreferences::load(), session);
         m_aiAgents.insert(session, agent);
+        // 绑定终端以支持 AI 交互式命令执行（哨兵机制）。
+        // 对应Python: _TerminalExecutor 绑定到活动 SSH 终端
+        if (session->terminal()->terminal())
+            agent->setTerminal(session->terminal()->terminal());
+        // 哨兵检测需要未过滤数据，故接 SshBridge 的原始数据信号。
+        //（bridge() 在连接建立前为空，此处 client 已存在所以常规不为空）
+        if (session->terminal()->bridge()) {
+            connect(session->terminal()->bridge(), &SshBridge::rawDataForAi,
+                    agent->terminalExecutor(), &TerminalExecutor::onRawData);
+        }
         // 会话若在 closeTabIn 之外被销毁（应用退出等），同步摘掉哈希项，
         // 避免悬垂键；agent 作为子对象随之析构，m_activeAiAgent 由 QPointer 置空。
         connect(session, &QObject::destroyed, this,
@@ -749,10 +761,17 @@ void MainWindow::onAiUserMessage(const QString &text)
 // 上下文模式切换：切到 SSH 代理时立即绑定当前标签。
 void MainWindow::onAiChatModeChanged(AiChatPanel::ChatMode mode)
 {
-    if (mode == AiChatPanel::ChatMode::SshAgent)
+    if (mode == AiChatPanel::ChatMode::SshAgent) {
         connectAiToCurrentTab();
-    else
-        m_aiPanel->setStatus(false);   // 普通聊天不依附会话
+    } else {
+        // 普通聊天不依附会话 — 断开并清理当前 agent，
+        // 否则切回 SSH 代理时 connectAiToCurrentTab 会因指针未清空而提前返回。
+        if (m_activeAiAgent) {
+            disconnectAiFromAgent(m_activeAiAgent);
+            m_activeAiAgent = nullptr;
+        }
+        m_aiPanel->setStatus(false);
+    }
 }
 
 // 停止当前 AI 请求 / 命令执行。对应Python: AI 面板停止按钮

@@ -40,6 +40,8 @@ public:
     std::shared_ptr<SshClient> sshClient() const { return m_client; }
     // The terminal (for embedding / focusing).
     QTermWidget *terminal() const { return m_term; }
+    // AI 交互式执行需要连接 bridge 的 rawDataForAi 信号（null 直到 connected()）。
+    SshBridge *bridge() const { return m_bridge; }
 
 signals:
     // Emitted on the UI thread.

@@ -102,8 +102,12 @@ void SshBridge::readLoop()
         if (!prompt.isEmpty())
             emit shellMfaPromptDetected(prompt);
 
-        // OSC 7 cwd reporting.
         const QString dataStr = QString::fromUtf8(data);
+
+        // TerminalExecutor 需要原始数据（含哨兵），必须在过滤之前发出。
+        emit rawDataForAi(dataStr);
+
+        // OSC 7 cwd reporting.
         auto it = s_osc7Pattern.globalMatch(dataStr);
         while (it.hasNext()) {
             const QString path = it.next().captured(1);
@@ -128,12 +132,14 @@ void SshBridge::readLoop()
             clean = kept.join(QLatin1Char('\r'));
         }
 
-        // Drop AI command-marker echo lines.
-        if (clean.contains(QLatin1String("__cube_end")) || clean.contains(QLatin1String("PAGER=cat"))) {
+        // Drop AI command-marker echo lines (hook 回显 + 哨兵输出行)。
+        if (clean.contains(QLatin1String("__cube_end")) || clean.contains(QLatin1String("PAGER=cat"))
+            || clean.contains(QLatin1String("__CUBE_AI_END__"))) {
             const QStringList lines = clean.split(QLatin1Char('\r'));
             QStringList kept;
             for (const QString &l : lines)
-                if (!l.contains(QLatin1String("__cube_end")) && !l.contains(QLatin1String("PAGER=cat")))
+                if (!l.contains(QLatin1String("__cube_end")) && !l.contains(QLatin1String("PAGER=cat"))
+                    && !l.contains(QLatin1String("__CUBE_AI_END__")))
                     kept << l;
             clean = kept.join(QLatin1Char('\r'));
         }

@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -19,13 +20,11 @@ AboutDialog::AboutDialog(QWidget *parent)
 
     auto *layout = new QVBoxLayout(this);
 
-    // Logo（Python 侧用 :docs-log.png 资源；C++ 侧资源在 Phase 6 接入，
-    // 这里先用应用图标/占位文本）。
-    auto *logo = new QLabel(QStringLiteral("cubeShell"), this);
-    QFont logoFont = logo->font();
-    logoFont.setPointSize(28);
-    logoFont.setBold(true);
-    logo->setFont(logoFont);
+    // Logo（对应 Python 侧 QIcon(':docs-log.png').pixmap(160, 160)）。
+    auto *logo = new QLabel(this);
+    QIcon icon(QStringLiteral(":/docs-log.png"));
+    QPixmap logoPixmap = icon.pixmap(160, 160);
+    logo->setPixmap(logoPixmap);
     logo->setAlignment(Qt::AlignCenter);
     layout->addWidget(logo);
 
@@ -41,7 +40,7 @@ AboutDialog::AboutDialog(QWidget *parent)
     auto *info = new QLabel(
         tr("cubeShell 是 Linux 服务器远程管理工具。\n"
            "可以代替 Xshell、XSftp 等工具，对远程服务器进行管理。\n"
-           " 简洁、方便、强大\n\n开源协议：GPL-3.0"), this);
+           " 简洁、方便、强大"), this);
     info->setAlignment(Qt::AlignCenter);
     layout->addWidget(info);
 

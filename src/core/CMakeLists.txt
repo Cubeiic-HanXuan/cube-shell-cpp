@@ -55,6 +55,7 @@ set(CORE_SOURCES
     ai/ChatHistory.cpp          # port of core/ai/conversation.py (+JSON persistence)
     ai/MarkdownRenderer.cpp     # port of core/ai/ai_panel.py rendering logic
     ai/SshAiAgent.cpp           # port of core/ai/ssh_agent.py
+    ai/TerminalExecutor.cpp     # port of core/ai/ssh_agent.py::_TerminalExecutor
     ai/CommandConfirmDialog.cpp # port of core/ai/confirm_dialog.py
     ai/AiChatPanel.cpp          # port of core/ai/ai_panel.py UI
     ai/VoiceInput.cpp           # port of core/ai/voice_input.py

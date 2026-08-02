@@ -17,7 +17,8 @@
 //   服务器画像由 ServerProfileBuilder 异步构建后经 setServerProfile 注入。
 //
 // 线程模型：AiChatWorker 为纯异步（主线程事件驱动）；命令执行在
-// AiCommandExecThread(QThread) 中同步调用 CommandExecutor::exec/sudoExec，
+// AiCommandExecThread(QThread) 中同步调用 TerminalExecutor::runBlocking
+//（未绑定终端时降级为 CommandExecutor::exec/sudoExec），
 // 其信号跨线程，连接处全部显式 Qt::QueuedConnection。
 
 #include "AiChatWorker.h"
@@ -34,9 +35,12 @@
 
 #include <atomic>
 
+class QTermWidget;
+
 namespace cubeshell {
 
 class CommandExecutor;
+class TerminalExecutor;
 
 // 单条命令的执行结果。
 // 对应Python: ssh_agent.py::_CommandExecThread.run 里组装的 result dict
@@ -50,12 +54,14 @@ struct AiCommandResult {
     bool allowFailure = false;
 };
 
-// 命令执行工作线程：逐条经 CommandExecutor 同步执行。
+// 命令执行工作线程：逐条同步执行（优先经 TerminalExecutor 走用户终端，
+// 未绑定终端时降级到 CommandExecutor 的 exec channel）。
 // 对应Python: ssh_agent.py::_CommandExecThread (QThread)
 class AiCommandExecThread : public QThread {
     Q_OBJECT
 public:
     AiCommandExecThread(CommandExecutor *executor,
+                        TerminalExecutor *terminalExecutor,
                         const QList<AiCommand> &commands,
                         QObject *parent = nullptr);
 
@@ -75,6 +81,7 @@ protected:
 
 private:
     CommandExecutor *m_executor;
+    TerminalExecutor *m_terminalExecutor;
     QList<AiCommand> m_commands;
     std::atomic<bool> m_stopFlag{false};
 };
@@ -95,6 +102,11 @@ public:
 
     void setPreferences(const AiPreferences &prefs);
     AiPreferences preferences() const { return m_prefs; }
+
+    // 绑定执行命令用的终端（AI 命令强制经终端执行以支持交互式提示）。
+    // 对应Python: SSHAIAgent 内部 _TerminalExecutor 的终端绑定
+    void setTerminal(QTermWidget *terminal);
+    TerminalExecutor *terminalExecutor() const { return m_terminalExecutor; }
 
     // 处理用户自然语言输入（异步）。
     // 对应Python: SSHAIAgent.process_user_input
@@ -172,6 +184,7 @@ private:
     AiChatWorker *m_aiWorker;
     ChatHistory m_conversation;
     CommandSafetyChecker m_safetyChecker;
+    TerminalExecutor *m_terminalExecutor;
     AiCommandExecThread *m_execThread = nullptr;
 
     // 任务目标跟踪（诊断/验证闭环）

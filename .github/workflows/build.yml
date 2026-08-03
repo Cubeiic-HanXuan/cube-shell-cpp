@@ -397,7 +397,14 @@ jobs:
         shell: bash
         run: |
           set -e
-          sudo apt-get install -y --no-install-recommends patchelf
+          # patchelf 设 rpath；libxcb-cursor 等 XCB 库需先在 runner 上装好，
+          # 否则下面 ldd 解析平台插件依赖时它们是 "not found"，无法被收集进包。
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends patchelf \
+            libxcb-cursor0 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 \
+            libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1
           QT_LIB="$QT_ROOT/lib"
           QT_PLUGINS="$QT_ROOT/plugins"
 
@@ -431,6 +438,17 @@ jobs:
                   [ -f "$dep" ] && cp -L "$dep" dist/lib/ 2>/dev/null || true ;;
               esac
             done
+          done
+          # 兜底：上面 ldd 只抓得到"能解析出路径"的依赖。对关键的 XCB/XKB 库，
+          # 直接从系统库缓存(ldconfig -p)按名查找并拷入，确保一个不漏。
+          for lib in libxcb-cursor.so.0 libxkbcommon.so.0 libxkbcommon-x11.so.0 \
+                     libxcb-icccm.so.4 libxcb-image.so.0 libxcb-keysyms.so.1 \
+                     libxcb-randr.so.0 libxcb-render-util.so.0 libxcb-shape.so.0 \
+                     libxcb-shm.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 \
+                     libxcb-xinerama.so.0 libxcb-xkb.so.1 libxcb-util.so.1 libxcb-render.so.0 libxcb.so.1; do
+            [ -f "dist/lib/$lib" ] && continue   # 已收集过则跳过
+            src="$(ldconfig -p | awk -v L="$lib" '$1==L {print $NF; exit}')"
+            [ -n "$src" ] && [ -f "$src" ] && cp -L "$src" "dist/lib/$lib" 2>/dev/null || true
           done
 
           # 3) 设 rpath：cube-shell 从 $ORIGIN/../lib 找 Qt 库，从 $ORIGIN/plugins 找插件

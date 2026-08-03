@@ -1,0 +1,287 @@
+# ===========================================================================
+# cube-shell 跨平台构建 / 打包 CI
+#
+# 用 GitHub 托管 Runner 编译 6 个平台（本地无需对应架构机器）：
+#   macOS   : Intel x86_64 (macos-15-intel)  + Apple Silicon ARM64 (macos-14)
+#   Windows : x64 (windows-latest)           + ARM64 (windows-11-arm)
+#   Linux   : x86_64 (ubuntu-latest)         + ARM64 (ubuntu-24.04-arm)
+#
+# 依赖：Qt6.9（install-qt-action，含 qtmultimedia）+ vcpkg manifest（vcpkg.json
+# 已含 freerdp/cjson/openssl/libssh2/yaml-cpp/zlib）。RDP 全平台开启
+# （-DCUBESHELL_WITH_RDP=ON）。
+#
+# Windows ARM64 关键：必须带 vcpkg overlay 三参数（vcpkg-triplets / vcpkg-ports），
+# 修复 OpenSSL ARM64 Release 被 MSVC 误编译导致 RDP TLS 握手崩溃——这两个 overlay
+# 目录已提交进仓库（见 BUILD-Windows-ARM64.md）。
+#
+# 触发：
+#   - push 到 main / 任何 v* tag
+#   - Pull Request
+#   - 手动 workflow_dispatch
+# 产物：每次构建上传 6 个 Artifact；打 v* tag 时额外自动创建 GitHub Release。
+#
+# 注意：windows-11-arm / ubuntu-24.04-arm 是 ARM64 托管 Runner，对【公开仓库】免费。
+#       若本仓库为私有，这两个 label 会一直排队，需改用私有 Runner 或先把仓库转公开。
+# ===========================================================================
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支/PR 重复触发时取消旧 run，省 Runner 时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: '6.9.1'
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # 一个平台失败不取消其余平台
+      matrix:
+        include:
+          # ------------------------------- macOS -------------------------------
+          - name: macos-x86_64
+            os: macos-15-intel          # Intel runner
+            platform: macos
+            qt_arch: clang_64
+            vcpkg_triplet: x64-osx
+            osx_arch: x86_64
+
+          - name: macos-arm64
+            os: macos-14                # Apple Silicon runner
+            platform: macos
+            qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
+            vcpkg_triplet: arm64-osx
+            osx_arch: arm64
+
+          # ------------------------------ Windows ------------------------------
+          - name: windows-x86_64
+            os: windows-latest
+            platform: windows
+            qt_arch: win64_msvc2022_64
+            vcpkg_triplet: x64-windows-static
+            vs_arch: x64
+            overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
+
+          - name: windows-arm64
+            os: windows-11-arm
+            platform: windows
+            qt_arch: win64_msvc2022_arm64
+            vcpkg_triplet: arm64-windows-static
+            vs_arch: ARM64
+            overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
+
+          # ------------------------------- Linux -------------------------------
+          - name: linux-x86_64
+            os: ubuntu-latest
+            platform: linux
+            qt_arch: gcc_64
+            vcpkg_triplet: x64-linux
+
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            platform: linux
+            qt_arch: gcc_arm64          # aqt 的 Linux ARM64 桌面包；若无则见下「已知风险」
+            vcpkg_triplet: arm64-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------ Qt
+      - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.qt_arch }})
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ matrix.qt_arch }}
+          modules: 'qtmultimedia'
+          cache: 'true'
+          cache-key-prefix: 'qt-${{ matrix.name }}'
+
+      # ------------------------------------------------------------- vcpkg
+      # vcpkg 用 manifest 模式（仓库根 vcpkg.json）。缓存 installed 目录避免每次
+      # 全量重编 OpenSSL/FreeRDP（首次约 10–20 分钟，命中缓存后秒级）。
+      - name: Restore vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}
+            ${{ github.workspace }}/build/vcpkg_installed
+          key: vcpkg-${{ matrix.name }}-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**', 'vcpkg-ports/**') }}
+          restore-keys: vcpkg-${{ matrix.name }}-
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: |
+          if [ ! -x "${VCPKG_ROOT}/vcpkg" ] && [ ! -f "${VCPKG_ROOT}/vcpkg.exe" ]; then
+            rm -rf "${VCPKG_ROOT}"
+            git clone --depth 1 https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              "${VCPKG_ROOT}/bootstrap-vcpkg.bat" -disableMetrics
+            else
+              "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+            fi
+          fi
+
+      # ------------------------------------------- Linux 构建期系统依赖
+      # Qt Multimedia(QAudioSource) 需要 ALSA/pulse 头文件；X11/GL/fontconfig 等是
+      # Qt GUI 与 vcpkg 构建 FreeRDP 的常规依赖。
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config ccache \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig1-dev libdbus-1-dev \
+            libasound2-dev libpulse-dev \
+            libx11-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev \
+            libxcb1-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev \
+            libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev \
+            libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev \
+            libxcb-util-dev libxcb-xinerama0-dev libxcb-xkb-dev \
+            bison flex gperf python3
+
+      # ------------------------------------------------------- Configure
+      # Windows 用 Visual Studio generator（overlay 文档基于此验证，-A 指定架构）；
+      # macOS / Linux 用 Ninja。RDP 全平台开启。
+      - name: Configure (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $overlayArgs = @()
+          if ('${{ matrix.overlay }}' -eq 'true') {
+            $overlayArgs = @(
+              '-DVCPKG_OVERLAY_TRIPLETS=vcpkg-triplets',
+              '-DVCPKG_OVERLAY_PORTS=vcpkg-ports'
+            )
+          }
+          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.vs_arch }} `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCUBESHELL_WITH_RDP=ON `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
+            @overlayArgs
+
+      - name: Configure (macOS / Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          extra=()
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            extra+=( -DCMAKE_OSX_ARCHITECTURES=${{ matrix.osx_arch }} )
+          fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCUBESHELL_WITH_RDP=ON \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
+            "${extra[@]}"
+
+      # Windows ARM64 自检：确认 OpenSSL overlay 生效（CFLAGS 含 /Od 与
+      # NO_INTERLOCKEDOR64）。不生效则后续 RDP 会无声崩溃，这里直接 fail 提示。
+      - name: Verify OpenSSL ARM64 overlay took effect
+        if: matrix.name == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $cfg = Get-ChildItem -Recurse -Path build/vcpkg_installed -Filter configdata.pm -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -like '*openssl*arm64*rel*' } | Select-Object -First 1
+          if ($cfg) {
+            $cflags = (Select-String -Path $cfg.FullName -Pattern 'CFLAGS=' ).Line
+            Write-Host "OpenSSL CFLAGS: $cflags"
+            if ($cflags -notmatch 'NO_INTERLOCKEDOR64') {
+              Write-Error 'overlay 未生效：CFLAGS 缺少 NO_INTERLOCKEDOR64，检查 VCPKG_OVERLAY_* 参数'
+              exit 1
+            }
+          } else {
+            Write-Warning '未找到 OpenSSL configdata.pm，跳过自检'
+          }
+
+      # ----------------------------------------------------------- Build
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --parallel
+
+      # --------------------------------------------------------- Install
+      - name: Install to dist/
+        shell: bash
+        run: cmake --install build --config Release --prefix dist
+
+      # ------------------------------------------------- Package (macOS)
+      # macdeployqt 把 Qt 框架/插件打进 .app 并直接出 dmg。未签名/未公证（无证书），
+      # 用户首次打开需右键→打开 或 xattr -dr com.apple.quarantine。
+      - name: Package macOS (.dmg)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          macdeployqt dist/cube-shell.app -dmg -verbose=1
+          mkdir -p out
+          mv dist/cube-shell.dmg "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.dmg"
+          ls -lh out/
+
+      # ------------------------------------------------- Package (Windows)
+      # windeployqt 拷入 Qt 运行时/插件（含 qtmultimedia），整个 dist 打成绿色 zip。
+      - name: Package Windows (.zip)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          windeployqt --release --no-translations dist/bin/cube-shell.exe
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $zip = "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.zip"
+          Compress-Archive -Path dist/* -DestinationPath $zip
+          Get-Item $zip | Select-Object Name, Length
+
+      # --------------------------------------------------- Package (Linux)
+      # 简化为 tar.gz（AppImage 对 Qt6.9+Multimedia 较脆，后续可加）。目标机需自备
+      # Qt6 运行库；resources/conf 已随 install 布好。
+      - name: Package Linux (.tar.gz)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir -p out
+          tar -czf "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.tar.gz" -C dist .
+          ls -lh out/
+
+      # --------------------------------------------------------- Artifact
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cube-shell-${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+
+  # ============================================================ Release
+  # 打 v* tag 时，等全部 6 平台构建完成后，把所有 artifact 上传到该 tag 的 Release。
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

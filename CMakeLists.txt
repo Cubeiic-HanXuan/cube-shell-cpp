@@ -55,35 +55,14 @@ qt_standard_project_setup()
 option(CUBESHELL_WITH_SSH "Build SSH support (libssh2)" ON)
 option(CUBESHELL_WITH_RDP "Build RDP support (FreeRDP)" OFF)
 
-# ─── cJSON: WinPR 依赖解析 ────────────────────────────────────────────────────
-# WinPR 的 imported target 把 `cjson` 写进了 INTERFACE_LINK_LIBRARIES。
-# 若此时 `cjson` 不是已知 CMake target，链接器只收到裸名 `cjson.lib` → LNK1181。
-#
-# 策略：
-#   1. 先尝试 find_package (vcpkg 正常集成时一步到位)
-#   2. 若失败，手动 find_library + add_library(IMPORTED GLOBAL) 创建同名目标
-#   3. 兜底：target_link_directories 直接写在 cube-shell 目标上 (在 src/app 中)
-# 必须早于任何 add_subdirectory() / find_package(FreeRDP)：目标要在 WinPR 的
-# INTERFACE_LINK_LIBRARIES 被求值前就存在，src/core 与 src/app 才都能解析到。
-if(WIN32 AND CUBESHELL_WITH_RDP)
+# cJSON —— 必须在任何 add_subdirectory() / FreeRDP 查找之前导入。
+# WinPR 的 imported target 把 `cjson` 写进了 INTERFACE_LINK_LIBRARIES。若此时
+# cjson 不是已知的 imported target，CMake 就把它当普通库名原样传给链接器
+#（MSVC 下变成不带路径的 `cjson.lib` → LNK1181）；一旦目标存在，CMake 会替换
+# 成 vcpkg 里的绝对路径。放在根作用域是为了让 src/core（链接 winpr）与 src/app
+#（最终链接 cube-shell.exe）两个目录都能看见这个目标。
+if(CUBESHELL_WITH_RDP)
     find_package(cJSON CONFIG QUIET)
-    if(NOT TARGET cjson)
-        # find_package 未能创建目标 — 手动查找并创建
-        find_library(_CJSON_LIB NAMES cjson
-            PATHS "${CMAKE_BINARY_DIR}/vcpkg_installed/arm64-windows-static/lib"
-                  "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib"
-            NO_DEFAULT_PATH
-        )
-        if(_CJSON_LIB)
-            add_library(cjson STATIC IMPORTED GLOBAL)
-            set_target_properties(cjson PROPERTIES IMPORTED_LOCATION "${_CJSON_LIB}")
-            message(STATUS "cJSON: manually created imported target → ${_CJSON_LIB}")
-        else()
-            message(STATUS "cJSON: library not found, link may fail")
-        endif()
-    else()
-        message(STATUS "cJSON: found via find_package (target 'cjson' exists)")
-    endif()
 endif()
 
 if(CUBESHELL_WITH_SSH)
@@ -184,10 +163,17 @@ if(APPLE)
     endif()
 endif()
 
-# 注：这里原来有一段 link_directories() 兜底，但目录作用域的搜索路径不会写进
-# 生成的 .vcxproj（AdditionalLibraryDirectories 为空），对 LNK1181 无效，已删除。
-# 取而代之：上面的 IMPORTED 目标 + src/app 里挂在 cube-shell 上的
-# target_link_directories()。
+# 兜底：即使上面的 find_package(cJSON) 没能创建 imported target（vcpkg 布局差异
+# 等原因），也让链接器能在 vcpkg 的 lib 目录里找到裸名 cjson.lib。
+# 必须写在 add_subdirectory() 之前——link_directories 只影响之后创建的目标。
+# 用 CMAKE_BINARY_DIR 而非 VCPKG_INSTALLED_DIR：manifest 模式下后者可能为空。
+# 非 Windows 平台不需要：WinPR 走 pkg-config 或动态链接自行解析依赖。
+if(WIN32 AND VCPKG_TARGET_TRIPLET)
+    link_directories(
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib"
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/lib"
+    )
+endif()
 
 add_subdirectory(src/qtermwidget)   # terminal emulator widget
 add_subdirectory(src/core)          # business logic (ssh bridge, sessions, ai, ...)
@@ -305,11 +291,11 @@ message(STATUS "  SSH (libssh2)   : ${CUBESHELL_WITH_SSH}")
 message(STATUS "  RDP (FreeRDP)   : ${CUBESHELL_WITH_RDP}")
 if(CUBESHELL_WITH_RDP)
     # 诊断用：cjson 目标存在时 CMake 会把 WinPR 传递过来的裸名 cjson 解析成绝对
-    # 路径；不存在时就只能靠 src/app 里的 target_link_directories 兜底。
+    # 路径；不存在时就只能靠上面的 link_directories 兜底。
     if(TARGET cjson)
         message(STATUS "  cJSON target    : cjson (裸名依赖将解析为绝对路径)")
     else()
-        message(STATUS "  cJSON target    : 未找到，依赖 target_link_directories 兜底")
+        message(STATUS "  cJSON target    : 未找到，依赖 link_directories 兜底")
     endif()
 endif()
 message(STATUS "  Install prefix  : ${CMAKE_INSTALL_PREFIX}")

@@ -330,17 +330,25 @@ void MainWindow::setupMenus()
     // --- 编辑（作用于当前终端） ---
     QMenu *editMenu = menuBar()->addMenu(tr("编辑"));
     QAction *copy = editMenu->addAction(tr("复制"));
+#ifdef Q_OS_MACOS
+    copy->setShortcut(QKeySequence::Copy);
+#else
     copy->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+#endif
     connect(copy, &QAction::triggered, this, [this]() {
         QWidget *w = activeTabWidget() ? activeTabWidget()->currentWidget() : nullptr;
         QTermWidget *term = qobject_cast<QTermWidget *>(w);
         if (!term && w)
             term = w->findChild<QTermWidget *>();
-        if (term)
+        if (term && !term->selectedText().isEmpty())
             term->copyClipboard();
     });
     QAction *paste = editMenu->addAction(tr("粘贴"));
+#ifdef Q_OS_MACOS
+    paste->setShortcut(QKeySequence::Paste);
+#else
     paste->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+V")));
+#endif
     connect(paste, &QAction::triggered, this, [this]() {
         QWidget *w = activeTabWidget() ? activeTabWidget()->currentWidget() : nullptr;
         QTermWidget *term = qobject_cast<QTermWidget *>(w);

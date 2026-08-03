@@ -127,6 +127,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 【调试模式·x86_64】把 aqt 诊断提到最前（仅需 pip 装 aqt，不依赖系统依赖/
+      # vcpkg），打印 x86_64 的 Qt 6.9.1 真实仓库结构后立即成功退出，跳过后续重活。
+      # 拿到输出精调后再删除本步骤、恢复原 Diagnose/Install 步骤。
+      - name: Probe x86_64 Qt repo structure (debug)
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          python3 -m pip install --quiet --upgrade "git+https://github.com/miurahr/aqtinstall.git"
+          aqt version
+          echo "===== arch list for 6.9.1 (host=linux) ====="
+          aqt list-qt linux desktop --arch 6.9.1 || true
+          echo "===== 6.9.x versions available (host=linux) ====="
+          aqt list-qt linux desktop --spec "6.9" || true
+          for ARCH in gcc_64 linux_gcc_64; do
+            echo "===== try arch=$ARCH : --modules 6.9.1 ====="
+            aqt list-qt linux desktop --modules 6.9.1 "$ARCH" || true
+            echo "===== try arch=$ARCH : --archives 6.9.1 ====="
+            aqt list-qt linux desktop --archives 6.9.1 "$ARCH" || true
+          done
+          echo "===== probe done (debug) ====="
+          # 本步到此即可（exit 0 标绿）。后续 Configure/Build 因 Qt 未装会失败，
+          # 属预期——本次只为拿上面的诊断输出，据此精调后恢复正常流程。
+
       # ------------------------------------------------------------------ Qt
       # 仅 macOS / Windows 用 install-qt-action；Linux 该 action 官方不支持，走下方 apt。
       - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.qt_arch }})
@@ -218,33 +240,49 @@ jobs:
           aqt version
           echo "=== available 6.9.x for ${{ matrix.aqt_host }} desktop ==="
           aqt list-qt ${{ matrix.aqt_host }} desktop --spec "6.9" || true
-          echo "=== available arch for ${{ env.QT_VERSION }} ==="
+          echo "=== available arch for ${{ env.QT_VERSION }} (host=${{ matrix.aqt_host }}) ==="
           aqt list-qt ${{ matrix.aqt_host }} desktop --arch ${{ env.QT_VERSION }} || true
           echo "=== available base archives for ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} ==="
           aqt list-qt ${{ matrix.aqt_host }} desktop --archives ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} || true
           echo "=== available modules for ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} ==="
           aqt list-qt ${{ matrix.aqt_host }} desktop --modules ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} || true
 
+          # x86_64 专项：怀疑 arch 名应为 linux_gcc_64 而非 gcc_64（与 ARM64 的
+          # linux_gcc_arm64 命名一致）。分别测试两个 arch 名能否解析出 qt_base。
+          if [ "${{ matrix.aqt_arch }}" = "gcc_64" ]; then
+            for ARCH in gcc_64 linux_gcc_64; do
+              echo "=== [x86_64] try arch=$ARCH : list modules ==="
+              aqt list-qt linux desktop --modules ${{ env.QT_VERSION }} "$ARCH" || true
+              echo "=== [x86_64] try arch=$ARCH : list archives ==="
+              aqt list-qt linux desktop --archives ${{ env.QT_VERSION }} "$ARCH" || true
+            done
+          fi
+
+      # 【调试模式】暂时禁用实际安装，先靠上面的 Diagnose 步骤拿到 x86_64 真实
+      # 仓库结构（arch 名 / 模块名），据此精调后再恢复。把 if 改为 false 即跳过。
       - name: Install Qt ${{ env.QT_VERSION }} via aqt (Linux)
-        if: matrix.platform == 'linux'
+        if: false && matrix.platform == 'linux'
         run: |
-          set -e
           # 装 Qt 到 $HOME/Qt。
           #
-          # 关键：不用 --modules qtmultimedia，改用 --archives 显式列基础归档。
-          # 原因：Qt 6.9 里 qtmultimedia 已是【基础归档】而非扩展模块（见 ARM64 安装
-          # 日志 qtmultimedia-Linux-Ubuntu_24_04-... 与 qtbase 并列下载）；而
-          # --modules 会触发 aqt 的模块名→XML 解析 bug，连核心包 qt_base 都报
-          #   "The packages ['qt_base','qtmultimedia'] were not found while parsing XML"
-          # （aqtinstall issue #847）。--archives 直接指定基础归档名，绕开该解析。
+          # 两种装法的权衡（aqt 对 Qt 6.9 各架构仓库的解析不一致，见 issue #847）：
+          #   * --modules qtmultimedia：完整、自动拉齐依赖归档（qtdeclarative 等），
+          #     ARM64 已验证可成功；但 x86_64 的 Qt 6.9.1 仓库下会触发解析 bug，报
+          #     "The packages ['qt_base','qtmultimedia'] were not found while parsing XML"。
+          #   * --archives <list>：直接列基础归档名，绕开模块名解析；但需手动补齐
+          #     qtmultimedia 的依赖归档，漏了会导致 Qt6Multimedia config 缺失。
           #
-          # 项目需要 Core/Gui/Widgets/Network/Concurrent（都在 qtbase）+ Multimedia。
-          # icu 是 qtbase 运行期依赖（aqt 会自动一并装）；qtsvg/qttools 等按需，
-          # 这里只列必需的 qtbase + qtmultimedia，避免漏依赖可再补。
-          aqt install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} \
-            ${{ matrix.aqt_arch }} \
-            --outputdir "$HOME/Qt" \
-            --archives qtbase qtmultimedia icu
+          # 策略：先试 --modules（完整），失败则回退 --archives（补齐 ARM64 成功时
+          # 的实际归档清单）。两个架构共用此逻辑，各自走能成的那条。
+          set -x
+          AQT="aqt install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} --outputdir $HOME/Qt"
+
+          if ! $AQT --modules qtmultimedia; then
+            echo "== --modules 失败，回退到 --archives 补齐依赖归档 =="
+            rm -rf "$HOME/Qt"
+            $AQT --archives qtbase qtdeclarative qtsvg qttools qtmultimedia qtwayland qttranslations icu
+          fi
+          set +x
 
           # aqt 在不同架构下落地子目录名可能不同（x86_64 多为 <ver>/gcc_64，
           # ARM64 未必是 linux_gcc_arm64）。不硬编码路径，改为按 Qt6Config.cmake
@@ -262,7 +300,15 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$QTDIR" >> "$GITHUB_ENV"
           echo "$QTDIR/bin" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$QTDIR/lib" >> "$GITHUB_ENV"
-          ls "$QTDIR/lib/cmake/Qt6"
+
+          # 校验 QtMultimedia 模块确实装好（cube-shell 依赖它：VoiceInput/QAudioSource）
+          if [ ! -f "$QTDIR/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" ]; then
+            echo "ERROR: Qt6MultimediaConfig.cmake 缺失，qtmultimedia 未正确安装" >&2
+            echo "QTDIR=$QTDIR 下的 Qt6* cmake 模块：" >&2
+            ls "$QTDIR/lib/cmake/" >&2 || true
+            exit 1
+          fi
+          echo "Qt6Multimedia OK: $QTDIR/lib/cmake/Qt6Multimedia"
 
       # ------------------------------------------------------- Configure
       # Windows 用 Visual Studio generator（overlay 文档基于此验证，-A 指定架构）；

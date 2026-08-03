@@ -408,24 +408,33 @@ jobs:
           QT_LIB="$QT_ROOT/lib"
           QT_PLUGINS="$QT_ROOT/plugins"
 
-          # 1) 收集 cube-shell 实际链接的 Qt6 共享库到 dist/lib（含间接依赖）
-          mkdir -p dist/lib
-          # 先拷主程序直接/间接依赖的所有 Qt6*.so.6（用 ldd 解析）
-          ldd dist/bin/cube-shell | awk '/libQt6/ {print $3}' | while read -r so; do
-            [ -f "$so" ] && cp -L "$so" dist/lib/
-          done
-          # 再补拷 libQt6 全部运行库（ldd 可能漏掉 dlopen 加载的，如 Multimedia 后端）
-          cp -L "$QT_LIB"/libQt6*.so.6 dist/lib/ 2>/dev/null || true
-          # Qt 运行还依赖 icu（aqt 装在 QT_LIB 下，libicui18n/libicuuc/libicudata）
-          cp -L "$QT_LIB"/libicu*.so.* dist/lib/ 2>/dev/null || true
-
-          # 2) 拷 Qt 插件（platforms 必需，否则 GUI 起不来；多媒体/图像格式按需）
+          # 1) 先拷 Qt 插件（platforms 必需，否则 GUI 起不来；多媒体/图像格式按需）。
+          #    必须先于 Qt 库收集：下面第 2 步要从「主程序 + 所有插件」的 ldd 里收集
+          #    它们依赖的 libQt6*，插件得先在位才能被 ldd 扫到。
           mkdir -p dist/bin/plugins
           for p in platforms platformthemes imageformats multimedia tls xcbglintegrations; do
             [ -d "$QT_PLUGINS/$p" ] && cp -r "$QT_PLUGINS/$p" dist/bin/plugins/
           done
 
-          # 2b) 平台插件（libqxcb/libqwayland）依赖一批系统 XCB/XKB 库（libxcb-cursor、
+          # 2) 收集 Qt6 共享库到 dist/lib。来源 = 主程序 + 所有插件的 ldd 依赖。
+          #    关键：不能只拷主程序链接的那几个——平台插件还依赖一批主程序没直接链接、
+          #    运行期才加载的 Qt 库：libQt6XcbQpa（xcb）、libQt6WaylandClient（wayland）、
+          #    libQt6EglFSDeviceIntegration（eglfs）、libQt6OpenGL、libQt6Network 等。
+          #    漏了它们，目标机上插件加载即报 libQt6Xxx.so.6 => not found。
+          mkdir -p dist/lib
+          # 2a) 从主程序 + 所有插件的 ldd 里抓每一个 libQt6*（能解析出真实路径的）
+          { ldd dist/bin/cube-shell; find dist/bin/plugins -name '*.so' -exec ldd {} \; ; } \
+            2>/dev/null | awk '/=> \// && /libQt6/ {print $3}' | sort -u | while read -r so; do
+            [ -f "$so" ] && cp -L "$so" dist/lib/
+          done
+          # 2b) 兜底：把 Qt 安装目录里的 libQt6*.so.6 全部补上——ldd 静态解析可能漏掉
+          #     dlopen 才加载的（如 Multimedia 后端、imageformats 运行期插件）。Qt 库
+          #     体积可控，全拷最稳妥。
+          cp -L "$QT_LIB"/libQt6*.so.6 dist/lib/ 2>/dev/null || true
+          # Qt 运行还依赖 icu（aqt 装在 QT_LIB 下，libicui18n/libicuuc/libicudata）
+          cp -L "$QT_LIB"/libicu*.so.* dist/lib/ 2>/dev/null || true
+
+          # 2c) 平台插件（libqxcb/libqwayland）依赖一批系统 XCB/XKB 库（libxcb-cursor、
           # libxkbcommon、libxcb-xinerama 等；Qt6.5+ 的 xcb 插件强制需要 libxcb-cursor0）。
           # 目标机（尤其 minimal/服务器镜像）可能缺这些，导致插件"找到了却加载失败"：
           #   qt.qpa.plugin: Could not load the Qt platform plugin "xcb"/"wayland"

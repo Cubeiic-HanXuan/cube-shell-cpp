@@ -97,12 +97,18 @@ jobs:
           #   overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
 
           # ------------------------------- Linux -------------------------------
-          # 用 ubuntu-22.04（而非 -latest/24.04）编译：链接的 glibc 版本更低（2.35），
-          # 二进制可跑在更多旧发行版上（glibc 向后兼容——旧系统编的程序能跑新系统，
-          # 反之不行）。Qt 用 aqt 装 6.9（与 macOS/Windows 对齐），install-qt-action
-          # 官方不支持 Linux，故直接调 aqt 命令。aqt 的 host/arch：
+          # Qt 用 aqt 装 6.9（与 macOS/Windows 对齐），install-qt-action 官方不支持
+          # Linux，故直接调 aqt 命令。aqt 的 host/arch：
           #   x86_64 → host=linux        arch=gcc_64
           #   ARM64  → host=linux_arm64  arch=linux_gcc_arm64（Qt≥6.7 才有 ARM64 桌面包）
+          #
+          # 两个架构的 runner 版本不同（glibc 兼容性权衡）：
+          #   x86_64 用 ubuntu-22.04（glibc 2.35）：aqt 的 x86_64 Qt 6.9 能在 22.04 跑，
+          #     链接更低版本 glibc → 二进制可跑在更多旧发行版（glibc 向后兼容）。
+          #   ARM64 用 ubuntu-24.04（glibc 2.39）：Qt 官方 ARM64 Linux 二进制【只】在
+          #     Ubuntu 24.04 上编译（Qt 官方文档明确：ARM64 参考平台即 24.04/glibc2.39，
+          #     glibc 更旧需从源码重编 Qt）。22.04 上其 moc 报 GLIBC_2.38 not found，
+          #     故 ARM64 只能用 24.04。
           - name: linux-x86_64
             os: ubuntu-22.04
             platform: linux
@@ -111,7 +117,7 @@ jobs:
             vcpkg_triplet: x64-linux
 
           - name: linux-arm64
-            os: ubuntu-22.04-arm
+            os: ubuntu-24.04-arm      # Qt ARM64 Linux 官方二进制基于 24.04/glibc2.39，22.04 跑不动 moc
             platform: linux
             aqt_host: linux_arm64
             aqt_arch: linux_gcc_arm64
@@ -214,16 +220,31 @@ jobs:
           aqt list-qt ${{ matrix.aqt_host }} desktop --spec "6.9" || true
           echo "=== available arch for ${{ env.QT_VERSION }} ==="
           aqt list-qt ${{ matrix.aqt_host }} desktop --arch ${{ env.QT_VERSION }} || true
+          echo "=== available base archives for ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} ==="
+          aqt list-qt ${{ matrix.aqt_host }} desktop --archives ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} || true
+          echo "=== available modules for ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} ==="
+          aqt list-qt ${{ matrix.aqt_host }} desktop --modules ${{ env.QT_VERSION }} ${{ matrix.aqt_arch }} || true
 
       - name: Install Qt ${{ env.QT_VERSION }} via aqt (Linux)
         if: matrix.platform == 'linux'
         run: |
           set -e
-          # 装 Qt + qtmultimedia 模块到 $HOME/Qt
+          # 装 Qt 到 $HOME/Qt。
+          #
+          # 关键：不用 --modules qtmultimedia，改用 --archives 显式列基础归档。
+          # 原因：Qt 6.9 里 qtmultimedia 已是【基础归档】而非扩展模块（见 ARM64 安装
+          # 日志 qtmultimedia-Linux-Ubuntu_24_04-... 与 qtbase 并列下载）；而
+          # --modules 会触发 aqt 的模块名→XML 解析 bug，连核心包 qt_base 都报
+          #   "The packages ['qt_base','qtmultimedia'] were not found while parsing XML"
+          # （aqtinstall issue #847）。--archives 直接指定基础归档名，绕开该解析。
+          #
+          # 项目需要 Core/Gui/Widgets/Network/Concurrent（都在 qtbase）+ Multimedia。
+          # icu 是 qtbase 运行期依赖（aqt 会自动一并装）；qtsvg/qttools 等按需，
+          # 这里只列必需的 qtbase + qtmultimedia，避免漏依赖可再补。
           aqt install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} \
             ${{ matrix.aqt_arch }} \
             --outputdir "$HOME/Qt" \
-            --modules qtmultimedia
+            --archives qtbase qtmultimedia icu
 
           # aqt 在不同架构下落地子目录名可能不同（x86_64 多为 <ver>/gcc_64，
           # ARM64 未必是 linux_gcc_arm64）。不硬编码路径，改为按 Qt6Config.cmake

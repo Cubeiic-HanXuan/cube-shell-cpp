@@ -195,13 +195,21 @@ jobs:
 
       # Linux：用 aqt 装 Qt ${{ env.QT_VERSION }}（与 macOS/Windows 对齐到 6.9）。
       # install-qt-action 官方不支持 Linux（"Linux x86 packages are not supported"），
-      # 故直接调 aqt 命令。先用 list-qt 打印实际可用版本/arch，便于 6.9.1 在某架构
-      # 缺失时快速定位（尤其 ARM64，Qt≥6.7 才有桌面预编译包）。
-      # 放在系统依赖与 pip 之后（aqt 由 pip 安装，Qt 运行需 X11/GL 系统库）。
+      # 故直接调 aqt 命令。
+      #
+      # 关键：必须从 git master 装 aqt，而非 PyPI。PyPI 最新稳定版 3.3.0（2025-06）
+      # 无法解析 Qt 6.9 的在线仓库 XML——核心包 qt_base/qtmultimedia 找不到：
+      #   ERROR: The packages ['qt_base', 'qtmultimedia'] were not found while parsing XML
+      # Qt 6.9 改了仓库结构，修复只在开发版（git master）。见 aqtinstall issue #1007。
+      #
+      # 先用 list-qt 打印实际可用版本/arch，便于 6.9.1 在某架构缺失时快速定位
+      # （尤其 ARM64，Qt≥6.7 才有桌面预编译包）。放在系统依赖与 pip 之后
+      # （aqt 由 pip 安装，Qt 运行需 X11/GL 系统库）。
       - name: Diagnose available Qt versions (Linux)
         if: matrix.platform == 'linux'
         run: |
-          python3 -m pip install --upgrade aqtinstall
+          python3 -m pip install --upgrade "git+https://github.com/miurahr/aqtinstall.git"
+          aqt version
           echo "=== available 6.9.x for ${{ matrix.aqt_host }} desktop ==="
           aqt list-qt ${{ matrix.aqt_host }} desktop --spec "6.9" || true
           echo "=== available arch for ${{ env.QT_VERSION }} ==="
@@ -216,8 +224,19 @@ jobs:
             ${{ matrix.aqt_arch }} \
             --outputdir "$HOME/Qt" \
             --modules qtmultimedia
-          # aqt 布局：$HOME/Qt/<ver>/<arch>/，把 cmake 前缀与 bin 注入后续步骤
-          QTDIR="$HOME/Qt/${{ env.QT_VERSION }}/${{ matrix.aqt_arch }}"
+
+          # aqt 在不同架构下落地子目录名可能不同（x86_64 多为 <ver>/gcc_64，
+          # ARM64 未必是 linux_gcc_arm64）。不硬编码路径，改为按 Qt6Config.cmake
+          # 实际位置反推 QT 根目录，保证任何架构都能正确定位。
+          QT6CONFIG="$(find "$HOME/Qt" -name Qt6Config.cmake -path '*/cmake/Qt6/*' | head -n1)"
+          if [ -z "$QT6CONFIG" ]; then
+            echo "ERROR: 未找到 Qt6Config.cmake，aqt 安装目录结构如下：" >&2
+            find "$HOME/Qt" -maxdepth 3 -type d >&2
+            exit 1
+          fi
+          # QT6CONFIG = <QTDIR>/lib/cmake/Qt6/Qt6Config.cmake → QTDIR 去掉 /lib/cmake/Qt6/Qt6Config.cmake
+          QTDIR="${QT6CONFIG%/lib/cmake/Qt6/Qt6Config.cmake}"
+          echo "Detected QTDIR=$QTDIR"
           echo "Qt6_DIR=$QTDIR/lib/cmake/Qt6" >> "$GITHUB_ENV"
           echo "CMAKE_PREFIX_PATH=$QTDIR" >> "$GITHUB_ENV"
           echo "$QTDIR/bin" >> "$GITHUB_PATH"

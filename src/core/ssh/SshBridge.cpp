@@ -239,7 +239,8 @@ void SshBridge::stop()
             // 强制唤醒它，使其从阻塞中返回并重查 m_running == false 后退出。
             if (m_client && m_client->socketFd() >= 0) {
 #ifdef Q_OS_WIN
-                ::shutdown(reinterpret_cast<SOCKET>(m_client->socketFd()), SD_BOTH);
+                // qintptr(有符号) → SOCKET(UINT_PTR,无符号) 需经 uintptr_t 过渡（同 SshClient）。
+                ::shutdown(static_cast<SOCKET>(static_cast<uintptr_t>(m_client->socketFd())), SD_BOTH);
 #else
                 ::shutdown(static_cast<int>(m_client->socketFd()), SHUT_RDWR);
 #endif

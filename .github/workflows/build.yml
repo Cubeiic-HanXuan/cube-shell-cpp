@@ -16,10 +16,9 @@
 # 目录已提交进仓库（见 BUILD-Windows-ARM64.md）。
 #
 # 触发：
-#   - push 到 main / 任何 v* tag
-#   - Pull Request
-#   - 手动 workflow_dispatch
-# 产物：每次构建上传 6 个 Artifact；打 v* tag 时额外自动创建 GitHub Release。
+#   - 仅手动 workflow_dispatch（Actions → build → Run workflow）。
+#     打 v* tag 时手动触发并勾选/填入该 tag，可同时产出 GitHub Release。
+# 产物：每次构建上传 6 个 Artifact；当 ref 是 v* tag 时额外自动创建 GitHub Release。
 #
 # 注意：ARM64 托管 Runner（windows-11-vs2026-arm / ubuntu-22.04-arm）对【公开仓库】免费。
 #       若本仓库为私有，这些 label 会一直排队，需改用私有 Runner 或先把仓库转公开。
@@ -28,10 +27,6 @@
 name: build
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 # 同一分支/PR 重复触发时取消旧 run，省 Runner 时间

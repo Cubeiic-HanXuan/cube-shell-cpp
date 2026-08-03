@@ -460,7 +460,10 @@ void SshClient::shutdownSocket()
     if (m_sock < 0)
         return;
 #ifdef Q_OS_WIN
-    ::shutdown(reinterpret_cast<SOCKET>(m_sock), SD_BOTH);
+    // m_sock 是 qintptr（有符号），SOCKET 是 UINT_PTR（无符号）：二者宽度相同
+    // 但有符号性不同，reinterpret_cast 无法直接转（MSVC C2440）。经 uintptr_t
+    // 过渡做等宽数值转换。
+    ::shutdown(static_cast<SOCKET>(static_cast<uintptr_t>(m_sock)), SD_BOTH);
 #else
     ::shutdown(static_cast<int>(m_sock), SHUT_RDWR);
 #endif

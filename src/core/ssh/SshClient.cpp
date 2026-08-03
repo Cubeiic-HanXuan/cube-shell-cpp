@@ -406,21 +406,71 @@ bool SshClient::waitSocket(int timeoutMs, SshError &)
     return rc > 0;
 }
 
+// 关闭路径（主线程析构链：~SshSessionTab → ~SshBridge → closeChannel /
+// disconnectFromHost）绝不能无限等 m_sessionMutex：若此刻另一线程（端口转发、
+// 远程监控、shell 读循环）正持有该锁且阻塞在网络 IO 上，无限等锁会把主线程钉死
+// 在 futex 上 → 窗口冻结、桌面环境弹"not responding"（gdb 实测主线程停在
+// closeChannel → QBasicMutex::lockInternal → futex_wait_queue）。
+// 因此这里用带超时的 tryLock：拿到锁才做优雅关闭；拿不到说明有线程正忙，放弃
+// 优雅关闭——连接反正要断，本地句柄由 OS 在 socket close/进程退出时回收。
+namespace {
+constexpr int kCloseLockTimeoutMs = 1500;
+}
+
+// 在【已持有 m_sessionMutex】的前提下关闭并释放 shell channel。
+// 关键：全程保持非阻塞，绝不 set_blocking(1)——阻塞模式下 libssh2_channel_close()
+// 会一直等服务器回 SSH_MSG_CHANNEL_CLOSE，对端慢/半死时无限卡住主线程（这与上面
+// 的锁等待是两个独立的卡死源）。非阻塞下只短暂重试：对端应答则优雅关闭，不应答
+// 也直接 free——本地释放本就不依赖对端确认。
+void SshClient::closeChannelLocked()
+{
+    if (!m_channel)
+        return;
+    LIBSSH2_CHANNEL *ch = m_channel;
+    m_channel = nullptr;                  // 先摘下句柄，任何后续路径都不再复用它
+    libssh2_channel_set_blocking(ch, 0);  // 保持非阻塞：绝不等服务器应答
+    for (int i = 0; i < 20; ++i) {        // 最多 ~100ms 尝试优雅关闭
+        if (libssh2_channel_close(ch) != LIBSSH2_ERROR_EAGAIN)
+            break;
+        if (m_sock < 0)
+            break;                        // socket 已关，对端不可达
+        struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 5000; // 让出 5ms 再重试
+        ::select(0, nullptr, nullptr, nullptr, &tv);
+    }
+    libssh2_channel_free(ch);             // 无论对端是否应答，本地都释放
+}
+
 void SshClient::closeChannel()
 {
-    QMutexLocker locker(&m_sessionMutex);
-    if (m_channel) {
-        libssh2_channel_set_blocking(m_channel, 1);
-        libssh2_channel_close(m_channel);
-        libssh2_channel_free(m_channel);
-        m_channel = nullptr;
+    if (!m_sessionMutex.tryLock(kCloseLockTimeoutMs)) {
+        qWarning() << "SshClient::closeChannel: session lock busy, skipping graceful"
+                      " channel close to avoid blocking the UI thread";
+        return; // 另一线程仍持有锁在做 IO；跳过优雅关闭，避免主线程死等。
     }
+    struct UnlockGuard { QRecursiveMutex &m; ~UnlockGuard() { m.unlock(); } } guard{m_sessionMutex};
+    closeChannelLocked();
 }
 
 void SshClient::disconnectFromHost()
 {
-    QMutexLocker locker(&m_sessionMutex);
-    closeChannel();
+    // 同 closeChannel：主线程关闭路径不能无限等 m_sessionMutex（见上注释）。
+    // 拿不到锁就只关 socket（唤醒所有阻塞在 select/read 上的持锁线程），跳过
+    // libssh2 层的优雅断开。
+    if (!m_sessionMutex.tryLock(kCloseLockTimeoutMs)) {
+        qWarning() << "SshClient::disconnectFromHost: session lock busy, closing"
+                      " socket only (skipping graceful libssh2 disconnect)";
+        if (m_sock >= 0) {
+#ifdef Q_OS_WIN
+            ::closesocket(m_sock);
+#else
+            ::close(m_sock);
+#endif
+            m_sock = -1;
+        }
+        return;
+    }
+    struct UnlockGuard { QRecursiveMutex &m; ~UnlockGuard() { m.unlock(); } } guard{m_sessionMutex};
+    closeChannelLocked();
     if (m_session) {
         libssh2_session_disconnect(m_session, "bye");
         libssh2_session_free(m_session);

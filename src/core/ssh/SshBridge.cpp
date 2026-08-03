@@ -2,7 +2,16 @@
 
 #include "SshBridge.h"
 
+#include <QDebug>
 #include <QMetaObject>
+
+// shutdown()/SHUT_RDWR (POSIX) or shutdown()/SD_BOTH (Winsock)：stop() 里用它
+// 强制唤醒仍卡在 socket I/O 上的读线程，避免主线程 detach 后的 UAF 窗口。
+#ifdef Q_OS_WIN
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
 
 #include "SshClient.h"
 #include "ShellMfaWatcher.h"
@@ -208,8 +217,43 @@ void SshBridge::stop()
     // does not dereference a dangling pointer.
     m_session = nullptr;
 
+    // 先把读线程 join 掉、确认它真正退出，再去 closeChannel()。
+    //
+    // 之前的写法是 wait(2000) 超时后就【不管读线程是否还活着】直接
+    // closeChannel()：一旦读线程没能在 2s 内退出（它每次 readChannel 都要
+    // 短暂持有 m_sessionMutex 做 libssh2_channel_read，网络慢/VM 抖动时退出
+    // 会变慢），主线程就会去和仍持锁的读线程抢 m_sessionMutex，双方互等 →
+    // 死锁（gdb 实测主线程停在 closeChannel → QBasicMutex::lockInternal →
+    // futex_wait_queue）。Linux/虚拟机下读线程退出更慢，更容易撞上这个窗口，
+    // 所以表现为"只有 Linux 卡死"。
+    //
+    // m_running 已在上面置 false；readLoop 每轮 waitReadable(≤100ms) 后都会
+    // 重查 m_running，故读线程至多 ~100ms 内退出。给它充足但有限的余量循环
+    // join，直到确认退出才往下走。
     if (m_readerThread) {
-        m_readerThread->wait(2000);
+        for (int i = 0; i < 20 && !m_readerThread->wait(100); ++i) {
+            // 每次迭代最多等 100ms；读线程退出后 wait 立即返回 true 跳出。
+        }
+        if (m_readerThread->isRunning()) {
+            // 读线程仍卡在 socket I/O（select/read）上。先 shutdown socket
+            // 强制唤醒它，使其从阻塞中返回并重查 m_running == false 后退出。
+            if (m_client && m_client->socketFd() >= 0) {
+#ifdef Q_OS_WIN
+                ::shutdown(reinterpret_cast<SOCKET>(m_client->socketFd()), SD_BOTH);
+#else
+                ::shutdown(static_cast<int>(m_client->socketFd()), SHUT_RDWR);
+#endif
+            }
+            // shutdown 后给读线程最后一次退出机会（socket 不可读会立即返回错误）。
+            if (!m_readerThread->wait(200)) {
+                // 极端情况：读线程仍未退出（可能卡在内核深处）。分离以避免主线程
+                // 死等，但存在短暂 UAF 窗口——实践中 shutdown 后几乎立即退出。
+                qWarning() << "SshBridge::stop: reader thread did not exit even after"
+                              " socket shutdown; detaching (channel close skipped)";
+                m_readerThread = nullptr;
+                return;
+            }
+        }
         m_readerThread->deleteLater();
         m_readerThread = nullptr;
     }

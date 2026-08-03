@@ -165,6 +165,9 @@ private:
     bool authPublicKey(SshError &error);
     bool authKeyboardInteractive(SshPromptCallback cb, SshError &error);
     bool waitSocket(int timeoutMs, SshError &error);
+    // 在已持有 m_sessionMutex 的前提下非阻塞地关闭并释放 shell channel。
+    // 供 closeChannel()/disconnectFromHost() 在持锁后调用（见 .cpp 注释）。
+    void closeChannelLocked();
 
     QString m_host;
     quint16 m_port = 22;

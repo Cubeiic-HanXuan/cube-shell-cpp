@@ -27,6 +27,15 @@ endif()
 # Put binaries in a predictable place
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Windows：统一整个项目（含 tests/）使用动态 CRT（/MD）。
+# Qt 官方预编译包是 /MD 构建的；vcpkg 侧用 -static-md triplet（静态库 + 动态 CRT）
+# 与之对齐。若应用代码不统一为 /MD，则同时链接 Qt(/MD) 与 vcpkg 静态库的目标会在
+# 链接期碰撞（LNK2038 RuntimeLibrary 不匹配 / LNK2005 符号重复）。cmake_minimum
+# 3.24 > 3.15，CMP0091 已为 NEW，此变量直接生效。仅 vcpkg 静态库场景下需要。
+if(WIN32 AND VCPKG_TARGET_TRIPLET MATCHES "static-md")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------

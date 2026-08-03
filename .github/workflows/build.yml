@@ -3,8 +3,9 @@
 #
 # 用 GitHub 托管 Runner 编译 6 个平台（本地无需对应架构机器）：
 #   macOS   : Intel x86_64 (macos-15-intel)  + Apple Silicon ARM64 (macos-14)
-#   Windows : x64 (windows-latest)           + ARM64 (windows-11-arm)
-#   Linux   : x86_64 (ubuntu-latest)         + ARM64 (ubuntu-24.04-arm)
+#   Windows : x64 (windows-2022 / VS2022)    + ARM64 (windows-11-vs2026-arm / VS2026)
+#   Linux   : x86_64 (ubuntu-22.04)          + ARM64 (ubuntu-22.04-arm)，apt 系统 Qt6
+#             （用 22.04 而非最新版：链接更低版本 glibc，兼容更多旧发行版）
 #
 # 依赖：Qt6.9（install-qt-action，含 qtmultimedia）+ vcpkg manifest（vcpkg.json
 # 已含 freerdp/cjson/openssl/libssh2/yaml-cpp/zlib）。RDP 全平台开启
@@ -20,8 +21,8 @@
 #   - 手动 workflow_dispatch
 # 产物：每次构建上传 6 个 Artifact；打 v* tag 时额外自动创建 GitHub Release。
 #
-# 注意：windows-11-arm / ubuntu-24.04-arm 是 ARM64 托管 Runner，对【公开仓库】免费。
-#       若本仓库为私有，这两个 label 会一直排队，需改用私有 Runner 或先把仓库转公开。
+# 注意：ARM64 托管 Runner（windows-11-vs2026-arm / ubuntu-22.04-arm）对【公开仓库】免费。
+#       若本仓库为私有，这些 label 会一直排队，需改用私有 Runner 或先把仓库转公开。
 # ===========================================================================
 
 name: build
@@ -66,33 +67,42 @@ jobs:
             osx_arch: arm64
 
           # ------------------------------ Windows ------------------------------
+          # x64 固定跑 windows-2022（VS 2022 仍在，generator「Visual Studio 17 2022」）。
+          # 不追 windows-latest：它正灰度迁到 VS 2026，VS17 generator 会找不到实例。
+          # 用 VS2022 也与 BUILD-Windows-ARM64.md 里 overlay 验证的 MSVC 版本一致。
           - name: windows-x86_64
-            os: windows-latest
+            os: windows-2022
             platform: windows
             qt_arch: win64_msvc2022_64
-            vcpkg_triplet: x64-windows-static
+            vcpkg_triplet: x64-windows-static-md
+            vs_generator: Visual Studio 17 2022
             vs_arch: x64
             overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
 
+          # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
+          # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
+          # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
           - name: windows-arm64
-            os: windows-11-arm
+            os: windows-11-vs2026-arm
             platform: windows
             qt_arch: win64_msvc2022_arm64
-            vcpkg_triplet: arm64-windows-static
+            vcpkg_triplet: arm64-windows-static-md
+            vs_generator: Visual Studio 18 2026
             vs_arch: ARM64
             overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
 
           # ------------------------------- Linux -------------------------------
+          # 用 ubuntu-22.04（而非 -latest/24.04）编译：链接的 glibc 版本更低（2.35），
+          # 二进制可跑在更多旧发行版上（glibc 向后兼容——旧系统编的程序能跑新系统，
+          # 反之不行）。Qt 用 apt 系统包（install-qt-action 官方不支持 Linux 桌面）。
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             platform: linux
-            qt_arch: gcc_64
             vcpkg_triplet: x64-linux
 
           - name: linux-arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             platform: linux
-            qt_arch: gcc_arm64          # aqt 的 Linux ARM64 桌面包；若无则见下「已知风险」
             vcpkg_triplet: arm64-linux
 
     steps:
@@ -100,7 +110,9 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------ Qt
+      # 仅 macOS / Windows 用 install-qt-action；Linux 该 action 官方不支持，走下方 apt。
       - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.qt_arch }})
+        if: matrix.platform != 'linux'
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -108,6 +120,17 @@ jobs:
           modules: 'qtmultimedia'
           cache: 'true'
           cache-key-prefix: 'qt-${{ matrix.name }}'
+
+      # Linux：用 Ubuntu 仓库的 Qt6 开发包（x86_64 / ARM64 同一路径，稳定可靠）。
+      # 版本为发行版自带（24.04 为 Qt 6.4），代码用到的均为基础组件，兼容无虞。
+      - name: Install Qt6 via apt (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qt6-base-dev qt6-base-dev-tools \
+            qt6-multimedia-dev qt6-tools-dev qt6-tools-dev-tools \
+            libgl1-mesa-dev
 
       # ------------------------------------------------------------- vcpkg
       # vcpkg 用 manifest 模式（仓库根 vcpkg.json）。缓存 installed 目录避免每次
@@ -168,7 +191,7 @@ jobs:
               '-DVCPKG_OVERLAY_PORTS=vcpkg-ports'
             )
           }
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.vs_arch }} `
+          cmake -S . -B build -G "${{ matrix.vs_generator }}" -A ${{ matrix.vs_arch }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DCUBESHELL_WITH_RDP=ON `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
@@ -197,7 +220,7 @@ jobs:
         shell: pwsh
         run: |
           $cfg = Get-ChildItem -Recurse -Path build/vcpkg_installed -Filter configdata.pm -ErrorAction SilentlyContinue |
-                 Where-Object { $_.FullName -like '*openssl*arm64*rel*' } | Select-Object -First 1
+                 Where-Object { $_.FullName -like '*openssl*' -and $_.FullName -like '*rel*' } | Select-Object -First 1
           if ($cfg) {
             $cflags = (Select-String -Path $cfg.FullName -Pattern 'CFLAGS=' ).Line
             Write-Host "OpenSSL CFLAGS: $cflags"

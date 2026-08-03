@@ -418,18 +418,42 @@ jobs:
             [ -d "$QT_PLUGINS/$p" ] && cp -r "$QT_PLUGINS/$p" dist/bin/plugins/
           done
 
+          # 2b) 平台插件（libqxcb/libqwayland）依赖一批系统 XCB/XKB 库（libxcb-cursor、
+          # libxkbcommon、libxcb-xinerama 等；Qt6.5+ 的 xcb 插件强制需要 libxcb-cursor0）。
+          # 目标机（尤其 minimal/服务器镜像）可能缺这些，导致插件"找到了却加载失败"：
+          #   qt.qpa.plugin: Could not load the Qt platform plugin "xcb"/"wayland"
+          # 用 ldd 递归收集所有插件依赖的库进 dist/lib，使包真正自包含。
+          find dist/bin/plugins -name '*.so' | while read -r plug; do
+            ldd "$plug" 2>/dev/null | awk '/=> \// {print $3}' | while read -r dep; do
+              case "$dep" in
+                # 只收集 XCB/XKB/wayland 相关与 Qt 库，跳过 libc/libm/libpthread 等系统核心库
+                *libxcb*|*libxkbcommon*|*libwayland*|*libQt6*|*libX11*|*libXext*|*libXrender*|*libXau*|*libXdmcp*)
+                  [ -f "$dep" ] && cp -L "$dep" dist/lib/ 2>/dev/null || true ;;
+              esac
+            done
+          done
+
           # 3) 设 rpath：cube-shell 从 $ORIGIN/../lib 找 Qt 库，从 $ORIGIN/plugins 找插件
           patchelf --set-rpath '$ORIGIN/../lib' dist/bin/cube-shell
-          # 插件里的 .so 也需能找到 Qt 库（它们的 rpath 指向上级 lib）
+          # 插件里的 .so 也需能找到 Qt 库与 XCB 库（它们的 rpath 指向上级 lib）
           find dist/bin/plugins -name '*.so' -exec patchelf --set-rpath '$ORIGIN/../../lib' {} \; 2>/dev/null || true
 
           # 4) 提供一个 qt.conf，让 Qt 从可执行文件旁的 plugins/ 加载插件
           printf '[Paths]\nPlugins = plugins\n' > dist/bin/qt.conf
 
-          # 5) 自检：用打好的包内库解析依赖，确认不再有 not found
-          echo "=== ldd self-check (with bundled libs) ==="
+          # 5) 自检：用打好的包内库解析依赖，确认主程序与平台插件都不再有 not found
+          echo "=== ldd self-check: cube-shell ==="
           LD_LIBRARY_PATH="$PWD/dist/lib" ldd dist/bin/cube-shell | grep -i "not found" && {
-            echo "ERROR: 仍有未解析的依赖" >&2; exit 1; } || echo "所有依赖已自包含 ✓"
+            echo "ERROR: 主程序仍有未解析依赖" >&2; exit 1; } || echo "主程序依赖已自包含 ✓"
+          echo "=== ldd self-check: platform plugins ==="
+          MISS=0
+          for plug in dist/bin/plugins/platforms/*.so; do
+            [ -f "$plug" ] || continue
+            if LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$plug" 2>/dev/null | grep -i "not found"; then
+              echo "ERROR: 插件 $plug 有未解析依赖" >&2; MISS=1
+            fi
+          done
+          [ "$MISS" = "1" ] && exit 1 || echo "平台插件依赖已自包含 ✓"
 
           # 6) 打包
           mkdir -p out

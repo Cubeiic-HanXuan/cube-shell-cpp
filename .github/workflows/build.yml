@@ -451,27 +451,40 @@ jobs:
             [ -n "$src" ] && [ -f "$src" ] && cp -L "$src" "dist/lib/$lib" 2>/dev/null || true
           done
 
-          # 3) 设 rpath：cube-shell 从 $ORIGIN/../lib 找 Qt 库，从 $ORIGIN/plugins 找插件
-          patchelf --set-rpath '$ORIGIN/../lib' dist/bin/cube-shell
+          # 3) 设 rpath：cube-shell 从 $ORIGIN/../lib 找 Qt 库，从 $ORIGIN/plugins 找插件。
+          # 必须用 --force-rpath 写成 DT_RPATH 而非默认的 DT_RUNPATH：
+          #   libxcb-cursor.so.0 是 Qt 运行期 dlopen() 打开的，dlopen 的库【不继承】
+          #   调用者的 DT_RUNPATH，但【继承】DT_RPATH。若写成 RUNPATH，目标机上
+          #   dlopen libxcb-cursor 会因搜不到包内 lib/ 而失败，Qt 报
+          #   "xcb-cursor0 or libxcb-cursor0 is needed"，xcb 插件加载失败。
+          patchelf --force-rpath --set-rpath '$ORIGIN/../lib' dist/bin/cube-shell
           # 插件里的 .so 也需能找到 Qt 库与 XCB 库（它们的 rpath 指向上级 lib）
-          find dist/bin/plugins -name '*.so' -exec patchelf --set-rpath '$ORIGIN/../../lib' {} \; 2>/dev/null || true
+          find dist/bin/plugins -name '*.so' -exec patchelf --force-rpath --set-rpath '$ORIGIN/../../lib' {} \; 2>/dev/null || true
 
           # 4) 提供一个 qt.conf，让 Qt 从可执行文件旁的 plugins/ 加载插件
           printf '[Paths]\nPlugins = plugins\n' > dist/bin/qt.conf
 
-          # 5) 自检：用打好的包内库解析依赖，确认主程序与平台插件都不再有 not found
-          echo "=== ldd self-check: cube-shell ==="
-          LD_LIBRARY_PATH="$PWD/dist/lib" ldd dist/bin/cube-shell | grep -i "not found" && {
+          # 5) 自检：模拟目标机环境（清空 LD_LIBRARY_PATH，纯靠二进制内的 DT_RPATH
+          # 解析依赖），确认主程序与平台插件都不再有 not found。
+          # 关键：不能再用 LD_LIBRARY_PATH=dist/lib 来测——LD_LIBRARY_PATH 对 dlopen
+          # 也生效，会掩盖 DT_RUNPATH 不传递给 dlopen 子依赖的缺陷（本仓库就踩过：
+          # CI 自检全绿，目标机上 libxcb-cursor dlopen 失败）。清空它才是真环境。
+          echo "=== ldd self-check (no LD_LIBRARY_PATH, pure RPATH): cube-shell ==="
+          env -u LD_LIBRARY_PATH ldd dist/bin/cube-shell | grep -i "not found" && {
             echo "ERROR: 主程序仍有未解析依赖" >&2; exit 1; } || echo "主程序依赖已自包含 ✓"
-          echo "=== ldd self-check: platform plugins ==="
+          echo "=== ldd self-check (no LD_LIBRARY_PATH): platform plugins ==="
           MISS=0
           for plug in dist/bin/plugins/platforms/*.so; do
             [ -f "$plug" ] || continue
-            if LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$plug" 2>/dev/null | grep -i "not found"; then
+            if env -u LD_LIBRARY_PATH ldd "$plug" 2>/dev/null | grep -i "not found"; then
               echo "ERROR: 插件 $plug 有未解析依赖" >&2; MISS=1
             fi
           done
           [ "$MISS" = "1" ] && exit 1 || echo "平台插件依赖已自包含 ✓"
+          # 说明：dlopen 路径（libxcb-cursor 等）无法被 ldd 静态覆盖，其可达性由上面
+          # patchelf --force-rpath 写入的 DT_RPATH 保证（DT_RPATH 会被 dlopen 的子依赖
+          # 继承，而 DT_RUNPATH 不会）。这里清空 LD_LIBRARY_PATH 的纯 RPATH ldd 自检，
+          # 已能在目标机视角暴露绝大多数「库不在包内/不在 rpath」的问题。
 
           # 6) 打包
           mkdir -p out

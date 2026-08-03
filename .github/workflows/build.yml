@@ -51,58 +51,70 @@ jobs:
       fail-fast: false          # 一个平台失败不取消其余平台
       matrix:
         include:
-          # ------------------------------- macOS -------------------------------
-          - name: macos-x86_64
-            os: macos-15-intel          # Intel runner
-            platform: macos
-            qt_arch: clang_64
-            vcpkg_triplet: x64-osx
-            osx_arch: x86_64
+          # ==================================================================
+          # 调试模式：暂时只跑 Linux 两个平台，macOS / Windows 先注释掉。
+          # 调好 Linux 后，取消下面 macOS / Windows 段的注释即可恢复全平台。
+          # ==================================================================
 
-          - name: macos-arm64
-            os: macos-14                # Apple Silicon runner
-            platform: macos
-            qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
-            vcpkg_triplet: arm64-osx
-            osx_arch: arm64
+          # ------------------------------- macOS -------------------------------
+          # - name: macos-x86_64
+          #   os: macos-15-intel          # Intel runner
+          #   platform: macos
+          #   qt_arch: clang_64
+          #   vcpkg_triplet: x64-osx
+          #   osx_arch: x86_64
+          #
+          # - name: macos-arm64
+          #   os: macos-14                # Apple Silicon runner
+          #   platform: macos
+          #   qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
+          #   vcpkg_triplet: arm64-osx
+          #   osx_arch: arm64
 
           # ------------------------------ Windows ------------------------------
           # x64 固定跑 windows-2022（VS 2022 仍在，generator「Visual Studio 17 2022」）。
           # 不追 windows-latest：它正灰度迁到 VS 2026，VS17 generator 会找不到实例。
           # 用 VS2022 也与 BUILD-Windows-ARM64.md 里 overlay 验证的 MSVC 版本一致。
-          - name: windows-x86_64
-            os: windows-2022
-            platform: windows
-            qt_arch: win64_msvc2022_64
-            vcpkg_triplet: x64-windows-static-md
-            vs_generator: Visual Studio 17 2022
-            vs_arch: x64
-            overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
-
-          # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
-          # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
-          # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
-          - name: windows-arm64
-            os: windows-11-vs2026-arm
-            platform: windows
-            qt_arch: win64_msvc2022_arm64
-            vcpkg_triplet: arm64-windows-static-md
-            vs_generator: Visual Studio 18 2026
-            vs_arch: ARM64
-            overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
+          # - name: windows-x86_64
+          #   os: windows-2022
+          #   platform: windows
+          #   qt_arch: win64_msvc2022_64
+          #   vcpkg_triplet: x64-windows-static-md
+          #   vs_generator: Visual Studio 17 2022
+          #   vs_arch: x64
+          #   overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
+          #
+          # # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
+          # # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
+          # # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
+          # - name: windows-arm64
+          #   os: windows-11-vs2026-arm
+          #   platform: windows
+          #   qt_arch: win64_msvc2022_arm64
+          #   vcpkg_triplet: arm64-windows-static-md
+          #   vs_generator: Visual Studio 18 2026
+          #   vs_arch: ARM64
+          #   overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
 
           # ------------------------------- Linux -------------------------------
           # 用 ubuntu-22.04（而非 -latest/24.04）编译：链接的 glibc 版本更低（2.35），
           # 二进制可跑在更多旧发行版上（glibc 向后兼容——旧系统编的程序能跑新系统，
-          # 反之不行）。Qt 用 apt 系统包（install-qt-action 官方不支持 Linux 桌面）。
+          # 反之不行）。Qt 用 aqt 装 6.9（与 macOS/Windows 对齐），install-qt-action
+          # 官方不支持 Linux，故直接调 aqt 命令。aqt 的 host/arch：
+          #   x86_64 → host=linux        arch=gcc_64
+          #   ARM64  → host=linux_arm64  arch=linux_gcc_arm64（Qt≥6.7 才有 ARM64 桌面包）
           - name: linux-x86_64
             os: ubuntu-22.04
             platform: linux
+            aqt_host: linux
+            aqt_arch: gcc_64
             vcpkg_triplet: x64-linux
 
           - name: linux-arm64
             os: ubuntu-22.04-arm
             platform: linux
+            aqt_host: linux_arm64
+            aqt_arch: linux_gcc_arm64
             vcpkg_triplet: arm64-linux
 
     steps:
@@ -120,17 +132,6 @@ jobs:
           modules: 'qtmultimedia'
           cache: 'true'
           cache-key-prefix: 'qt-${{ matrix.name }}'
-
-      # Linux：用 Ubuntu 仓库的 Qt6 开发包（x86_64 / ARM64 同一路径，稳定可靠）。
-      # 版本为发行版自带（24.04 为 Qt 6.4），代码用到的均为基础组件，兼容无虞。
-      - name: Install Qt6 via apt (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            qt6-base-dev qt6-base-dev-tools \
-            qt6-multimedia-dev qt6-tools-dev qt6-tools-dev-tools \
-            libgl1-mesa-dev
 
       # ------------------------------------------------------------- vcpkg
       # vcpkg 用 manifest 模式（仓库根 vcpkg.json）。缓存 installed 目录避免每次
@@ -191,6 +192,37 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           cmake --version
           ninja --version
+
+      # Linux：用 aqt 装 Qt ${{ env.QT_VERSION }}（与 macOS/Windows 对齐到 6.9）。
+      # install-qt-action 官方不支持 Linux（"Linux x86 packages are not supported"），
+      # 故直接调 aqt 命令。先用 list-qt 打印实际可用版本/arch，便于 6.9.1 在某架构
+      # 缺失时快速定位（尤其 ARM64，Qt≥6.7 才有桌面预编译包）。
+      # 放在系统依赖与 pip 之后（aqt 由 pip 安装，Qt 运行需 X11/GL 系统库）。
+      - name: Diagnose available Qt versions (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          python3 -m pip install --upgrade aqtinstall
+          echo "=== available 6.9.x for ${{ matrix.aqt_host }} desktop ==="
+          aqt list-qt ${{ matrix.aqt_host }} desktop --spec "6.9" || true
+          echo "=== available arch for ${{ env.QT_VERSION }} ==="
+          aqt list-qt ${{ matrix.aqt_host }} desktop --arch ${{ env.QT_VERSION }} || true
+
+      - name: Install Qt ${{ env.QT_VERSION }} via aqt (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          set -e
+          # 装 Qt + qtmultimedia 模块到 $HOME/Qt
+          aqt install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} \
+            ${{ matrix.aqt_arch }} \
+            --outputdir "$HOME/Qt" \
+            --modules qtmultimedia
+          # aqt 布局：$HOME/Qt/<ver>/<arch>/，把 cmake 前缀与 bin 注入后续步骤
+          QTDIR="$HOME/Qt/${{ env.QT_VERSION }}/${{ matrix.aqt_arch }}"
+          echo "Qt6_DIR=$QTDIR/lib/cmake/Qt6" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$QTDIR" >> "$GITHUB_ENV"
+          echo "$QTDIR/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$QTDIR/lib" >> "$GITHUB_ENV"
+          ls "$QTDIR/lib/cmake/Qt6"
 
       # ------------------------------------------------------- Configure
       # Windows 用 Visual Studio generator（overlay 文档基于此验证，-A 指定架构）；

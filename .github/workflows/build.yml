@@ -130,20 +130,26 @@ jobs:
       # 【调试模式·x86_64】把 aqt 诊断提到最前（仅需 pip 装 aqt，不依赖系统依赖/
       # vcpkg），打印 x86_64 的 Qt 6.9.1 真实仓库结构后立即成功退出，跳过后续重活。
       # 拿到输出精调后再删除本步骤、恢复原 Diagnose/Install 步骤。
+      #
+      # 注意：用独立 venv 装 aqt，避免 ubuntu-22.04 系统 Python3.10 自带的
+      # packaging 21.3 与 aqt git 版的 vcs-versioning（需 packaging>=26.2）冲突
+      # （ContextualVersionConflict）。venv 内先升级 pip/setuptools/packaging。
       - name: Probe x86_64 Qt repo structure (debug)
         if: matrix.name == 'linux-x86_64'
         run: |
-          python3 -m pip install --quiet --upgrade "git+https://github.com/miurahr/aqtinstall.git"
-          aqt version
+          python3 -m venv /tmp/aqtenv
+          /tmp/aqtenv/bin/pip install --quiet --upgrade pip setuptools packaging
+          /tmp/aqtenv/bin/pip install --quiet --upgrade "git+https://github.com/miurahr/aqtinstall.git"
+          /tmp/aqtenv/bin/aqt version
           echo "===== arch list for 6.9.1 (host=linux) ====="
-          aqt list-qt linux desktop --arch 6.9.1 || true
+          /tmp/aqtenv/bin/aqt list-qt linux desktop --arch 6.9.1 || true
           echo "===== 6.9.x versions available (host=linux) ====="
-          aqt list-qt linux desktop --spec "6.9" || true
+          /tmp/aqtenv/bin/aqt list-qt linux desktop --spec "6.9" || true
           for ARCH in gcc_64 linux_gcc_64; do
             echo "===== try arch=$ARCH : --modules 6.9.1 ====="
-            aqt list-qt linux desktop --modules 6.9.1 "$ARCH" || true
+            /tmp/aqtenv/bin/aqt list-qt linux desktop --modules 6.9.1 "$ARCH" || true
             echo "===== try arch=$ARCH : --archives 6.9.1 ====="
-            aqt list-qt linux desktop --archives 6.9.1 "$ARCH" || true
+            /tmp/aqtenv/bin/aqt list-qt linux desktop --archives 6.9.1 "$ARCH" || true
           done
           echo "===== probe done (debug) ====="
           # 本步到此即可（exit 0 标绿）。后续 Configure/Build 因 Qt 未装会失败，

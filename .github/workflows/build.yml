@@ -165,7 +165,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config ccache \
+            build-essential ninja-build pkg-config ccache python3-pip \
             libgl1-mesa-dev libglu1-mesa-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
             libfontconfig1-dev libdbus-1-dev \
@@ -176,6 +176,21 @@ jobs:
             libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev \
             libxcb-util-dev libxcb-xinerama0-dev libxcb-xkb-dev \
             bison flex gperf python3
+
+      # Linux 需要新版 CMake（≥3.27）：vcpkg master 的脚本 z_vcpkg_spdx.cmake 用到
+      # string(JSON ... STRING_ENCODE)（CMake 3.27 引入）。x86_64 上 vcpkg-cmake 端口
+      # 能下载官方预编译新 cmake；但 ARM64 Linux 无官方预编译 cmake，vcpkg 回退用
+      # 系统 cmake——ubuntu-22.04 apt 自带的是 3.22，太旧会报
+      #   "string sub-command JSON got an invalid mode 'STRING_ENCODE'"
+      # 故用 pip 装新版 cmake（x86_64/aarch64 均有 wheel），置于 PATH 最前覆盖旧版。
+      - name: Install recent CMake (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install 'cmake>=3.30' ninja
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cmake --version
+          ninja --version
 
       # ------------------------------------------------------- Configure
       # Windows 用 Visual Studio generator（overlay 文档基于此验证，-A 指定架构）；
@@ -205,6 +220,11 @@ jobs:
           extra=()
           if [ "${{ matrix.platform }}" = "macos" ]; then
             extra+=( -DCMAKE_OSX_ARCHITECTURES=${{ matrix.osx_arch }} )
+          fi
+          # Linux ARM64 无官方预编译 cmake/ninja 二进制，强制 vcpkg 用系统已装的
+          # （上一步 pip 装的新版），避免它去下载 x86_64 版或回退到旧 cmake。
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            export VCPKG_FORCE_SYSTEM_BINARIES=1
           fi
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -243,15 +263,36 @@ jobs:
         run: cmake --install build --config Release --prefix dist
 
       # ------------------------------------------------- Package (macOS)
-      # macdeployqt 把 Qt 框架/插件打进 .app 并直接出 dmg。未签名/未公证（无证书），
-      # 用户首次打开需右键→打开 或 xattr -dr com.apple.quarantine。
+      # 流程：macdeployqt 部署 Qt 框架/插件 → ad-hoc 重签 → hdiutil 手动打 dmg。
+      #
+      # 为什么必须签名：macdeployqt 重写/新增了 bundle 内的框架与可执行文件，但未
+      # 签名。用户从互联网下载（带 quarantine 属性）后，Gatekeeper 校验发现无有效
+      # 签名会直接报「cube-shell.app 已损坏，无法打开」。用 ad-hoc 签名
+      # （codesign -s -，无开发者证书）重签整个 bundle 后，校验通过、可正常打开
+      # （首次打开仍需在「系统设置→隐私与安全性」点「仍要打开」或右键→打开，
+      #  但不会再误报「已损坏」）。--deep 递归签所有内嵌框架/插件，--force 覆盖
+      #  macdeployqt 可能留下的不完整签名。
+      #
+      # 注意：签名必须是最后一步。macdeployqt -dmg 会重新跑部署逻辑、可能改动
+      # bundle 而破坏签名，故改用 hdiutil 手动打 dmg（签名之后不再触碰 .app）。
       - name: Package macOS (.dmg)
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          macdeployqt dist/cube-shell.app -dmg -verbose=1
+          set -e
+          # 1) 部署 Qt 框架/插件（不在这里出 dmg）
+          macdeployqt dist/cube-shell.app -verbose=1
+
+          # 2) ad-hoc 签名整个 bundle（--deep 递归签内嵌框架/插件，--force 覆盖旧签名）
+          codesign -s - --force --deep dist/cube-shell.app
+          # 校验签名有效（ad-hoc 会显示 "Signature=adhoc"）
+          codesign --verify --deep --strict --verbose=2 dist/cube-shell.app
+
+          # 3) 签名后用 hdiutil 打 dmg（不再触碰 .app，保证签名不被破坏）
           mkdir -p out
-          mv dist/cube-shell.dmg "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.dmg"
+          DMG="out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.dmg"
+          hdiutil create -volname "CubeShell" -srcfolder dist/cube-shell.app \
+            -ov -format UDZO "$DMG"
           ls -lh out/
 
       # ------------------------------------------------- Package (Windows)

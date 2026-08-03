@@ -994,7 +994,12 @@ void TerminalDisplay::paintEvent(QPaintEvent *event)
     _highlightMap = _computeHighlightMap();
     _hasHighlightMap = !_highlightMap.isEmpty();
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
     const auto rects = regionToDraw.rects();
+#else
+    // Qt < 6.8 没有 QRegion::rects()，用迭代器区间收集。
+    const QList<QRect> rects(regionToDraw.begin(), regionToDraw.end());
+#endif
     if (rects.size() > 256) {
         const QRect rect = regionToDraw.boundingRect();
         // 直接取 color-scheme 背景色:palette 可能被全局 QSS 覆盖

@@ -129,14 +129,38 @@ static void fillExecError(LIBSSH2_SESSION *session, ExecResult &result, const QS
     result.errorMessage += QStringLiteral(" (code %1)").arg(code);
 }
 
+// Wait for the socket to become readable, but bail out early (returning false)
+// as soon as the cancel flag is raised. The wait is sliced into short ~25ms
+// polls so a stop() request is honored within tens of milliseconds instead of
+// after the full timeoutMs. This is what lets the monitor thread (whose reads
+// sit in these waits) die almost immediately on tab close, rather than after
+// up to 30s, so the UI thread is never parked waiting on it.
+static bool waitReadableCancellable(SshClient *client, int timeoutMs,
+                                    std::atomic<bool> *cancelFlag)
+{
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < timeoutMs) {
+        if (cancelFlag && cancelFlag->load())
+            return false;
+        const int slice = int(qMin<qint64>(25, timeoutMs - t.elapsed()));
+        if (client->waitReadable(slice))
+            return true;
+    }
+    return false;
+}
+
 // Write all bytes to the channel's stdin, dropping the session lock while
 // waiting on EAGAIN so the interactive shell channel is never starved.
+// Returns false on error or when the cancel flag is raised mid-write.
 static bool channelWriteAll(SshClient *client, LIBSSH2_CHANNEL *channel,
-                            const QByteArray &data)
+                            const QByteArray &data, std::atomic<bool> *cancelFlag)
 {
     QRecursiveMutex &lock = client->sessionLock();
     qsizetype written = 0;
     while (written < data.size()) {
+        if (cancelFlag && cancelFlag->load())
+            return false;
         ssize_t n;
         {
             QMutexLocker locker(&lock);
@@ -144,7 +168,9 @@ static bool channelWriteAll(SshClient *client, LIBSSH2_CHANNEL *channel,
                                       size_t(data.size() - written));
         }
         if (n == LIBSSH2_ERROR_EAGAIN) {
-            client->waitReadable(50);
+            if (!waitReadableCancellable(client, 50, cancelFlag) &&
+                cancelFlag && cancelFlag->load())
+                return false;
             continue;
         }
         if (n < 0)
@@ -214,7 +240,7 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             restoreBlocking();
             return result;
         }
-        client->waitReadable(50);
+        waitReadableCancellable(client, 50, cancelFlag);
     }
 
     auto finish = [&]() {
@@ -227,9 +253,12 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             }
             if (rc != LIBSSH2_ERROR_EAGAIN)
                 break;
+            // 取消时不再继续等服务器应答：直接 free，本地释放不依赖对端确认。
+            if (isCancelled())
+                break;
             if (clock.elapsed() >= (timeoutMs > 0 ? timeoutMs + 5000 : 5000))
                 break;
-            client->waitReadable(50);
+            waitReadableCancellable(client, 50, cancelFlag);
         }
         {
             QMutexLocker locker(&lock);
@@ -252,7 +281,7 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
                 break;
             if (timedOut() || isCancelled())
                 break;
-            client->waitReadable(50);
+            waitReadableCancellable(client, 50, cancelFlag);
         }
         if (rc != 0) {
             QMutexLocker locker(&lock);
@@ -276,7 +305,7 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
                 break;
             if (timedOut() || isCancelled())
                 break;
-            client->waitReadable(50);
+            waitReadableCancellable(client, 50, cancelFlag);
         }
         if (rc != 0) {
             QMutexLocker locker(&lock);
@@ -290,9 +319,12 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
     // --- stdin (sudo password / script upload), then EOF ---
     // 对应Python: ssh_agent.py::_execute_single 的 stdin.write(password) + flush
     if (!stdinData.isEmpty()) {
-        if (!channelWriteAll(client, channel, stdinData)) {
+        if (!channelWriteAll(client, channel, stdinData, cancelFlag)) {
             QMutexLocker locker(&lock);
-            fillExecError(session, result, QStringLiteral("stdin write failed"));
+            if (isCancelled())
+                result.cancelled = true;
+            else
+                fillExecError(session, result, QStringLiteral("stdin write failed"));
             locker.unlock();
             finish();
             return result;
@@ -305,7 +337,9 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             }
             if (rc != LIBSSH2_ERROR_EAGAIN)
                 break;
-            client->waitReadable(50);
+            if (isCancelled())
+                break;
+            waitReadableCancellable(client, 50, cancelFlag);
         }
     }
 
@@ -356,13 +390,16 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
                 pendingStdin += onChunk(errChunk, true);
         }
         if (!pendingStdin.isEmpty()) {
-            channelWriteAll(client, channel, pendingStdin);
+            channelWriteAll(client, channel, pendingStdin, cancelFlag);
             pendingStdin.clear();
         }
         if (eof)
             break;
-        if (!got)
-            client->waitReadable(100); // 对应Python: time.sleep(0.1)
+        if (!got) {
+            // 切片等待 + 取消检查：stop() 置 cancelFlag 后下一轮（≤25ms）即返回，
+            // 不会把监控线程钉满整个 30s 超时。
+            waitReadableCancellable(client, 100, cancelFlag);
+        }
     }
 
     result.stdoutText = QString::fromUtf8(outBuf);

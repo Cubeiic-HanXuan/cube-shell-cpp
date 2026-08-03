@@ -90,6 +90,14 @@ public:
     void closeChannel();
     void disconnectFromHost();
 
+    // Forcibly shutdown() the underlying socket so any thread blocked in a
+    // select()/read() on it wakes up immediately and returns an error. Used on
+    // the tab-close path to unblock the monitor/reader threads BEFORE joining
+    // them, so the UI thread never waits out a long network timeout. Does not
+    // free the fd (that happens in disconnectFromHost); safe to call when the
+    // socket is already closed.
+    void shutdownSocket();
+
     // Access the raw socket fd (for poll/select in the read loop).
     qintptr socketFd() const { return m_sock; }
 

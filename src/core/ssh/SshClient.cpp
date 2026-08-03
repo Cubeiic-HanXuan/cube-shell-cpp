@@ -451,6 +451,21 @@ void SshClient::closeChannel()
     closeChannelLocked();
 }
 
+void SshClient::shutdownSocket()
+{
+    // 只 shutdown，不 close：fd 的回收仍归 disconnectFromHost。shutdown(SHUT_RDWR)
+    // 让阻塞在 select()/recv() 上的读循环/监控线程立刻拿到 EOF/错误返回，从而
+    // 能快速重查各自的取消/运行标志退出——这是关闭标签页时避免 UI 线程死等
+    // 网络超时的关键一步。线程安全（shutdown 可在任意线程调用，无需持锁）。
+    if (m_sock < 0)
+        return;
+#ifdef Q_OS_WIN
+    ::shutdown(reinterpret_cast<SOCKET>(m_sock), SD_BOTH);
+#else
+    ::shutdown(static_cast<int>(m_sock), SHUT_RDWR);
+#endif
+}
+
 void SshClient::disconnectFromHost()
 {
     // 同 closeChannel：主线程关闭路径不能无限等 m_sessionMutex（见上注释）。

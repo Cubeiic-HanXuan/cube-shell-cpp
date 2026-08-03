@@ -283,7 +283,10 @@ static void testExecStreamAgainstServer(SshClient &client)
 
 static void testRemoteMonitorAgainstServer(SshClient &client)
 {
-    RemoteMonitor monitor(&client);
+    // client 是调用方栈上对象、本函数返回后仍存活，且 monitor 局部先析构——
+    // 用空 deleter 的 shared_ptr 包装（非 owning），仅满足 RemoteMonitor 的
+    // shared_ptr 形参，不发生所有权转移。
+    RemoteMonitor monitor(std::shared_ptr<SshClient>(&client, [](SshClient *) {}));
     monitor.setIntervalMs(1000);
 
     int statsCount = 0;

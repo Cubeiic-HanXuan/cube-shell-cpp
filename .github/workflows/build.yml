@@ -57,44 +57,44 @@ jobs:
           # ==================================================================
 
           # ------------------------------- macOS -------------------------------
-          # - name: macos-x86_64
-          #   os: macos-15-intel          # Intel runner
-          #   platform: macos
-          #   qt_arch: clang_64
-          #   vcpkg_triplet: x64-osx
-          #   osx_arch: x86_64
-          #
-          # - name: macos-arm64
-          #   os: macos-14                # Apple Silicon runner
-          #   platform: macos
-          #   qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
-          #   vcpkg_triplet: arm64-osx
-          #   osx_arch: arm64
+          - name: macos-x86_64
+            os: macos-15-intel          # Intel runner
+            platform: macos
+            qt_arch: clang_64
+            vcpkg_triplet: x64-osx
+            osx_arch: x86_64
+
+          - name: macos-arm64
+            os: macos-14                # Apple Silicon runner
+            platform: macos
+            qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
+            vcpkg_triplet: arm64-osx
+            osx_arch: arm64
 
           # ------------------------------ Windows ------------------------------
           # x64 固定跑 windows-2022（VS 2022 仍在，generator「Visual Studio 17 2022」）。
           # 不追 windows-latest：它正灰度迁到 VS 2026，VS17 generator 会找不到实例。
           # 用 VS2022 也与 BUILD-Windows-ARM64.md 里 overlay 验证的 MSVC 版本一致。
-          # - name: windows-x86_64
-          #   os: windows-2022
-          #   platform: windows
-          #   qt_arch: win64_msvc2022_64
-          #   vcpkg_triplet: x64-windows-static-md
-          #   vs_generator: Visual Studio 17 2022
-          #   vs_arch: x64
-          #   overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
-          #
-          # # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
-          # # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
-          # # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
-          # - name: windows-arm64
-          #   os: windows-11-vs2026-arm
-          #   platform: windows
-          #   qt_arch: win64_msvc2022_arm64
-          #   vcpkg_triplet: arm64-windows-static-md
-          #   vs_generator: Visual Studio 18 2026
-          #   vs_arch: ARM64
-          #   overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
+          - name: windows-x86_64
+            os: windows-2022
+            platform: windows
+            qt_arch: win64_msvc2022_64
+            vcpkg_triplet: x64-windows-static-md
+            vs_generator: Visual Studio 17 2022
+            vs_arch: x64
+            overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
+
+           # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
+           # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
+           # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
+          - name: windows-arm64
+            os: windows-11-vs2026-arm
+            platform: windows
+            qt_arch: win64_msvc2022_arm64
+            vcpkg_triplet: arm64-windows-static-md
+            vs_generator: Visual Studio 18 2026
+            vs_arch: ARM64
+            overlay: 'true'             # 必须：修 OpenSSL ARM64 RDP 崩溃
 
           # ------------------------------- Linux -------------------------------
           # Qt 用 aqt 装 6.9（与 macOS/Windows 对齐），install-qt-action 官方不支持

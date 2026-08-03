@@ -33,7 +33,9 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
         // 连接成功后启动监控采集线程。
         // 对应Python: ssh_func.py::get_datas 的后台线程启动
         if (!m_monitor && m_term->sshClient()) {
-            m_monitor = new RemoteMonitor(m_term->sshClient().get(), this);
+            // 直接传 shared_ptr：监控对象共享 SshClient 所有权，其线程运行期间
+            // client 必然存活，杜绝极端路径下的 use-after-free。
+            m_monitor = new RemoteMonitor(m_term->sshClient(), this);
             m_monitor->start();
             emit monitorReady();
         }
@@ -51,7 +53,15 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
 
 SshSessionTab::~SshSessionTab()
 {
-    // 先停监控线程（join），再让 QObject 析构子控件，避免监控线程访问已释放的 SshClient。
+    // 关闭标签页时 UI 线程绝不能死等工作线程退出（否则 GNOME 弹 "not responding"）。
+    // 顺序：
+    //  1. 先 shutdown 底层 socket —— 强制唤醒阻塞在 select/read 上的监控线程、
+    //     bridge 读线程，让它们立刻拿到 EOF/错误返回并重查取消标志退出。
+    //  2. 再停监控线程（stop 已是有界等待 + 后台自删，不会卡住）。
+    //  3. bridge/terminal 由 QObject 子对象析构链处理（~SshTerminalWidget →
+    //     SshBridge::stop，其内部同样因 socket 已断而快速退出）。
+    if (m_term && m_term->sshClient())
+        m_term->sshClient()->shutdownSocket();
     if (m_monitor)
         m_monitor->stop();
 }

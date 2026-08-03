@@ -26,9 +26,9 @@ static const QString &monitorSep()
 // 对应Python: get_datas 里的失败重试间隔 time.sleep(5)
 static constexpr int kErrorRetryMs = 5000;
 
-RemoteMonitor::RemoteMonitor(SshClient *client, QObject *parent)
+RemoteMonitor::RemoteMonitor(std::shared_ptr<SshClient> client, QObject *parent)
     : QObject(parent)
-    , m_client(client)
+    , m_client(std::move(client))
 {
     // Queued cross-thread delivery of the custom payload types. Register the
     // bare name too — moc records the parameter type as written in-namespace.
@@ -39,8 +39,8 @@ RemoteMonitor::RemoteMonitor(SshClient *client, QObject *parent)
 
 RemoteMonitor::~RemoteMonitor()
 {
-    // Join before destruction — the loop only emits while the thread lives,
-    // so no signal can fire on a dead object (PySide6 线程安全经验的 C++ 等价).
+    // stop() 在 socket 已 shutdown 的前提下快速 join 线程，保证线程不会在本对象
+    // 析构后仍访问 this（线程体按值捕获 this 指针）。
     stop();
 }
 
@@ -58,11 +58,7 @@ void RemoteMonitor::start()
 {
     if (m_running.load())
         return;
-    if (m_thread) { // reap a previous, already-stopped thread
-        m_thread->wait();
-        delete m_thread;
-        m_thread = nullptr;
-    }
+    stop(); // 清理上一次可能仍挂在后台的线程（stop 自身是有界/非阻塞的）
     m_running.store(true);
     m_cancelFlag.store(false);
     m_thread = QThread::create([this]() { monitorLoop(); });
@@ -75,10 +71,26 @@ void RemoteMonitor::stop()
     m_running.store(false);
     m_cancelFlag.store(true); // abort an in-flight runCommand promptly
     m_sleepCond.wakeAll();
-    if (m_thread) {
-        m_thread->wait();
-        delete m_thread;
-        m_thread = nullptr;
+    QThread *t = m_thread;
+    m_thread = nullptr;
+    if (!t)
+        return;
+
+    // 必须在回收线程对象前确认线程已退出：线程体按值捕获了 this（monitorLoop
+    // 读 m_running/m_cancelFlag/m_client/m_sleepCond），若放任线程后台跑而本对象
+    // 先析构，就是 use-after-free → 整个进程段错误。这里能安全 join 而不卡 UI，
+    // 是因为调用方（~SshSessionTab）已先 shutdownSocket()，把所有阻塞在
+    // select/read 的等待强制唤醒；叠加 cancelFlag + 读循环里 ≤25ms 的取消切片，
+    // 线程几乎立即退出。给一个有界超时兜底：正常路径远快于此，超时只在极端
+    // （线程卡死在内核）才会触发，此时仍优先保证不崩——但实践中不会到达。
+    // 之所以不用"超时后 deleteLater 后台自删"，正是上面那条 UAF：对象可能先死。
+    if (t->wait(3000)) {
+        delete t;
+    } else {
+        // 兜底：线程 3s 还没退（理论上 socket 断后不该发生）。用 finished 信号
+        // deleteLater 自删，避免泄漏；此时不 delete 是因为线程可能仍持有栈上引用。
+        connect(t, &QThread::finished, t, &QObject::deleteLater);
+        qWarning() << "RemoteMonitor::stop: monitor thread did not exit within 3s";
     }
 }
 
@@ -109,10 +121,18 @@ static QString formatUptime(double secs)
 // 对应Python: ssh_func.py::get_datas（监控主循环）
 void RemoteMonitor::monitorLoop()
 {
+    // m_client 是 shared_ptr：本线程运行期间 SshClient 必然存活，即便走到了
+    // stop() 的兜底路径、RemoteMonitor/SshTerminalWidget 已开始析构。
+    SshClient *client = m_client.get();
+    if (!client) {
+        qCWarning(monitorLog) << "monitor started without a valid client";
+        return;
+    }
+
     // --- one-shot host info (对应Python: conn.exec('hostnamectl')) ---
     {
         const ExecResult host = CommandExecutor::runCommand(
-            m_client, QStringLiteral("hostnamectl"), false,
+            client, QStringLiteral("hostnamectl"), false,
             CommandExecutor::kDefaultTimeoutMs, QByteArray(), &m_cancelFlag);
         if (m_running.load())
             emit systemInfoReady(DataParser::parseHostnamectlOutput(host.stdoutText));
@@ -144,7 +164,7 @@ void RemoteMonitor::monitorLoop()
 
     while (m_running.load()) {
         const ExecResult res = CommandExecutor::runCommand(
-            m_client, batchCmd, false, CommandExecutor::kDefaultTimeoutMs,
+            client, batchCmd, false, CommandExecutor::kDefaultTimeoutMs,
             QByteArray(), &m_cancelFlag);
 
         if (!m_running.load())

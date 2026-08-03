@@ -18,8 +18,10 @@
 //
 // Threading: start() spawns a dedicated QThread; statsUpdated() /
 // systemInfoReady() are emitted from that thread — consumers MUST connect
-// with Qt::QueuedConnection. stop() (and the destructor) joins the thread
-// before returning, so no signal is ever emitted after destruction.
+// with Qt::QueuedConnection. stop() REQUESTS the loop to stop and waits only
+// briefly (bounded) for it to finish; if the thread is stuck in a blocking
+// SSH call it is left to finish in the background and self-deletes via
+// deleteLater, so the UI thread is never parked waiting on network I/O.
 
 #include <QHash>
 #include <QList>
@@ -29,6 +31,7 @@
 #include <QWaitCondition>
 
 #include <atomic>
+#include <memory>
 
 #include "util/DataParser.h"
 
@@ -62,8 +65,9 @@ public:
     // 对应Python: ssh_func.py::SshClient.monitor_interval = 2.0
     static constexpr int kDefaultIntervalMs = 2000;
 
-    // client must outlive the monitor (stop() is called from the destructor).
-    explicit RemoteMonitor(SshClient *client, QObject *parent = nullptr);
+    // client 以 shared_ptr 持有：监控线程运行期间 SshClient 必然存活，即便
+    // 本对象/SshTerminalWidget 已先开始析构（极端兜底路径），也不会 UAF。
+    explicit RemoteMonitor(std::shared_ptr<SshClient> client, QObject *parent = nullptr);
     ~RemoteMonitor() override;
 
     // Collection period; takes effect from the next cycle.
@@ -76,7 +80,9 @@ public:
     // 对应Python: get_datas 的启动（后台线程）
     void start();
 
-    // Request the loop to stop and JOIN the thread before returning.
+    // Request the loop to stop. Waits only a bounded time for the thread to
+    // finish; if it is still blocked in an SSH call it is left running to
+    // self-delete, so this never parks the UI thread on network I/O.
     // Safe to call multiple times / when not running.
     // 对应Python: conn.active = False + close_sig
     void stop();
@@ -98,7 +104,8 @@ private:
     // Interruptible sleep; returns false when stop() was requested meanwhile.
     bool sleepInterruptible(int ms);
 
-    SshClient *m_client;
+    // 监控线程访问的 SshClient；以 shared_ptr 持有，保证线程存活期间对象有效。
+    std::shared_ptr<SshClient> m_client;
     QThread *m_thread = nullptr;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_cancelFlag{false}; // aborts an in-flight SSH call on stop()

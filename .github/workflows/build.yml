@@ -473,6 +473,20 @@ jobs:
           # 4) 提供一个 qt.conf，让 Qt 从可执行文件旁的 plugins/ 加载插件
           printf '[Paths]\nPlugins = plugins\n' > dist/bin/qt.conf
 
+          # 4d) 诊断：把 dist/lib 的实际内容与插件 RPATH 打出来，便于定位"缺库"根因。
+          echo "=== DIAG: QT_ROOT=$QT_ROOT  QT_LIB=$QT_LIB ==="
+          echo "=== DIAG: Qt 安装目录 libQt6Core/Gui 是否存在 ==="
+          ls -la "$QT_LIB"/libQt6Core.so.6 "$QT_LIB"/libQt6Gui.so.6 2>&1 | head
+          echo "=== DIAG: dist/lib 里的 libQt6*.so.6 数量与清单 ==="
+          ls dist/lib/libQt6*.so.6 2>/dev/null | wc -l
+          ls dist/lib/ | grep -i 'libQt6' | head -40
+          echo "=== DIAG: dist/lib 全部文件数 ==="
+          ls dist/lib/ | wc -l
+          echo "=== DIAG: libqxcb 的 RPATH/RUNPATH ==="
+          readelf -d dist/bin/plugins/platforms/libqxcb.so 2>/dev/null | grep -iE 'rpath|runpath'
+          echo "=== DIAG: 主程序 RPATH/RUNPATH ==="
+          readelf -d dist/bin/cube-shell 2>/dev/null | grep -iE 'rpath|runpath'
+
           # 5) 自检：模拟目标机环境（清空 LD_LIBRARY_PATH，纯靠二进制内的 DT_RPATH
           # 解析依赖），确认主程序与平台插件都不再有 not found。
           # 关键：不能再用 LD_LIBRARY_PATH=dist/lib 来测——LD_LIBRARY_PATH 对 dlopen

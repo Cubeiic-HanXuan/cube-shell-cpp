@@ -210,17 +210,17 @@ jobs:
       #      issue #1007），且要用独立 venv 装——ubuntu-22.04 系统 Python3.10 自带的
       #      packaging 21.3 与 aqt git 版的依赖（需 packaging>=26.2）冲突。
       #
-      # 本步建 venv 装 aqt 并把 aqt 加入 PATH，供下一步 install 使用。
+      # 本步建 venv 装 aqt。后续步骤用绝对路径 $HOME/aqtenv/bin/aqt 调用
+      # （不靠 PATH：$GITHUB_PATH 只对后续步骤生效，步骤内调 aqt 需绝对路径）。
       - name: Setup aqt (Linux)
         if: matrix.platform == 'linux'
         run: |
           python3 -m venv "$HOME/aqtenv"
           "$HOME/aqtenv/bin/pip" install --quiet --upgrade pip setuptools packaging
           "$HOME/aqtenv/bin/pip" install --quiet --upgrade "git+https://github.com/miurahr/aqtinstall.git"
-          echo "$HOME/aqtenv/bin" >> "$GITHUB_PATH"
-          aqt version
+          "$HOME/aqtenv/bin/aqt" version
           echo "=== available arch for ${{ env.QT_VERSION }} (host=${{ matrix.aqt_host }}) ==="
-          aqt list-qt ${{ matrix.aqt_host }} desktop --arch ${{ env.QT_VERSION }} || true
+          "$HOME/aqtenv/bin/aqt" list-qt ${{ matrix.aqt_host }} desktop --arch ${{ env.QT_VERSION }} || true
 
       - name: Install Qt ${{ env.QT_VERSION }} via aqt (Linux)
         if: matrix.platform == 'linux'
@@ -228,7 +228,8 @@ jobs:
           set -e
           # qtmultimedia 是扩展模块（在 --modules 里，见 probe 输出），用 --modules
           # 安装可自动拉齐其依赖归档。arch 名已修正为 linux_gcc_64 / linux_gcc_arm64。
-          aqt install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} \
+          # 用绝对路径调 aqt（PATH 不一定含 venv/bin）。
+          "$HOME/aqtenv/bin/aqt" install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} \
             ${{ matrix.aqt_arch }} \
             --outputdir "$HOME/Qt" \
             --modules qtmultimedia

@@ -386,10 +386,52 @@ jobs:
       # --------------------------------------------------- Package (Linux)
       # 简化为 tar.gz（AppImage 对 Qt6.9+Multimedia 较脆，后续可加）。目标机需自备
       # Qt6 运行库；resources/conf 已随 install 布好。
+      # --------------------------------------------------- Package (Linux)
+      # 做成自包含目录：把 aqt Qt 的运行库与必要插件拷进包内 dist/lib 与
+      # dist/bin（插件），并用 patchelf 把 cube-shell 的 rpath 设为 $ORIGIN 相对
+      # 路径——否则目标机没装 Qt 6.9 会报
+      #   "error while loading shared libraries: libQt6Multimedia.so.6: cannot open..."
+      # $ORIGIN 让程序从「可执行文件旁的相对目录」加载 .so，包可任意解压位置运行。
       - name: Package Linux (.tar.gz)
         if: matrix.platform == 'linux'
         shell: bash
         run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends patchelf
+          QT_LIB="$QT_ROOT/lib"
+          QT_PLUGINS="$QT_ROOT/plugins"
+
+          # 1) 收集 cube-shell 实际链接的 Qt6 共享库到 dist/lib（含间接依赖）
+          mkdir -p dist/lib
+          # 先拷主程序直接/间接依赖的所有 Qt6*.so.6（用 ldd 解析）
+          ldd dist/bin/cube-shell | awk '/libQt6/ {print $3}' | while read -r so; do
+            [ -f "$so" ] && cp -L "$so" dist/lib/
+          done
+          # 再补拷 libQt6 全部运行库（ldd 可能漏掉 dlopen 加载的，如 Multimedia 后端）
+          cp -L "$QT_LIB"/libQt6*.so.6 dist/lib/ 2>/dev/null || true
+          # Qt 运行还依赖 icu（aqt 装在 QT_LIB 下，libicui18n/libicuuc/libicudata）
+          cp -L "$QT_LIB"/libicu*.so.* dist/lib/ 2>/dev/null || true
+
+          # 2) 拷 Qt 插件（platforms 必需，否则 GUI 起不来；多媒体/图像格式按需）
+          mkdir -p dist/bin/plugins
+          for p in platforms platformthemes imageformats multimedia tls xcbglintegrations; do
+            [ -d "$QT_PLUGINS/$p" ] && cp -r "$QT_PLUGINS/$p" dist/bin/plugins/
+          done
+
+          # 3) 设 rpath：cube-shell 从 $ORIGIN/../lib 找 Qt 库，从 $ORIGIN/plugins 找插件
+          patchelf --set-rpath '$ORIGIN/../lib' dist/bin/cube-shell
+          # 插件里的 .so 也需能找到 Qt 库（它们的 rpath 指向上级 lib）
+          find dist/bin/plugins -name '*.so' -exec patchelf --set-rpath '$ORIGIN/../../lib' {} \; 2>/dev/null || true
+
+          # 4) 提供一个 qt.conf，让 Qt 从可执行文件旁的 plugins/ 加载插件
+          printf '[Paths]\nPlugins = plugins\n' > dist/bin/qt.conf
+
+          # 5) 自检：用打好的包内库解析依赖，确认不再有 not found
+          echo "=== ldd self-check (with bundled libs) ==="
+          LD_LIBRARY_PATH="$PWD/dist/lib" ldd dist/bin/cube-shell | grep -i "not found" && {
+            echo "ERROR: 仍有未解析的依赖" >&2; exit 1; } || echo "所有依赖已自包含 ✓"
+
+          # 6) 打包
           mkdir -p out
           tar -czf "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.tar.gz" -C dist .
           ls -lh out/

@@ -9,8 +9,9 @@ cmake-build-*/
 /lib/
 /install/
 _deps/
-/vcpkg-ports
-/vcpkg-triplets
+# 注意：vcpkg-ports/ 与 vcpkg-triplets/ 是仓库自带的 overlay（修 OpenSSL ARM64
+# Release 误编译，见 BUILD-Windows-ARM64.md），CI 构建 Windows ARM64 依赖它们，
+# 必须纳入版本管理，不要在这里忽略。
 
 # ---------------------------------------------------------------------------
 # CMake generated files

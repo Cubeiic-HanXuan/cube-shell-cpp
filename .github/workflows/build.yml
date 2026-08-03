@@ -467,8 +467,13 @@ jobs:
           #   dlopen libxcb-cursor 会因搜不到包内 lib/ 而失败，Qt 报
           #   "xcb-cursor0 or libxcb-cursor0 is needed"，xcb 插件加载失败。
           patchelf --force-rpath --set-rpath '$ORIGIN/../lib' dist/bin/cube-shell
-          # 插件里的 .so 也需能找到 Qt 库与 XCB 库（它们的 rpath 指向上级 lib）
-          find dist/bin/plugins -name '*.so' -exec patchelf --force-rpath --set-rpath '$ORIGIN/../../lib' {} \; 2>/dev/null || true
+          # 插件里的 .so 也需能找到 Qt 库与 XCB 库。注意上溯级数：
+          #   插件在 dist/bin/plugins/<组>/xxx.so（三层深），其 $ORIGIN 是
+          #   dist/bin/plugins/<组>，要回到 dist/lib 需上溯【三级】——$ORIGIN/../../../lib。
+          #   之前误写为 ../../（两级）= dist/bin/lib，与库实际所在的 dist/lib 差一级，
+          #   导致所有插件报 libQt6Core.so.6 not found（主程序 $ORIGIN/../lib 恰好对，
+          #   所以主程序自检能过、插件全挂）。
+          find dist/bin/plugins -name '*.so' -exec patchelf --force-rpath --set-rpath '$ORIGIN/../../../lib' {} \; 2>/dev/null || true
 
           # 4) 提供一个 qt.conf，让 Qt 从可执行文件旁的 plugins/ 加载插件
           printf '[Paths]\nPlugins = plugins\n' > dist/bin/qt.conf

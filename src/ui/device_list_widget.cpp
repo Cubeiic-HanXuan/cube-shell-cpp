@@ -82,7 +82,7 @@ DeviceListWidget::DeviceListWidget(QWidget *parent)
     m_followFolder->setToolTip(tr("文件浏览器跟随 Shell 当前工作目录"));
     m_remoteMonitoring = new QCheckBox(tr("远程监控"), this);
     m_remoteMonitoring->setToolTip(tr("采集远程主机的 CPU / 内存 / 网络指标"));
-    m_remoteMonitoring->setChecked(true);
+    m_remoteMonitoring->setChecked(false);
 
     // 复选框水平排列，间距 15px。对应Python: checkbox_row_layout
     auto *checkboxRow = new QHBoxLayout;

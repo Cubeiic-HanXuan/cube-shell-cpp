@@ -60,13 +60,27 @@ static QHash<QString, QString> makeExtIconMap()
     };
 }
 
-QIcon iconForFile(const QString &name, bool isDir)
+QIcon iconForFile(const QString &name, bool isDir, bool isSymlink, quint32 mode)
 {
     // 目录：系统默认文件夹图标（带缓存）。
     // 对应Python: util.get_default_folder_icon（QFileIconProvider.Folder）
     if (isDir) {
         static const QIcon folderIcon = QFileIconProvider().icon(QFileIconProvider::IconType::Folder);
         return folderIcon;
+    }
+
+    // 符号链接优先于可执行位与扩展名（链接目标类型未知）。
+    // 对应Python: n[0] 以 'l' 开头 → QIcon(':icons8-kj-48.png')
+    if (isSymlink) {
+        static const QIcon symlinkIcon(QStringLiteral(":/icons8-kj-48.png"));
+        return symlinkIcon;
+    }
+
+    // 任一执行位（u/g/o）置位即视为可执行文件。
+    // 对应Python: n[0] 形如 "-rwxr-xr-x" → QIcon(':icons8-exec-48.png')
+    if ((mode & 0111) != 0) {
+        static const QIcon execIcon(QStringLiteral(":/icons8-exec-48.png"));
+        return execIcon;
     }
 
     static const QHash<QString, QString> extMap = makeExtIconMap();

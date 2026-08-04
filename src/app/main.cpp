@@ -113,9 +113,11 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("cube-shell"));
     QApplication::setOrganizationName(QStringLiteral("CubeShell"));
-    // 窗口图标：resources/icons/icons.qrc 编译进二进制的 logo.png
-    //（macOS Dock 图标另由 bundle 的 logo.icns / Info.plist 接管）。
+#ifndef Q_OS_MACOS
+    // Linux/Windows: 从编译资源设置窗口/任务栏图标。
+    // macOS: 由 bundle 的 Info.plist → logo.icns 处理 Dock 图标，不可在此覆盖。
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/logo.png")));
+#endif
 
     // 1. 配置加载（theme.json → GlobalState 单例）。
     // 对应Python: util.THEME 的初始化

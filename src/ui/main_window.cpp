@@ -1421,10 +1421,10 @@ void MainWindow::updateSecondPaneVisibility()
 void MainWindow::updateTerminalInfo()
 {
     QWidget *w = activeTabWidget()->currentWidget();
-    // 首页下隐藏设备列表底部的两个会话开关。
+    // 仅远程 SSH 会话标签页显示设备列表底部的两个会话开关。
     // 对应Python: 未连接时 follow_folder / remote_monitoring 不可见
     if (m_deviceList)
-        m_deviceList->setSessionActive(w && w != m_homePage);
+        m_deviceList->setSessionActive(qobject_cast<SshSessionTab *>(w) != nullptr);
     QTermWidget *term = qobject_cast<QTermWidget *>(w);
     if (!term && w)
         term = w->findChild<QTermWidget *>();

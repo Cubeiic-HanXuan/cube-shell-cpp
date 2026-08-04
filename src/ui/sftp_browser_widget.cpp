@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -43,6 +44,7 @@ static constexpr int kPathRole = Qt::UserRole;       // full remote path
 static constexpr int kIsDirRole = Qt::UserRole + 1;  // bool
 static constexpr int kModeRole = Qt::UserRole + 2;   // permission bits (quint32)
 static constexpr int kIsUpRole = Qt::UserRole + 3;   // ".." 返回上级条目
+static constexpr int kSymlinkTargetRole = Qt::UserRole + 4; // 符号链接目标（QString）
 
 // 文件大小人类可读格式。对应Python: function/util.py::format_file_size
 static QString formatFileSize(qint64 bytes)
@@ -71,14 +73,14 @@ static QString permissionText(const SftpFileInfo &e)
     return s;
 }
 
-// 所有者/组列：longname 第 3/4 列为用户名/组名，取不到时退回 uid/gid 数字。
-// 对应Python: handle_file_tree_updated 里 "所有者/组" 列
+// 所有者/组列：longname 第 3 列为属主名，取不到时退回 uid 数字。
+// 对应Python: handle_file_tree_updated 里 item.setText(4, n[3])（仅属主，不含组）
 static QString ownerText(const SftpFileInfo &e)
 {
     const QStringList parts = e.longname.simplified().split(QLatin1Char(' '));
-    if (parts.size() >= 4)
-        return parts.at(2) + QLatin1Char('/') + parts.at(3);
-    return QString::number(e.uid) + QLatin1Char('/') + QString::number(e.gid);
+    if (parts.size() >= 3)
+        return parts.at(2);
+    return QString::number(e.uid);
 }
 
 SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
@@ -119,6 +121,7 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(2, 2, 2, 2);
+    layout->setSpacing(0);
     layout->addWidget(m_pathEdit);
     layout->addWidget(m_tree, 1);
     layout->addWidget(m_progress);
@@ -337,9 +340,11 @@ void SftpBrowserWidget::populate(const QString &path, const SftpFileInfoList &en
         item->setData(0, kPathRole, fullPath);
         item->setData(0, kIsDirRole, e.isDirectory());
         item->setData(0, kModeRole, e.permissions());
-        // 按扩展名映射类型图标（与本地浏览器共用 iconForFile）。
-        // 对应Python: handle_file_tree_updated 里 util.get_default_file_icon(n[8])
-        item->setIcon(0, iconForFile(e.filename, e.isDirectory()));
+        item->setData(0, kSymlinkTargetRole, e.symlinkTarget);
+        // 按扩展名映射类型图标（与本地浏览器共用 iconForFile）；
+        // 符号链接与可执行文件优先使用专用图标。
+        // 对应Python: handle_file_tree_updated 里根据 n[0] 权限位选图标
+        item->setIcon(0, iconForFile(e.filename, e.isDirectory(), e.isSymlink(), e.mode));
     }
 
     m_tree->setUpdatesEnabled(true);

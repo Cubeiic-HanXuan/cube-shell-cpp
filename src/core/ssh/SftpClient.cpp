@@ -177,6 +177,52 @@ static void fillInfo(const QString &name, const QString &longname,
         info.uid = a.uid;
         info.gid = a.gid;
     }
+
+    // 回退检测：部分 SFTP 服务器 readdir 返回的 attrs.permissions 不含 symlink
+    // 类型位（返回了 stat() 跟随后的目标 mode 而非 lstat() 的 link mode）。
+    // 此时从 longname 首字符 'l'（ls -l 格式的文件类型标识）来判断。
+    // 对应Python: n[0][0] == 'l' 判断 symlink。
+    //
+    // longname 权限串 = 前 8 列的第 1 列（与 Python del_more_space 的 parts[0]
+    // 对齐：re.split(r'\s+') 后前 8 列固定）。先按列切分，列数 <9 说明服务端
+    // 返回了非标准/空 longname（部分服务端不生成 longname），不能用；列数 ≥9
+    // 才可信。不能按"首个空格位置"猜——文件名字段不定长、且各列间可能有多空格，
+    // 那样既会误认（含空格的名字把起点推偏）也会漏认（列间多空格把首个空格挤后）。
+    QString permToken;
+    if (!longname.isEmpty()) {
+        const QStringList cols = longname.simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (cols.size() >= 9)
+            permToken = cols.first();
+    }
+    if (!info.isSymlink() && permToken.size() >= 10 &&
+        permToken.at(0) == QLatin1Char('l')) {
+        // longname 表明是 symlink，手动修正 mode 的类型位
+        info.mode = (info.mode & ~quint32(LIBSSH2_SFTP_S_IFMT))
+                  | quint32(LIBSSH2_SFTP_S_IFLNK);
+    }
+
+    // OpenSSH sftp-server appends " -> <target>" in longname for symlinks.
+    // longname 形如：lrwxrwxrwx 1 root root 4 Jan 1 00:00 name -> target
+    // 解析必须照搬 Python 版 del_more_space 的思路（function/ssh_func.py:479）：
+    //   前 8 列固定（权限/链接数/属主/组/大小/月/日/时间），第 9 列(索引8)起
+    //   的【整段】就是 "name -> target"。这样无论名字/目标含空格、含 "->"、
+    //   或与前面某列同字，都不会被截断或定位错。
+    // 旧实现用 longname.lastIndexOf(name) 猜名字位置——一旦目标路径里出现与
+    // 文件名相同的子串、或名字被转义，起点就偏，导致 symlinkTarget 解析为空，
+    // UI 只显示前半段名字、丢 "-> target"。
+    if (info.isSymlink() && !longname.isEmpty()) {
+        const QString simplified = longname.simplified();          // 连续空白→单空格
+        const QStringList parts = simplified.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (parts.size() >= 9) {
+            // 第 9 列起整段 = "name -> target"（保留内部所有空格与箭头）
+            const QString nameAndTarget = parts.mid(8).join(QLatin1Char(' '));
+            const int arrow = nameAndTarget.indexOf(QStringLiteral(" -> "));
+            if (arrow >= 0)
+                info.symlinkTarget = nameAndTarget.mid(arrow + 4).trimmed();
+            // 若没有箭头（极少数服务端不附 target），symlinkTarget 留空，
+            // UI 回退只显示 name——与 Python n[8] 行为一致。
+        }
+    }
 }
 
 QStringList SftpClient::listdir(const QString &path, SshError &error)
@@ -209,7 +255,7 @@ SftpFileInfoList SftpClient::listdirAttr(const QString &path, SshError &error)
 
     for (;;) {
         char nameBuf[512];
-        char longBuf[512];
+        char longBuf[4096];
         LIBSSH2_SFTP_ATTRIBUTES attrs;
         int n = sftpRetryInt(m_client, [&] {
             return libssh2_sftp_readdir_ex(dir, nameBuf, sizeof(nameBuf),

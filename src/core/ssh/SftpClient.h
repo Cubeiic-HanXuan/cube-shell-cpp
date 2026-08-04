@@ -54,6 +54,7 @@ struct SshError;
 struct SftpFileInfo {
     QString filename;      // entry name (no path)
     QString longname;      // "ls -l" style long entry (from readdir_ex)
+    QString symlinkTarget; // symlink target parsed from longname (empty otherwise)
     qint64  size = 0;      // st_size
     quint32 mode = 0;      // st_mode (permissions + type bits)
     qint64  mtime = 0;     // st_mtime (seconds since epoch)

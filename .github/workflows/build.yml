@@ -42,6 +42,9 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # 仅 linux-x86_64 在 matrix 里定义了 container: rockylinux:8，其余平台该键为空 →
+    # 此处置空即不在容器内跑。必须放在 job 顶层（matrix 里的 container 键不会自动生效）。
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false          # 一个平台失败不取消其余平台
       matrix:
@@ -97,15 +100,18 @@ jobs:
           #   x86_64 → host=linux        arch=linux_gcc_64（不是 gcc_64！）
           #   ARM64  → host=linux_arm64  arch=linux_gcc_arm64（Qt≥6.7 才有 ARM64 桌面包）
           #
-          # 两个架构的 runner 版本不同（glibc 兼容性权衡）：
-          #   x86_64 用 ubuntu-22.04（glibc 2.35）：aqt 的 x86_64 Qt 6.9 能在 22.04 跑，
-          #     链接更低版本 glibc → 二进制可跑在更多旧发行版（glibc 向后兼容）。
+          # 两个架构的构建底座不同（glibc 兼容性权衡）：
+          #   x86_64 用【Rocky Linux 8 容器】（glibc 2.28）：Qt 6.9 官方 x86_64 二进制
+          #     的 glibc 底线即 2.28（RHEL8 参考平台），在这里构建出的包可跑在
+          #     CentOS/RHEL/Rocky/Alma 8+、Ubuntu 20.04+、Debian 11+、Fedora 34+ 等
+          #     一切 glibc ≥ 2.28 的发行版（glibc 向下兼容）。容器里 dnf 装依赖。
+          #     （要再往下兼容 CentOS 7/glibc 2.17 得从源码重编 Qt，成本极高，不走。）
           #   ARM64 用 ubuntu-24.04（glibc 2.39）：Qt 官方 ARM64 Linux 二进制【只】在
-          #     Ubuntu 24.04 上编译（Qt 官方文档明确：ARM64 参考平台即 24.04/glibc2.39，
-          #     glibc 更旧需从源码重编 Qt）。22.04 上其 moc 报 GLIBC_2.38 not found，
-          #     故 ARM64 只能用 24.04。
+          #     Ubuntu 24.04 上编译（ARM64 参考平台即 24.04/glibc2.39，glibc 更旧需从
+          #     源码重编 Qt）。22.04 上其 moc 报 GLIBC_2.38 not found，故 ARM64 只能 24.04。
           - name: linux-x86_64
-            os: ubuntu-22.04
+            os: ubuntu-22.04           # 宿主 runner（仅承载容器，自身发行版不参与编译）
+            container: rockylinux:8    # 构建在容器内进行：glibc 2.28 底座
             platform: linux
             aqt_host: linux
             aqt_arch: linux_gcc_64    # 实测 6.9.1 x86_64 唯一 arch 名（非 gcc_64）
@@ -121,6 +127,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # 容器内 git 把挂进来的工作区判为「非本用户目录」会拒操作（dubious ownership）。
+      # 必须在任何 vcpkg clone / 子模块读取之前放行；仅容器（Rocky 8）需要。
+      - name: Trust workspace git dir (container)
+        if: matrix.name == 'linux-x86_64'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       # ------------------------------------------------------------------ Qt
       # 仅 macOS / Windows 用 install-qt-action；Linux 该 action 官方不支持，走下方 apt。
@@ -162,22 +174,48 @@ jobs:
       # ------------------------------------------- Linux 构建期系统依赖
       # Qt Multimedia(QAudioSource) 需要 ALSA/pulse 头文件；X11/GL/fontconfig 等是
       # Qt GUI 与 vcpkg 构建 FreeRDP 的常规依赖。
+      # x86_64 在 Rocky 8 容器内（dnf，root 无 sudo）；ARM64 在 ubuntu-24.04-arm 裸机（apt）。
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build pkg-config ccache python3-pip \
-            libgl1-mesa-dev libglu1-mesa-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev \
-            libfontconfig1-dev libdbus-1-dev \
-            libasound2-dev libpulse-dev \
-            libx11-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev \
-            libxcb1-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev \
-            libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev \
-            libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev \
-            libxcb-util-dev libxcb-xinerama0-dev libxcb-xkb-dev \
-            bison flex gperf python3
+          set -e
+          if [ -f /etc/redhat-release ]; then
+            # ---------- Rocky Linux 8 容器（x86_64）：dnf ----------
+            # 容器内即 root，无 sudo。git/tar/which 是 actions/checkout 与脚本的硬依赖。
+            dnf install -y epel-release
+            dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled PowerTools || true
+            dnf install -y \
+              gcc gcc-c++ make ninja-build pkgconfig ccache \
+              python3.11 python3.11-pip \
+              git tar which xz unzip zip perl-core \
+              mesa-libGL-devel mesa-libGLU-devel \
+              libxkbcommon-devel libxkbcommon-x11-devel \
+              fontconfig-devel dbus-devel \
+              alsa-lib-devel pulseaudio-libs-devel \
+              libX11-devel libXext-devel libXfixes-devel libXi-devel libXrender-devel \
+              libxcb-devel xcb-util-keysyms-devel xcb-util-image-devel \
+              xcb-util-wm-devel xcb-util-renderutil-devel xcb-util-devel \
+              libXinerama-devel \
+              bison flex gperf
+            # Rocky 8 默认 python3 是 3.6（太老），把 3.11 顶到前面（不影响 dnf，它用 platform-python）
+            alternatives --set python3 /usr/bin/python3.11 || \
+              ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+          else
+            # ---------- ubuntu-24.04-arm 裸机（ARM64）：apt ----------
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              build-essential ninja-build pkg-config ccache python3-pip \
+              libgl1-mesa-dev libglu1-mesa-dev \
+              libxkbcommon-dev libxkbcommon-x11-dev \
+              libfontconfig1-dev libdbus-1-dev \
+              libasound2-dev libpulse-dev \
+              libx11-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev \
+              libxcb1-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev \
+              libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev \
+              libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev \
+              libxcb-util-dev libxcb-xinerama0-dev libxcb-xkb-dev \
+              bison flex gperf python3
+          fi
 
       # Linux 需要新版 CMake（≥3.27）：vcpkg master 的脚本 z_vcpkg_spdx.cmake 用到
       # string(JSON ... STRING_ENCODE)（CMake 3.27 引入）。x86_64 上 vcpkg-cmake 端口
@@ -392,14 +430,23 @@ jobs:
         shell: bash
         run: |
           set -e
-          # patchelf 设 rpath；libxcb-cursor 等 XCB 库需先在 runner 上装好，
+          # patchelf 设 rpath；libxcb-cursor 等 XCB 库需先在构建机上装好，
           # 否则下面 ldd 解析平台插件依赖时它们是 "not found"，无法被收集进包。
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends patchelf \
-            libxcb-cursor0 libxkbcommon0 libxkbcommon-x11-0 \
-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 \
-            libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1
+          # x86_64 在 Rocky 8 容器（dnf，root）；ARM64 在 ubuntu 裸机（apt，sudo）。
+          if [ -f /etc/redhat-release ]; then
+            dnf install -y epel-release
+            dnf install -y patchelf \
+              libxcb xcb-util xcb-util-cursor xcb-util-image xcb-util-keysyms \
+              xcb-util-renderutil xcb-util-wm \
+              libxkbcommon libxkbcommon-x11
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends patchelf \
+              libxcb-cursor0 libxkbcommon0 libxkbcommon-x11-0 \
+              libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+              libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 \
+              libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1
+          fi
           QT_LIB="$QT_ROOT/lib"
           QT_PLUGINS="$QT_ROOT/plugins"
 
@@ -445,6 +492,8 @@ jobs:
           done
           # 兜底：上面 ldd 只抓得到"能解析出路径"的依赖。对关键的 XCB/XKB 库，
           # 直接从系统库缓存(ldconfig -p)按名查找并拷入，确保一个不漏。
+          # 注意：xcb-util-cursor 在 Rocky/RHEL 上不带 libxcb-util.so，lxcb-util 仅
+          # Ubuntu 有；Rocky 上查不到就跳过，不致命。
           for lib in libxcb-cursor.so.0 libxkbcommon.so.0 libxkbcommon-x11.so.0 \
                      libxcb-icccm.so.4 libxcb-image.so.0 libxcb-keysyms.so.1 \
                      libxcb-randr.so.0 libxcb-render-util.so.0 libxcb-shape.so.0 \
@@ -453,6 +502,18 @@ jobs:
             [ -f "dist/lib/$lib" ] && continue   # 已收集过则跳过
             src="$(ldconfig -p | awk -v L="$lib" '$1==L {print $NF; exit}')"
             [ -n "$src" ] && [ -f "$src" ] && cp -L "$src" "dist/lib/$lib" 2>/dev/null || true
+          done
+
+          # 2d) C++ 运行库随包：libstdc++/libgcc_s 是「glibc 之外」老系统最常见的第二道坎。
+          # 目标老系统（如 RHEL8 自带 GCC8 的 libstdc++）可能没有程序用到的 GLIBCXX_3.4.26+
+          # 符号，导致起不来。把它们打进 dist/lib，由 DT_RPATH 优先加载——包内版本来自
+          # 构建底座（glibc 2.28），在更新的系统上也能正常加载（glibc 向下兼容），
+          # 故对所有目标系统统一随包最稳。glibc 本身（libc/libm/libpthread）不打——
+          # 那必须跟目标机内核/系统匹配，由「在 glibc 2.28 底座构建」保证向下兼容。
+          for lib in libstdc++.so.6 libgcc_s.so.1; do
+            [ -f "dist/lib/$lib" ] && continue
+            src="$(ldconfig -p | awk -v L="$lib" '$1==L {print $NF; exit}')"
+            [ -n "$src" ] && [ -f "$src" ] && cp -L "$src" "dist/lib/$lib" || true
           done
 
           # 3) 设 rpath：cube-shell 从 $ORIGIN/../lib 找 Qt 库，从 $ORIGIN/plugins 找插件。

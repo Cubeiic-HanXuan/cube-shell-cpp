@@ -111,6 +111,7 @@ LocalFileBrowserWidget::LocalFileBrowserWidget(QWidget *parent)
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(2, 2, 2, 2);
+    layout->setSpacing(0);
     layout->addWidget(m_pathEdit);
     layout->addWidget(m_tree, 1);
 

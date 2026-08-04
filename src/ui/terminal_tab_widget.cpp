@@ -91,7 +91,9 @@ TerminalTabWidget::TerminalTabWidget(QWidget *parent)
     m_newButton->setStyleSheet(QStringLiteral(
         "QToolButton#newLocalTerminalButton {"
         "    padding: 0;"
-        "    margin: 0;"
+        "    margin-top: 2px;"
+//         "    margin: 2;"
+        "    margin-bottom: 0;"
         "    border: none;"
         "    border-radius: 2px;"
         "    font-size: 20px;"

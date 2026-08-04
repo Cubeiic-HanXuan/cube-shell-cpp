@@ -84,6 +84,80 @@
 
 namespace cubeshell {
 
+namespace {
+
+// Windows Terminal 风格标签页 QSS（主题自适应）。
+// 参考样式：深色条形栏 + 圆角“悬浮”标签，激活标签比栏更亮、底部与终端内容
+// 无缝衔接，非激活标签融入栏内、hover 时微微抬升。与 qdarktheme 默认的
+// “透明选中 + 蓝色下划线”不同，这里改为实心浅色块 + 圆角。
+// 颜色按 GlobalState 当前 appearance（dark/light）取值，切主题时重建。
+QString windowsTerminalTabStyle()
+{
+    const bool light =
+        GlobalState::instance().appearance().trimmed().compare(
+            QStringLiteral("light"), Qt::CaseInsensitive) == 0;
+
+    QString bar;        // 标签栏底色（与窗口一致，标签“浮”在上面）
+    QString active;     // 激活标签实心色（比栏亮）
+    QString hover;      // 非激活标签 hover 抬升色（介于栏与激活之间）
+    QString textActive; // 激活标签文字
+    QString textIdle;   // 非激活标签文字
+    if (light) {
+        bar = QStringLiteral("#F8F9FA");
+        active = QStringLiteral("#FFFFFF");
+        hover = QStringLiteral("#ECECEC");
+        textActive = QStringLiteral("#1F2123");
+        textIdle = QStringLiteral("#5F6368");
+    } else {
+        bar = QStringLiteral("#202124");
+        active = QStringLiteral("#2B2D30");
+        hover = QStringLiteral("#33373B");
+        textActive = QStringLiteral("#E4E7EB");
+        textIdle = QStringLiteral("#9AA0A6");
+    }
+
+    // 说明：
+    //  - pane 去边框：激活标签底部与终端内容连为一体（Windows Terminal 的“连通”感）
+    //  - tab 顶部圆角 6px、底部直角，上下 margin 让标签“浮”离栏底
+    //  - 选中：实心浅色块、无边框/无下划线（覆盖 qdarktheme 的蓝色下划线）
+    return QStringLiteral(
+               "QTabWidget::pane {"
+               "    border: none;"
+               "    top: 0px;"
+               "    background-color: %2;"
+               "}"
+               "QTabWidget::tab-bar { left: 0px; }"
+               "QTabBar {"
+               "    qproperty-drawBase: 0;"
+               "    background-color: %1;"
+               "    border: none;"
+               "}"
+               "QTabBar::tab:top {"
+               "    background-color: transparent;"
+               "    color: %5;"
+               "    border: none;"
+               "    border-top-left-radius: 6px;"
+               "    border-top-right-radius: 6px;"
+               "    border-bottom-left-radius: 0px;"
+               "    border-bottom-right-radius: 0px;"
+               "    padding: 4px 10px;"
+               "    margin-top: 2px;"
+               "    margin-bottom: 0px;"
+               "    margin-left: 1px;"
+               "    margin-right: 0px;"
+               "}"
+               "QTabBar::tab:top:selected {"
+               "    background-color: %2;"
+               "    color: %4;"
+               "}"
+               "QTabBar::tab:top:!selected:hover {"
+               "    background-color: %3;"
+               "}")
+        .arg(bar, active, hover, textActive, textIdle);
+}
+
+} // namespace
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -123,7 +197,8 @@ void MainWindow::setupUi()
         // macOS 上 documentMode 会让 QMacStyle 按系统外观强制标签文字颜色，
         // 深色主题下未选中标签被画成黑字（qdarktheme 的 QTabBar::tab 不设 color，
         // 依赖 QWidget 继承色），导致不可读。
-        tabs->setStyleSheet(QStringLiteral("QTabWidget::tab-bar { left: 0px; }"));
+        // Windows Terminal 风格标签：圆角悬浮标签，主题自适应（见上方 helper）。
+        tabs->setStyleSheet(windowsTerminalTabStyle());
         tabs->tabBar()->setCursor(Qt::PointingHandCursor);
         connect(tabs, &TerminalTabWidget::newLocalTerminalRequested,
                 this, &MainWindow::openLocalTerminal);
@@ -1874,6 +1949,11 @@ void MainWindow::showSettings()
                 for (QTermWidget *t : terms)
                     t->setTerminalFont(font);
             });
+    // 切换 dark/light 后重建标签页 QSS（颜色按新主题取值），无需重启。
+    connect(&dlg, &SettingsDialog::appearanceChanged, this, [this](const QString &) {
+        for (TerminalTabWidget *tabs : {m_tabs, m_tabs2})
+            tabs->setStyleSheet(windowsTerminalTabStyle());
+    });
     dlg.exec();
 }
 

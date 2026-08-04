@@ -36,6 +36,8 @@ concurrency:
 
 env:
   QT_VERSION: '6.9.1'
+  # 应用自身版本号（打包文件名用），与 Qt 版本无关；发版时手动改这里
+  APP_VERSION: '3.0.1'
   VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
 jobs:
@@ -399,7 +401,7 @@ jobs:
 
           # 3) 签名后用 hdiutil 打 dmg（不再触碰 .app，保证签名不被破坏）
           mkdir -p out
-          DMG="out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.dmg"
+          DMG="out/cube-shell-${{ env.APP_VERSION }}-${{ matrix.name }}.dmg"
           hdiutil create -volname "CubeShell" -srcfolder dist/cube-shell.app \
             -ov -format UDZO "$DMG"
           ls -lh out/
@@ -412,7 +414,7 @@ jobs:
         run: |
           windeployqt --release --no-translations dist/bin/cube-shell.exe
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          $zip = "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.zip"
+          $zip = "out/cube-shell-${{ env.APP_VERSION }}-${{ matrix.name }}.zip"
           Compress-Archive -Path dist/* -DestinationPath $zip
           Get-Item $zip | Select-Object Name, Length
 
@@ -572,7 +574,7 @@ jobs:
 
           # 6) 打包
           mkdir -p out
-          tar -czf "out/cube-shell-${{ env.QT_VERSION }}-${{ matrix.name }}.tar.gz" -C dist .
+          tar -czf "out/cube-shell-${{ env.APP_VERSION }}-${{ matrix.name }}.tar.gz" -C dist .
           ls -lh out/
 
       # --------------------------------------------------------- Artifact

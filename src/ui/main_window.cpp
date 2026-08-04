@@ -147,7 +147,7 @@ QString windowsTerminalTabStyle()
                "    margin-right: 0px;"
                "}"
                "QTabBar::tab:top:selected {"
-               "    background-color: %2;"
+               "    background-color: %3;"
                "    color: %4;"
                "}"
                "QTabBar::tab:top:!selected:hover {"

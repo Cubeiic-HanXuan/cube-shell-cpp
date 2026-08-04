@@ -162,6 +162,15 @@ bool DeviceConfigStore::saveJson(const QString &jsonPath, QString *errorOut) con
         o[QStringLiteral("protocol")] = e.protocol;
         o[QStringLiteral("domain")]   = e.domain;
         o[QStringLiteral("auth")]     = e.auth;
+        // 串口字段（C++ 侧新增；非串口条目也一并写出，保持 JSON 结构一致）。
+        o[QStringLiteral("portName")]    = e.portName;
+        o[QStringLiteral("baudRate")]    = e.baudRate;
+        o[QStringLiteral("dataBits")]    = e.dataBits;
+        o[QStringLiteral("parity")]      = e.parity;
+        o[QStringLiteral("stopBits")]    = e.stopBits;
+        o[QStringLiteral("flowControl")] = e.flowControl;
+        o[QStringLiteral("newlineMode")] = e.newlineMode;
+        o[QStringLiteral("localEcho")]   = e.localEcho;
         arr.append(o);
     }
 
@@ -208,6 +217,19 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         e.domain   = o[QStringLiteral("domain")].toString();
         const QString auth = o[QStringLiteral("auth")].toString();
         e.auth = auth.isEmpty() ? QStringLiteral("ntlm") : auth;
+        // 串口字段（旧版 JSON 无这些键时保持结构体默认值，同上面的容错风格）。
+        e.portName = o[QStringLiteral("portName")].toString();
+        e.baudRate = o[QStringLiteral("baudRate")].toInt(115200);
+        e.dataBits = o[QStringLiteral("dataBits")].toInt(8);
+        const QString parity = o[QStringLiteral("parity")].toString();
+        e.parity = parity.isEmpty() ? QStringLiteral("none") : parity;
+        const QString stopBits = o[QStringLiteral("stopBits")].toString();
+        e.stopBits = stopBits.isEmpty() ? QStringLiteral("1") : stopBits;
+        const QString flow = o[QStringLiteral("flowControl")].toString();
+        e.flowControl = flow.isEmpty() ? QStringLiteral("none") : flow;
+        const QString newline = o[QStringLiteral("newlineMode")].toString();
+        e.newlineMode = newline.isEmpty() ? QStringLiteral("cr") : newline;
+        e.localEcho = o[QStringLiteral("localEcho")].toBool(false);
         if (!e.name.isEmpty())
             m_devices.insert(e.name, e);
     }

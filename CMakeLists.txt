@@ -63,6 +63,16 @@ qt_standard_project_setup()
 # Optional protocol backends (enabled as their modules are ported)
 option(CUBESHELL_WITH_SSH "Build SSH support (libssh2)" ON)
 option(CUBESHELL_WITH_RDP "Build RDP support (FreeRDP)" OFF)
+# 串口默认 ON：Qt6::SerialPort 是 Qt 官方模块，各平台都随 Qt 提供，不像
+# FreeRDP 那样经常缺失。OFF 时 serial/ 目录不编译，UI 侧入口由
+# CUBESHELL_WITH_SERIAL 宏统一摘除。
+option(CUBESHELL_WITH_SERIAL "Build Serial Port support (QSerialPort)" ON)
+
+# SerialPort 组件单独查找：放在 option 之后才能按开关决定是否 REQUIRED，
+# 使 -DCUBESHELL_WITH_SERIAL=OFF 的环境即便没装 qtserialport 也能配置成功。
+if(CUBESHELL_WITH_SERIAL)
+    find_package(Qt6 REQUIRED COMPONENTS SerialPort)
+endif()
 
 # cJSON —— 必须在任何 add_subdirectory() / FreeRDP 查找之前导入。
 # WinPR 的 imported target 把 `cjson` 写进了 INTERFACE_LINK_LIBRARIES。若此时
@@ -298,6 +308,7 @@ message(STATUS "  Qt version      : ${Qt6_VERSION}")
 message(STATUS "  Build type      : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  SSH (libssh2)   : ${CUBESHELL_WITH_SSH}")
 message(STATUS "  RDP (FreeRDP)   : ${CUBESHELL_WITH_RDP}")
+message(STATUS "  Serial (QtSerialPort): ${CUBESHELL_WITH_SERIAL}")
 if(CUBESHELL_WITH_RDP)
     # 诊断用：cjson 目标存在时 CMake 会把 WinPR 传递过来的裸名 cjson 解析成绝对
     # 路径；不存在时就只能靠上面的 link_directories 兜底。

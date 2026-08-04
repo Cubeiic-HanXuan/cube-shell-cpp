@@ -108,6 +108,15 @@ if(CUBESHELL_WITH_RDP)
     )
 endif()
 
+# 串口支持（CUBESHELL_WITH_SERIAL，默认 ON）。Python 版无对应实现，
+# 设计上取 RdpClient 的异步信号形态 + SshBridge 的终端接线方式。
+if(CUBESHELL_WITH_SERIAL)
+    list(APPEND CORE_SOURCES
+        serial/SerialClient.cpp   # QSerialPort 封装（端口枚举/热插拔/日志）
+        serial/SerialBridge.cpp   # 串口字节流 ↔ qtermwidget Session
+    )
+endif()
+
 set(CORE_PLACEHOLDER ${CMAKE_CURRENT_SOURCE_DIR}/core_placeholder.cpp)
 if(NOT CORE_SOURCES)
     set(CORE_SOURCES ${CORE_PLACEHOLDER})
@@ -159,6 +168,14 @@ if(CUBESHELL_WITH_SSH)
         ${LIBSSH2_LIBRARIES}
         OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB
     )
+endif()
+
+# 串口后端（CUBESHELL_WITH_SERIAL=ON）。Qt6::SerialPort 与宏都用 PUBLIC：
+# cube_ui 里的串口面板既要包含 QSerialPort 头（枚举类型出现在 SerialSettings
+# 里），也要用 CUBESHELL_WITH_SERIAL 摘除入口代码。
+if(CUBESHELL_WITH_SERIAL)
+    target_compile_definitions(cube_core PUBLIC CUBESHELL_WITH_SERIAL=1)
+    target_link_libraries(cube_core PUBLIC Qt6::SerialPort)
 endif()
 
 # ---------------------------------------------------------------------------

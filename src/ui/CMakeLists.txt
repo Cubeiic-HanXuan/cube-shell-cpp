@@ -13,7 +13,6 @@ set(UI_SOURCES
     add_device_dialog.cpp
     status_box_item.cpp
     LanguageManager.cpp
-
     # --- 终端命令智能提示 (对应Python: cube-shell.py::_SuggestionPopup/SSHQTermWidget 提示逻辑) ---
     suggestion_popup.cpp
     terminal_command_suggest.cpp
@@ -43,6 +42,14 @@ set(UI_SOURCES
     editors/ServiceSearchDialog.cpp
     editors/DockerDaemonConfigDialog.cpp
 )
+
+# 串口 UI（CUBESHELL_WITH_SERIAL=ON 时才编译；宏由 cube_core PUBLIC 传递过来）。
+if(CUBESHELL_WITH_SERIAL)
+    list(APPEND UI_SOURCES
+        serial_terminal_widget.cpp      # 工具栏 + QTermWidget + 状态栏
+        dialogs/SerialConnectDialog.cpp # “新建串口连接”菜单的临时连接对话框
+    )
+endif()
 
 # 图标资源（resources/icons/icons.qrc，cpp 项目自带拷贝）挂在可执行目标上：
 # 静态库里的 qrc 需要 Q_INIT_RESOURCE 才能避开链接器丢弃初始化符号。

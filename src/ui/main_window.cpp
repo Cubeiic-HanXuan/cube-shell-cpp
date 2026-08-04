@@ -73,6 +73,10 @@
 #include <QGuiApplication>
 #include <QScreen>
 #endif
+#ifdef CUBESHELL_WITH_SERIAL
+#include "serial_terminal_widget.h"
+#include "dialogs/SerialConnectDialog.h"
+#endif
 #ifdef Q_OS_MACOS
 #include "platform/FinderIntegration.h"
 #endif
@@ -460,6 +464,16 @@ void MainWindow::setupMenus()
     // 对应Python: 设备协议为 rdp 时走 open_rdp_tab；C++ 侧另提供手动入口
     termMenu->addAction(tr("新建 RDP 连接"), this,
                         [this]() { openRdpTab(RdpSettings()); });
+#endif
+#ifdef CUBESHELL_WITH_SERIAL
+    // 新建串口连接：先弹对话框选端口和帧格式，确定后开标签页立即建连。
+    // 与 RDP 不同——串口参数少且必填端口，先问一次比开个空面板更顺手。
+    termMenu->addAction(tr("新建串口连接"), this, [this]() {
+        SerialConnectDialog dlg(this);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+        openSerialTab(dlg.settings());
+    });
 #endif
     QAction *closeTab = termMenu->addAction(tr("关闭标签页"), this, &MainWindow::closeCurrentTab);
     closeTab->setShortcut(QKeySequence(QStringLiteral("Ctrl+W")));
@@ -1398,6 +1412,11 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
     if (auto *rdp = qobject_cast<RdpPanel *>(w))
         rdp->client()->disconnectFromHost();
 #endif
+#ifdef CUBESHELL_WITH_SERIAL
+    // 串口标签关闭：先关端口（顺带停日志文件），再销毁面板。
+    if (auto *serial = qobject_cast<SerialTerminalWidget *>(w))
+        serial->client()->close();
+#endif
     tabs->removeTab(index);
     if (w)
         w->deleteLater();
@@ -1745,6 +1764,18 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
     const DeviceEntry *full = m_store.find(stub.name);
     const DeviceEntry device = full ? *full : stub;
 
+    // 串口设备分流：protocol == "serial" 时打开串口标签页。
+    // 串口无 host/凭据，DeviceEntry 里存的是端口名与帧格式参数。
+    if (device.isSerial()) {
+#ifdef CUBESHELL_WITH_SERIAL
+        openSerialTab(serialSettingsFromDevice(device));
+#else
+        QMessageBox::warning(this, tr("串口"),
+                             tr("当前构建未启用串口支持（CUBESHELL_WITH_SERIAL=OFF）。"));
+#endif
+        return;
+    }
+
     // RDP 设备分流：protocol == "rdp" 时打开 RDP 标签而非 SSH 会话。
     // 对应Python: cube-shell.py::cd（行 3119-3206）中 device_protocol(conf)=="rdp"
     // 走 open_rdp_tab 分支
@@ -1931,6 +1962,66 @@ void MainWindow::openRdpTab(const RdpSettings &settings)
 }
 
 #endif // CUBESHELL_WITH_RDP
+
+#ifdef CUBESHELL_WITH_SERIAL
+
+// 打开串口标签页。portName 为空时只建空白面板（用户在工具栏选端口后点“连接”），
+// 非空则立即建连。结构对照 openRdpTab。
+void MainWindow::openSerialTab(const SerialSettings &settings)
+{
+    auto *panel = new SerialTerminalWidget(this);
+    panel->setSettings(settings);
+
+    const QString title = settings.portName.isEmpty()
+                              ? tr("串口连接")
+                              : QStringLiteral("Serial: %1").arg(settings.portName);
+    const int idx = m_tabs->addTab(panel, title);
+    decorateSessionTab(m_tabs, idx);
+    setTabConnected(panel, false);   // 连上之前先亮红点
+    m_tabs->setCurrentIndex(idx);
+
+    connect(panel, &SerialTerminalWidget::connected, this, [this, panel]() {
+        setTabConnected(panel, true);
+        const SerialSettings s = panel->client()->settings();
+        setStatus(tr("串口已连接：%1 @%2 %3")
+                      .arg(s.portName).arg(s.baudRate).arg(s.frameFormat()));
+        // 标题跟随实际连接的端口（空白面板手选 / 断开后重连均在此复位）。
+        for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
+                                 static_cast<QTabWidget *>(m_tabs2)}) {
+            const int i = tabs->indexOf(panel);
+            if (i >= 0) {
+                tabs->setTabText(i, QStringLiteral("Serial: %1").arg(s.portName));
+                break;
+            }
+        }
+    });
+    connect(panel, &SerialTerminalWidget::disconnected, this, [this, panel]() {
+        setTabConnected(panel, false);
+        setStatus(tr("串口已断开：%1").arg(panel->client()->settings().portName));
+        // Tab 标题加“[断开]”前缀（面板内可重连，连上后由 connected 分支复位）。
+        const QString prefix = tr("[断开] ");
+        for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
+                                 static_cast<QTabWidget *>(m_tabs2)}) {
+            const int i = tabs->indexOf(panel);
+            if (i >= 0) {
+                const QString text = tabs->tabText(i);
+                if (!text.startsWith(prefix))
+                    tabs->setTabText(i, prefix + text);
+                break;
+            }
+        }
+    });
+    connect(panel, &SerialTerminalWidget::connectionFailed, this,
+            [this](const QString &message) { setStatus(message); });
+
+    if (!settings.portName.isEmpty()) {
+        setStatus(tr("正在打开串口 %1…").arg(settings.portName));
+        panel->connectToPort();
+    }
+    panel->setFocus();
+}
+
+#endif // CUBESHELL_WITH_SERIAL
 
 
 // ---------------------------------------------------------------------------

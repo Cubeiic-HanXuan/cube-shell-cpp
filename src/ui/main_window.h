@@ -44,6 +44,9 @@ struct RemoteStats;
 #ifdef CUBESHELL_WITH_RDP
 struct RdpSettings;
 #endif
+#ifdef CUBESHELL_WITH_SERIAL
+struct SerialSettings;
+#endif
 
 // Main application window.
 //
@@ -65,6 +68,12 @@ public:
     // host 为空时创建空白面板等待用户填写表单；非空则按动态计算的分辨率立即建连。
     // 对应Python: cube-shell.py::open_rdp_tab（行 1640-1691）
     void openRdpTab(const RdpSettings &settings);
+#endif
+
+#ifdef CUBESHELL_WITH_SERIAL
+    // 打开串口标签页（“新建串口连接”菜单 / 设备列表中 protocol=="serial" 共用入口）。
+    // portName 为空时创建空白面板等待用户在工具栏选端口；非空则立即建连。
+    void openSerialTab(const SerialSettings &settings);
 #endif
 
 private:

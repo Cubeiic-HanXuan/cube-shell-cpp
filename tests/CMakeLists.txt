@@ -244,6 +244,22 @@ target_link_libraries(screen_reflow_test PRIVATE
     qtermwidget
 )
 
+# 串口模块：换行转换纯函数 + SerialSettings 默认值 + 端口枚举 +
+# DeviceEntry 串口字段 JSON 往返（无硬件也能全部跑过）。
+if(CUBESHELL_WITH_SERIAL)
+    qt_add_executable(serial_test
+        serial_test.cpp
+    )
+    target_include_directories(serial_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/qtermwidget   # SerialBridge.h 间接引用 Session
+    )
+    target_link_libraries(serial_test PRIVATE
+        Qt6::Core
+        cube_core
+    )
+endif()
+
 # ---------------------------------------------------------------------------
 # CTest registration
 # ---------------------------------------------------------------------------
@@ -261,6 +277,9 @@ add_test(NAME docker_manager_test COMMAND docker_manager_test)
 add_test(NAME frp_installer_test COMMAND frp_installer_test)
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
+if(CUBESHELL_WITH_SERIAL)
+    add_test(NAME serial_test COMMAND serial_test)
+endif()
 
 # Integration tests need a reachable sshd; they exit(2) when the target host
 # is unavailable, which CTest records as SKIPPED instead of FAILED.
@@ -272,4 +291,6 @@ set_tests_properties(ssh_integration_test sftp_integration_test
     command_executor_test uploader_test PROPERTIES
     SKIP_RETURN_CODE 2
 )
+
+
 

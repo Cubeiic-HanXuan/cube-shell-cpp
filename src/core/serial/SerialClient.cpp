@@ -41,6 +41,21 @@ QString stopBitsText(QSerialPort::StopBits stopBits)
     }
 }
 
+// 端口名是否命中枚举列表。
+//
+// QSerialPortInfo::portName() 给的是短名（"cu.usbserial-0001" / "COM3"），
+// 而用户可能手输绝对设备路径（"/dev/cu.usbserial-0001"）—— QSerialPort 两种
+// 形式都接受，比对时也必须两种都认，否则同一个真实设备会被判成"不存在"。
+bool portListContains(const QStringList &names, const QString &portName)
+{
+    if (portName.isEmpty())
+        return false;
+    if (names.contains(portName))
+        return true;
+    const int slash = portName.lastIndexOf(QLatin1Char('/'));
+    return slash >= 0 && names.contains(portName.mid(slash + 1));
+}
+
 } // namespace
 
 // --- SerialSettings ---
@@ -155,6 +170,11 @@ bool SerialClient::open(const SerialSettings &settings)
     // 打开后清空硬件缓冲里的残留字节，避免上一次会话的尾巴刷进新终端。
     m_port->clear();
 
+    // 记录该端口是否在系统枚举里。虚拟串口（socat/openpty 造的 PTY）能正常
+    // 打开收发，但 QSerialPortInfo 从不枚举它们；若照样用"从枚举中消失"判定
+    // 拔出，连上 1 秒后就会被轮询误杀。只对枚举得到的端口启用该检测。
+    m_portEnumerated = portListContains(currentPortNames(), settings.portName);
+
     setState(State::Connected);
     emit connected();
     return true;
@@ -238,7 +258,10 @@ void SerialClient::pollPorts()
     // 当前连着的端口从系统里消失 → 设备被拔了。
     // 有些平台/驱动不会触发 QSerialPort::errorOccurred(ResourceError)，
     // 故这里做第二道检测，避免终端停在"已连接"的假状态上。
-    if (isOpen() && !names.contains(m_settings.portName)) {
+    //
+    // 仅对打开时就在枚举表里的端口生效：虚拟串口本来就不在表里，一视同仁
+    // 会把正常连接误判成拔出；这类端口的断开由 ResourceError 兜底。
+    if (isOpen() && m_portEnumerated && !portListContains(names, m_settings.portName)) {
         const QString name = m_settings.portName;
         m_port->close();
         setState(State::Disconnected);

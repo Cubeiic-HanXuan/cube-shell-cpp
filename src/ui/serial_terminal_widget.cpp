@@ -30,7 +30,8 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     m_port = new QComboBox(this);
     m_port->setEditable(true);   // 允许手输设备路径
     m_port->setInsertPolicy(QComboBox::NoInsert);
-    m_port->setMinimumWidth(180);
+    // 宽度交给 fillPorts 里的 fitToWidestItem 按实际端口名算，不写死。
+    // 原先固定 180px，遇到 "tty.Bluetooth-Incoming-Port" 这类长名就被截断。
     serialcombo::fillPorts(m_port);
 
     m_baud = new QComboBox(this);
@@ -50,6 +51,13 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     serialcombo::fillNewlineMode(m_newline);
 
     m_localEcho = new QCheckBox(tr("本地回显"), this);
+    m_rxImplicitCr = new QCheckBox(tr("接收补 CR"), this);
+    m_rxImplicitCr->setChecked(true);
+    m_rxImplicitCr->setToolTip(
+        tr("接收到孤立的 LF(\\n) 时补一个 CR(\\r)，让光标回到行首。\n"
+           "关闭后对端发裸 LF 会出现阶梯状输出——这是 VT 规范的正确行为\n"
+           "（LF 只下移一行，回行首是 CR 的职责），但多数串口设备并不发 CR。\n"
+           "等价于 PuTTY 的 Implicit CR in every LF。"));
     m_logging = new QCheckBox(tr("录制日志"), this);
 
     m_connectButton = new QPushButton(tr("连接"), this);
@@ -57,7 +65,10 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     m_disconnectButton->setEnabled(false);
     m_clearButton = new QPushButton(tr("清屏"), this);
 
-    // 两行工具栏：参数一行，开关+按钮一行。挤在一行会在窄窗口下被裁掉。
+    // 两行工具栏：挤在一行会在窄窗口下被裁掉。
+    // 分行原则：第一行放物理链路参数，但"流控"挪到第二行——六个参数框加六个
+    // 标签会把第一行占满，串口名（可能长到 "tty.Bluetooth-Incoming-Port"）
+    // 被压到最小宽度而显示不全。
     auto *row1 = new QHBoxLayout;
     row1->setContentsMargins(0, 0, 0, 0);
     row1->addWidget(new QLabel(tr("串口："), this));
@@ -70,14 +81,19 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     row1->addWidget(m_parity);
     row1->addWidget(new QLabel(tr("停止位："), this));
     row1->addWidget(m_stopBits);
-    row1->addWidget(new QLabel(tr("流控："), this));
-    row1->addWidget(m_flow);
 
     auto *row2 = new QHBoxLayout;
     row2->setContentsMargins(0, 0, 0, 0);
-    row2->addWidget(new QLabel(tr("换行："), this));
+    row2->addWidget(new QLabel(tr("流控："), this));
+    row2->addWidget(m_flow);
+    // 标签写明"发送"：这个下拉框只作用于发出去的字节（见 SerialBridge::
+    // applyNewlineMode 的调用点），管不到接收方向。早先只写"换行"，用户切换
+    // 它去观察对端发来的内容却毫无变化，很自然会误判成功能失效。
+    // 接收方向由旁边的"接收补 CR"负责，两个开关各管一个方向。
+    row2->addWidget(new QLabel(tr("发送换行："), this));
     row2->addWidget(m_newline);
     row2->addWidget(m_localEcho);
+    row2->addWidget(m_rxImplicitCr);
     row2->addWidget(m_logging);
     row2->addStretch(1);
     row2->addWidget(m_clearButton);
@@ -126,6 +142,8 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
             this, &SerialTerminalWidget::onNewlineModeChanged);
     connect(m_localEcho, &QCheckBox::toggled,
             this, &SerialTerminalWidget::onLocalEchoToggled);
+    connect(m_rxImplicitCr, &QCheckBox::toggled,
+            this, &SerialTerminalWidget::onRxImplicitCrToggled);
     connect(m_logging, &QCheckBox::toggled,
             this, &SerialTerminalWidget::onLogToggled);
 
@@ -136,9 +154,10 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     connect(m_client, &SerialClient::portsChanged,
             this, &SerialTerminalWidget::onPortsChanged);
 
-    // 工具栏初值同步到 bridge（默认 CR + 不回显，与 SerialSettings 默认一致）。
+    // 工具栏初值同步到 bridge（默认 CR + 不回显 + RX补CR，与 SerialSettings 默认一致）。
     m_bridge->setNewlineMode(serialcombo::newlineModeOf(m_newline));
     m_bridge->setLocalEcho(m_localEcho->isChecked());
+    m_bridge->setRxImplicitCr(m_rxImplicitCr->isChecked());
 }
 
 SerialTerminalWidget::~SerialTerminalWidget()
@@ -151,9 +170,7 @@ SerialTerminalWidget::~SerialTerminalWidget()
 SerialSettings SerialTerminalWidget::currentSettings() const
 {
     SerialSettings s;
-    // 可编辑下拉框：手输时 currentData() 为空，回退到文本。
-    const QString fromData = m_port->currentData().toString();
-    s.portName    = fromData.isEmpty() ? m_port->currentText().trimmed() : fromData;
+    s.portName    = serialcombo::portNameOf(m_port);
     s.baudRate    = serialcombo::baudRateOf(m_baud);
     s.dataBits    = serialcombo::dataBitsOf(m_dataBits);
     s.parity      = serialcombo::parityOf(m_parity);
@@ -161,6 +178,7 @@ SerialSettings SerialTerminalWidget::currentSettings() const
     s.flowControl = serialcombo::flowControlOf(m_flow);
     s.newlineMode = serialcombo::newlineModeOf(m_newline);
     s.localEcho   = m_localEcho->isChecked();
+    s.rxImplicitCr = m_rxImplicitCr->isChecked();
     return s;
 }
 
@@ -175,6 +193,7 @@ void SerialTerminalWidget::setSettings(const SerialSettings &s)
     serialcombo::selectData(m_flow,     int(s.flowControl));
     serialcombo::selectData(m_newline,  int(s.newlineMode));
     m_localEcho->setChecked(s.localEcho);
+    m_rxImplicitCr->setChecked(s.rxImplicitCr);
     // setChecked/selectData 会触发对应槽，bridge 状态自动跟着更新。
 }
 
@@ -254,6 +273,12 @@ void SerialTerminalWidget::onLocalEchoToggled(bool enabled)
 {
     if (m_bridge)
         m_bridge->setLocalEcho(enabled);
+}
+
+void SerialTerminalWidget::onRxImplicitCrToggled(bool enabled)
+{
+    if (m_bridge)
+        m_bridge->setRxImplicitCr(enabled);
 }
 
 void SerialTerminalWidget::onLogToggled(bool enabled)

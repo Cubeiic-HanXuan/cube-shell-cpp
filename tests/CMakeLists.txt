@@ -245,18 +245,23 @@ target_link_libraries(screen_reflow_test PRIVATE
 )
 
 # 串口模块：换行转换纯函数 + SerialSettings 默认值 + 端口枚举 +
-# DeviceEntry 串口字段 JSON 往返（无硬件也能全部跑过）。
+# 下拉框取值解析（含手输回归用例）+ DeviceEntry 串口字段 JSON 往返
+# （无硬件也能全部跑过）。
 if(CUBESHELL_WITH_SERIAL)
     qt_add_executable(serial_test
         serial_test.cpp
     )
     target_include_directories(serial_test PRIVATE
         ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/ui          # serialcombo 辅助函数（下拉框取值）
         ${CMAKE_SOURCE_DIR}/src/qtermwidget   # SerialBridge.h 间接引用 Session
     )
     target_link_libraries(serial_test PRIVATE
         Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
         cube_core
+        cube_ui
     )
 endif()
 

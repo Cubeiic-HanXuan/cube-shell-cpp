@@ -56,6 +56,13 @@ void Vt102Emulation::clearEntireScreen()
     Q_EMIT outputChanged();
 }
 
+// cube-shell 扩展：光标归位。见 Emulation.h 的说明。
+void Vt102Emulation::home()
+{
+    _currentScreen->home();
+    Q_EMIT outputChanged();
+}
+
 // 对应C++: void Vt102Emulation::reset()
 void Vt102Emulation::reset()
 {

@@ -244,9 +244,11 @@ void DeviceListWidget::rebuildTree()
             item->setText(0, d->name);
             item->setFont(0, deviceFont());
             // 对应Python: cube-shell.py:3966-3994 — RDP 设备用 Windows 图标，
-            // SSH 设备用 icons8-ssh-48.png
+            // Serial 设备用 icons8-serial-48.png，SSH 设备用 icons8-ssh-48.png
             if (d->isRdp())
                 item->setIcon(0, QIcon(QStringLiteral(":/icons8-windows-48.png")));
+            else if (d->isSerial())
+                item->setIcon(0, QIcon(QStringLiteral(":/icons8-serial-48.png")));
             else
                 item->setIcon(0, QIcon(QStringLiteral(":/icons8-ssh-48.png")));
             item->setToolTip(0, d->username + QLatin1Char('@') + hp.host +

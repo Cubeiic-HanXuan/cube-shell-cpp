@@ -131,6 +131,8 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     m_newline = new QComboBox(this);
     serialcombo::fillNewlineMode(m_newline);
     m_localEcho = new QCheckBox(tr("本地回显（设备不回显输入时勾选）"), this);
+    m_rxImplicitCr = new QCheckBox(tr("接收时给孤立的 LF 补 CR（设备发裸 \\n 时勾选）"), this);
+    m_rxImplicitCr->setChecked(true);
 
     form->addRow(tr("串口设备："), m_serialPortRow);
     form->addRow(tr("波特率："),   m_baud);
@@ -138,8 +140,10 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     form->addRow(tr("校验位："),   m_parity);
     form->addRow(tr("停止位："),   m_stopBits);
     form->addRow(tr("流控："),     m_flow);
-    form->addRow(tr("换行符："),   m_newline);
+    // 标签写明"发送"，与另外两处保持一致：这个下拉框管不到接收方向。
+    form->addRow(tr("发送换行符："), m_newline);
     form->addRow(QString(), m_localEcho);
+    form->addRow(QString(), m_rxImplicitCr);
 
     connect(refreshPorts, &QPushButton::clicked,
             this, &AddDeviceDialog::onRefreshPorts);
@@ -237,6 +241,7 @@ void AddDeviceDialog::setDevice(const DeviceEntry &e)
     serialcombo::selectData(m_flow,     int(ss.flowControl));
     serialcombo::selectData(m_newline,  int(ss.newlineMode));
     m_localEcho->setChecked(ss.localEcho);
+    m_rxImplicitCr->setChecked(ss.rxImplicitCr);
 #endif
     m_name->setText(e.name);
     m_username->setText(e.username);
@@ -262,9 +267,7 @@ DeviceEntry AddDeviceDialog::device() const
     if (serialSelected()) {
         // 串口没有 host/username/凭据，只写协议 + 串口参数，其余留空。
         e.protocol = QStringLiteral("serial");
-        const QString fromData = m_serialPort->currentData().toString();
-        e.portName = fromData.isEmpty() ? m_serialPort->currentText().trimmed()
-                                        : fromData;
+        e.portName    = serialcombo::portNameOf(m_serialPort);
         e.baudRate    = serialcombo::baudRateOf(m_baud);
         e.dataBits    = int(serialcombo::dataBitsOf(m_dataBits));
         e.parity      = serialcombo::parityToString(serialcombo::parityOf(m_parity));
@@ -272,6 +275,7 @@ DeviceEntry AddDeviceDialog::device() const
         e.flowControl = serialcombo::flowControlToString(serialcombo::flowControlOf(m_flow));
         e.newlineMode = serialcombo::newlineModeToString(serialcombo::newlineModeOf(m_newline));
         e.localEcho   = m_localEcho->isChecked();
+        e.rxImplicitCr = m_rxImplicitCr->isChecked();
         return e;
     }
 #endif
@@ -377,6 +381,7 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
     m_form->setRowVisible(m_flow, isSerial);
     m_form->setRowVisible(m_newline, isSerial);
     m_form->setRowVisible(m_localEcho, isSerial);
+    m_form->setRowVisible(m_rxImplicitCr, isSerial);
 #endif
 
     // 切换协议时给出合理的默认端口（串口不用端口字段，跳过）。
@@ -419,10 +424,7 @@ bool AddDeviceDialog::validate(QString *err) const
 #ifdef CUBESHELL_WITH_SERIAL
     if (serialSelected()) {
         // 串口没有用户名/IP/凭据，只需要设备名。
-        const QString fromData = m_serialPort->currentData().toString();
-        const QString portName = fromData.isEmpty()
-                                     ? m_serialPort->currentText().trimmed()
-                                     : fromData;
+        const QString portName = serialcombo::portNameOf(m_serialPort);
         if (portName.isEmpty()) { *err = tr("请选择或输入串口设备。"); return false; }
         return true;
     }

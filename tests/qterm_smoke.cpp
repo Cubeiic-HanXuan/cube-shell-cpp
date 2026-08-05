@@ -33,9 +33,45 @@ static QString screenText(Screen *screen)
     return result;
 }
 
+// clear() 必须既擦内容又把光标送回左上角。
+//
+// 回归用例：Screen::clearEntireScreen() 只擦内容不动光标（这是 VT 的 ED /
+// ESC[2J 语义，必须保持），QTermWidget::clear() 早先只调它，于是"清屏"按钮
+// 按下后光标停在原处。SSH 会话看不出来——shell 会重画提示符把光标带回去；
+// 串口对面是裸设备，不重画，光标就一直悬在原来的行列上。
+static bool clearHomesCursor()
+{
+    // startnow=0：不拉起本地 shell，与串口面板的用法一致。
+    QTermWidget term(0);
+    term.resize(640, 480);
+    Session *session = term.session();
+    Emulation *emu = session ? session->emulation() : nullptr;
+    if (!emu || !emu->currentScreen())
+        return false;
+
+    // 灌几行进去，把光标推离原点。
+    const QByteArray blob = "line one\r\nline two\r\nline three\r\nABC";
+    session->onReceiveBlock(blob.constData(), blob.size());
+
+    Screen *screen = emu->currentScreen();
+    const int beforeX = screen->getCursorX(), beforeY = screen->getCursorY();
+    if (beforeX == 0 && beforeY == 0) {
+        qWarning() << "clearHomesCursor: 前提不成立，光标本来就在原点";
+        return false;
+    }
+
+    term.clear();
+    Screen *after = emu->currentScreen();
+    const int x = after->getCursorX(), y = after->getCursorY();
+    qInfo() << "clear(): 光标" << beforeX << beforeY << "->" << x << y;
+    return x == 0 && y == 0;
+}
+
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+
+    const bool clearOk = clearHomesCursor();
 
     QTermWidget term(0);
     term.resize(640, 480);
@@ -59,8 +95,8 @@ int main(int argc, char *argv[])
         const bool renderOk = !img.isNull() && img.width() > 100;
         const bool modelOk = text.contains(QStringLiteral("CUBESHELL_RENDER_OK"));
 
-        qInfo() << "renderOk:" << renderOk << "modelOk:" << modelOk;
-        QApplication::exit((renderOk && modelOk) ? 0 : 1);
+        qInfo() << "renderOk:" << renderOk << "modelOk:" << modelOk << "clearOk:" << clearOk;
+        QApplication::exit((renderOk && modelOk && clearOk) ? 0 : 1);
     });
 
     return app.exec();

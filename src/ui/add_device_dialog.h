@@ -92,6 +92,7 @@ private:
     QComboBox *m_flow = nullptr;
     QComboBox *m_newline = nullptr;
     QCheckBox *m_localEcho = nullptr;
+    QCheckBox *m_rxImplicitCr = nullptr;
 #endif
 };
 

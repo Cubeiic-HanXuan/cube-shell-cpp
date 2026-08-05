@@ -95,7 +95,13 @@ void SerialBridge::onEmulationSendData(const char *data, int length)
 
 void SerialBridge::onSerialData(const QByteArray &data)
 {
-    writeToTerminal(data);
+    if (!m_rxImplicitCr) {
+        // 关闭时连边界状态一起清掉，免得中途开启时带着上一次的残留判断。
+        m_prevWasCr = false;
+        writeToTerminal(data);
+        return;
+    }
+    writeToTerminal(applyRxImplicitCr(data, m_prevWasCr));
 }
 
 void SerialBridge::writeToTerminal(const QByteArray &data)
@@ -150,6 +156,29 @@ QByteArray SerialBridge::applyNewlineMode(const QByteArray &input,
             break;
         }
     }
+    return out;
+}
+
+QByteArray SerialBridge::applyRxImplicitCr(const QByteArray &input, bool &prevWasCr)
+{
+    if (input.isEmpty())
+        return input;   // 空块不该改动 prevWasCr
+
+    QByteArray out;
+    out.reserve(input.size() + 8);
+
+    bool sawCr = prevWasCr;
+    for (int i = 0; i < input.size(); ++i) {
+        const char c = input.at(i);
+        if (c == '\n' && !sawCr)
+            out.append('\r');   // 孤立 LF：补 CR，让光标回到行首
+        out.append(c);
+        sawCr = (c == '\r');
+    }
+
+    // 只有最后一个字节是 \r 才需要跨块记住 —— 下一块若以 \n 开头，那是同一个
+    // \r\n 被读取边界拆开了，不能再补 \r。
+    prevWasCr = sawCr;
     return out;
 }
 

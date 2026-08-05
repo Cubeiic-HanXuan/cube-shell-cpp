@@ -50,6 +50,7 @@ struct DeviceEntry {
     QString flowControl = QStringLiteral("none");   // none|hardware|software
     QString newlineMode = QStringLiteral("cr");     // cr|lf|crlf
     bool    localEcho   = false;
+    bool    rxImplicitCr = true;                    // 接收时给孤立的 LF 补 CR（默认开启）
 
     bool isRdp() const { return protocol == QLatin1String("rdp"); }
     bool isSerial() const { return protocol == QLatin1String("serial"); }

@@ -32,6 +32,11 @@ void fillStopBits(QComboBox *combo);
 void fillFlowControl(QComboBox *combo);
 void fillNewlineMode(QComboBox *combo);
 
+// 端口名：可编辑下拉框既可能是「选中列表里的某一项」，也可能是用户手输的
+// 设备路径（虚拟串口 /dev/ttys004 之类不会被 QSerialPortInfo 枚举到）。
+// 两种情形取值来源不同，判定逻辑收敛在这里，各调用点一律走这个函数。
+QString portNameOf(const QComboBox *combo);
+
 // 按 currentData() 取值（缺省值用于下拉框为空/数据非法时兜底）。
 qint32 baudRateOf(const QComboBox *combo);
 QSerialPort::DataBits dataBitsOf(const QComboBox *combo);
@@ -83,6 +88,7 @@ private:
     QComboBox *m_flow = nullptr;
     QComboBox *m_newline = nullptr;
     QCheckBox *m_localEcho = nullptr;
+    QCheckBox *m_rxImplicitCr = nullptr;
 };
 
 } // namespace cubeshell

@@ -110,6 +110,11 @@ public:
     // 对应C++: virtual void clearEntireScreen() =0
     virtual void clearEntireScreen() = 0;
 
+    // 把光标移回左上角(0,0)。
+    // 刻意与 clearEntireScreen() 分开:VT 的 ED(ESC[2J) 只擦内容不动光标,
+    // 而 UI 上的"清屏"动作两件事都要做。cube-shell 扩展,上游 Konsole 无此方法。
+    virtual void home() = 0;
+
     // Resets the state of the terminal.
     // 对应C++: virtual void reset() =0
     virtual void reset() = 0;

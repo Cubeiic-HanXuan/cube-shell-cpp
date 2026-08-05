@@ -9,19 +9,100 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QMessageBox>
+#include <QAbstractItemView>
+#include <QSizePolicy>
 #include <QPushButton>
+#include <QStyle>
+#include <QStyleOptionComboBox>
 #include <QVBoxLayout>
 
 namespace cubeshell {
 
 namespace serialcombo {
 
+namespace {
+
+// 可编辑下拉框判定「当前文本是不是用户手输的」。
+//
+// 关键点：QComboBox 可编辑时，用户在输入框里打字**不会**改动 currentIndex，
+// 它仍停在上一次选中的那一项上。于是 currentData() 返回的是那一项的值，
+// 而不是用户刚输入的内容 —— 直接用 currentData() 会把手输值悄悄丢掉。
+// 由于本模块的端口下拉框显示文本（"cu.usbserial-0001 — CP2102"）与 userData
+// （"cu.usbserial-0001"）刻意不同，这个坑不会自己暴露成空值。
+// 判据：当前文本若已不等于该项的显示文本，就是手输。
+bool isCustomText(const QComboBox *combo)
+{
+    const int idx = combo->currentIndex();
+    return idx < 0
+        || combo->itemText(idx).trimmed() != combo->currentText().trimmed();
+}
+
+// 让下拉框宽到能完整显示**最宽的一项**，而不只是当前选中项。
+//
+// 两个叠加的原因让这些框显示不全：
+//  1. QComboBox 默认的 sizeHint 只按当前项算宽度。"校验"选中"无 (N)"时框就
+//     照"无 (N)"定宽，而列表里的"恒1 (M)"更宽，展开后被省略号截断。
+//  2. 主题 QSS 给 QComboBox 设了 padding 和 drop-down 负 margin，
+//     style()->sizeFromContents 算出的宽度正好卡在文本宽度上（实测文本区
+//     与最宽文本同为 40px / 64px，一点余量都没有）。字体、DPI 稍有差异就露馅。
+//
+// shrinkable=true 用于端口下拉框：端口名可以很长
+//（"tty.Bluetooth-Incoming-Port"），按最宽项定死会把整条工具栏撑到分栏放不下。
+// 这类框只放宽弹出列表，输入框本身允许被压缩——反正展开时看得全。
+void fitToWidestItem(QComboBox *combo, bool shrinkable = false)
+{
+    if (!combo || combo->count() == 0)
+        return;
+    const QFontMetrics fm(combo->fontMetrics());
+    int textWidth = 0;
+    for (int i = 0; i < combo->count(); ++i) {
+        // horizontalAdvance 与省略号判定用的是同一套度量，别用 boundingRect。
+        textWidth = qMax(textWidth, fm.horizontalAdvance(combo->itemText(i)));
+    }
+    // 一个 'M' 的宽度作余量，吸收 QSS padding 与字体度量的误差。
+    textWidth += fm.horizontalAdvance(QLatin1Char('M'));
+
+    QStyleOptionComboBox opt;
+    opt.initFrom(combo);
+    opt.editable = combo->isEditable();
+    const int full = combo->style()
+                         ->sizeFromContents(QStyle::CT_ComboBox, &opt,
+                                            QSize(textWidth, fm.height()), combo)
+                         .width();
+
+    // 弹出列表宽度独立于输入框，长名字/长描述在展开时始终看得全。
+    if (QAbstractItemView *view = combo->view())
+        view->setMinimumWidth(full);
+
+    if (shrinkable) {
+        // 给个够用的下限（约 16 个字符），再窄就真的没法认了。
+        const int floorW = qMin(full, fm.horizontalAdvance(QLatin1Char('0')) * 16);
+        combo->setMinimumWidth(floorW);
+        combo->setSizePolicy(QSizePolicy::Expanding, combo->sizePolicy().verticalPolicy());
+    } else {
+        combo->setMinimumWidth(full);
+    }
+}
+
+} // namespace
+
+QString portNameOf(const QComboBox *combo)
+{
+    if (!combo)
+        return QString();
+    const QString text = combo->currentText().trimmed();
+    if (isCustomText(combo))
+        return text;   // 用户手输的设备路径，原样返回
+    // 选中的是列表项：取 userData 里的纯端口名（显示文本还带着描述后缀）。
+    // "(未检测到串口)" 占位项的 data 是空的，返回空串交给调用方校验拦截。
+    return combo->itemData(combo->currentIndex()).toString();
+}
+
 void fillPorts(QComboBox *combo, const QString &preferred)
 {
     if (!combo)
         return;
-    const QString keep = preferred.isEmpty() ? combo->currentData().toString()
-                                             : preferred;
+    const QString keep = preferred.isEmpty() ? portNameOf(combo) : preferred;
     combo->clear();
     const auto ports = SerialClient::availablePorts();
     for (const SerialPortDesc &p : ports)
@@ -39,6 +120,7 @@ void fillPorts(QComboBox *combo, const QString &preferred)
         else if (combo->isEditable())
             combo->setCurrentText(keep);   // 端口暂时不在（未插入），保留用户的选择
     }
+    fitToWidestItem(combo, /*shrinkable=*/true);
 }
 
 void fillBaudRates(QComboBox *combo)
@@ -50,6 +132,7 @@ void fillBaudRates(QComboBox *combo)
     for (qint32 r : rates)
         combo->addItem(QString::number(r), r);
     combo->setCurrentIndex(combo->findData(115200));
+    fitToWidestItem(combo);
 }
 
 void fillDataBits(QComboBox *combo)
@@ -61,6 +144,7 @@ void fillDataBits(QComboBox *combo)
     combo->addItem(QStringLiteral("7"), int(QSerialPort::Data7));
     combo->addItem(QStringLiteral("8"), int(QSerialPort::Data8));
     combo->setCurrentIndex(combo->findData(int(QSerialPort::Data8)));
+    fitToWidestItem(combo);
 }
 
 void fillParity(QComboBox *combo)
@@ -73,6 +157,7 @@ void fillParity(QComboBox *combo)
     combo->addItem(QObject::tr("恒1 (M)"),  int(QSerialPort::MarkParity));
     combo->addItem(QObject::tr("恒0 (S)"),  int(QSerialPort::SpaceParity));
     combo->setCurrentIndex(combo->findData(int(QSerialPort::NoParity)));
+    fitToWidestItem(combo);
 }
 
 void fillStopBits(QComboBox *combo)
@@ -83,6 +168,7 @@ void fillStopBits(QComboBox *combo)
     combo->addItem(QStringLiteral("1.5"), int(QSerialPort::OneAndHalfStop));
     combo->addItem(QStringLiteral("2"),   int(QSerialPort::TwoStop));
     combo->setCurrentIndex(combo->findData(int(QSerialPort::OneStop)));
+    fitToWidestItem(combo);
 }
 
 void fillFlowControl(QComboBox *combo)
@@ -93,6 +179,7 @@ void fillFlowControl(QComboBox *combo)
     combo->addItem(QObject::tr("硬件 RTS/CTS"), int(QSerialPort::HardwareControl));
     combo->addItem(QObject::tr("软件 XON/XOFF"), int(QSerialPort::SoftwareControl));
     combo->setCurrentIndex(combo->findData(int(QSerialPort::NoFlowControl)));
+    fitToWidestItem(combo);
 }
 
 void fillNewlineMode(QComboBox *combo)
@@ -103,17 +190,21 @@ void fillNewlineMode(QComboBox *combo)
     combo->addItem(QStringLiteral("LF (\\n)"),     int(SerialSettings::NewlineMode::Lf));
     combo->addItem(QStringLiteral("CRLF (\\r\\n)"), int(SerialSettings::NewlineMode::CrLf));
     combo->setCurrentIndex(combo->findData(int(SerialSettings::NewlineMode::Cr)));
+    fitToWidestItem(combo);
 }
 
 qint32 baudRateOf(const QComboBox *combo)
 {
     if (!combo)
         return 115200;
-    // 可编辑下拉框：用户手输的波特率没有 userData，回退到解析文本。
+    // 同 portNameOf：可编辑下拉框手输时 currentIndex 不动，currentData() 仍是
+    // 上一次选中项的值，非标准波特率（31250 等）会被悄悄改回选中项。
     bool ok = false;
-    const qint32 fromData = combo->currentData().toInt(&ok);
-    if (ok && fromData > 0)
-        return fromData;
+    if (!isCustomText(combo)) {
+        const qint32 fromData = combo->currentData().toInt(&ok);
+        if (ok && fromData > 0)
+            return fromData;
+    }
     const qint32 fromText = combo->currentText().trimmed().toInt(&ok);
     return (ok && fromText > 0) ? fromText : 115200;
 }
@@ -269,6 +360,7 @@ SerialSettings serialSettingsFromDevice(const DeviceEntry &device)
     s.flowControl = serialcombo::flowControlFromString(device.flowControl);
     s.newlineMode = serialcombo::newlineModeFromString(device.newlineMode);
     s.localEcho   = device.localEcho;
+    s.rxImplicitCr = device.rxImplicitCr;
     return s;
 }
 
@@ -309,6 +401,8 @@ SerialConnectDialog::SerialConnectDialog(QWidget *parent)
     serialcombo::fillNewlineMode(m_newline);
 
     m_localEcho = new QCheckBox(tr("本地回显（设备不回显输入时勾选）"), this);
+    m_rxImplicitCr = new QCheckBox(tr("接收时给孤立的 LF 补 CR（设备发裸 \\n 时勾选）"), this);
+    m_rxImplicitCr->setChecked(true);
 
     auto *form = new QFormLayout;
     form->addRow(tr("串口设备："), portRow);
@@ -317,8 +411,11 @@ SerialConnectDialog::SerialConnectDialog(QWidget *parent)
     form->addRow(tr("校验位："),   m_parity);
     form->addRow(tr("停止位："),   m_stopBits);
     form->addRow(tr("流控："),     m_flow);
-    form->addRow(tr("换行符："),   m_newline);
+    // 标签写明"发送"：这个下拉框只管发出去的字节，接收方向由下面的复选框负责。
+    // 详见 serial_terminal_widget.cpp 里同一处的说明。
+    form->addRow(tr("发送换行符："), m_newline);
     form->addRow(QString(), m_localEcho);
+    form->addRow(QString(), m_rxImplicitCr);
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -342,9 +439,7 @@ void SerialConnectDialog::onRefreshPorts()
 SerialSettings SerialConnectDialog::settings() const
 {
     SerialSettings s;
-    // 可编辑下拉框：手输时 currentData() 是空的，回退到文本。
-    const QString fromData = m_port->currentData().toString();
-    s.portName    = fromData.isEmpty() ? m_port->currentText().trimmed() : fromData;
+    s.portName    = serialcombo::portNameOf(m_port);
     s.baudRate    = serialcombo::baudRateOf(m_baud);
     s.dataBits    = serialcombo::dataBitsOf(m_dataBits);
     s.parity      = serialcombo::parityOf(m_parity);
@@ -352,6 +447,7 @@ SerialSettings SerialConnectDialog::settings() const
     s.flowControl = serialcombo::flowControlOf(m_flow);
     s.newlineMode = serialcombo::newlineModeOf(m_newline);
     s.localEcho   = m_localEcho->isChecked();
+    s.rxImplicitCr = m_rxImplicitCr->isChecked();
     return s;
 }
 
@@ -365,6 +461,7 @@ void SerialConnectDialog::setSettings(const SerialSettings &s)
     serialcombo::selectData(m_flow,     int(s.flowControl));
     serialcombo::selectData(m_newline,  int(s.newlineMode));
     m_localEcho->setChecked(s.localEcho);
+    m_rxImplicitCr->setChecked(s.rxImplicitCr);
 }
 
 void SerialConnectDialog::accept()

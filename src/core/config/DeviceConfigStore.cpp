@@ -171,6 +171,7 @@ bool DeviceConfigStore::saveJson(const QString &jsonPath, QString *errorOut) con
         o[QStringLiteral("flowControl")] = e.flowControl;
         o[QStringLiteral("newlineMode")] = e.newlineMode;
         o[QStringLiteral("localEcho")]   = e.localEcho;
+        o[QStringLiteral("rxImplicitCr")] = e.rxImplicitCr;
         arr.append(o);
     }
 
@@ -230,6 +231,9 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         const QString newline = o[QStringLiteral("newlineMode")].toString();
         e.newlineMode = newline.isEmpty() ? QStringLiteral("cr") : newline;
         e.localEcho = o[QStringLiteral("localEcho")].toBool(false);
+        // 默认 true：本键是后加的，旧配置文件里没有。缺键时回落成 false 会让
+        // 已保存的串口设备表现得和新建的不一样（阶梯输出），故回落成开启。
+        e.rxImplicitCr = o[QStringLiteral("rxImplicitCr")].toBool(true);
         if (!e.name.isEmpty())
             m_devices.insert(e.name, e);
     }

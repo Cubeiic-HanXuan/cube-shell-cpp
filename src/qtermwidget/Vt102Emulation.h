@@ -137,6 +137,9 @@ public:
     // --- reimplemented from Emulation ------------------------------------
     // 对应C++: void clearEntireScreen() override
     void clearEntireScreen() override;
+
+    // 光标归位（cube-shell 扩展，供 UI 的"清屏"按钮用）。见 Emulation.h。
+    void home() override;
     // 对应C++: void reset() override
     void reset() override;
     // 对应C++: char eraseChar() const override

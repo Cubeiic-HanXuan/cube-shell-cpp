@@ -966,6 +966,12 @@ void QTermWidget::clear()
     // 对应 Python clear()。清屏并移动光标到 home,再清空历史。
     if (Emulation *emulation = m_impl->m_session->emulation()) {
         emulation->clearEntireScreen();
+        // clearEntireScreen() 只擦内容不动光标 —— 这是 VT 的 ED(ESC[2J) 语义,
+        // 必须保持,否则 ESC[2J 后跟 ESC[H 的程序会被清屏挪走光标而画错。
+        // 但"清屏"按钮是 UI 动作,用户期望光标回到左上角。串口终端尤其明显:
+        // 对端是裸设备,不会像 shell 那样重画提示符把光标带回去,
+        // 光标会一直停在原来的行列上。故在此单独补一次 home。
+        emulation->home();
     }
 
 #ifdef Q_OS_WIN

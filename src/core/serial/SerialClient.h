@@ -39,6 +39,24 @@ struct SerialSettings {
     enum class NewlineMode { Cr, Lf, CrLf };
     NewlineMode newlineMode = NewlineMode::Cr;
 
+    // 接收时给孤立的 LF 补一个 CR（对应 PuTTY 的 "Implicit CR in every LF"、
+    // minicom 的 "Add carriage return"、Tera Term 的 Receive: CR+LF）。
+    //
+    // 为什么需要：VT 规范里 LF 只下移一行、不回行首（回行首是 CR 的职责），
+    // 所以对端发裸 \n 时屏幕上会出现阶梯状输出——
+    //     line two
+    //             line two
+    //                     line two
+    // SSH 里见不到这个现象，因为 pty 的行规程（termios ONLCR）已经在内核里
+    // 把 \n 展开成 \r\n 了；串口对面是裸设备，没人做这个转换。
+    //
+    // 默认 true：串口的典型对端（单片机、路由器 Console、AT 指令模组）发裸 LF
+    // 是常态，默认关掉会让每个新用户都先撞一次阶梯。需要观察原始行为时可关闭。
+    //
+    // 注意这与 newlineMode 是两个独立方向：newlineMode 管发出去的字节，
+    // 本项管收进来的字节，互不影响。
+    bool rxImplicitCr = true;
+
     // 本地回显。串口设备（尤其无 shell 的裸机固件）通常不回显输入，
     // 关掉这个会出现"打字看不见"的假死感。
     bool localEcho = false;
@@ -121,6 +139,9 @@ private:
 
     QTimer *m_pollTimer = nullptr;
     QStringList m_knownPorts;   // 上一次轮询的端口名快照
+    // 当前端口在 open() 时是否出现在 QSerialPortInfo 的枚举里。
+    // 只有枚举得到的端口才能用"从枚举中消失"判定拔出，详见 pollPorts()。
+    bool m_portEnumerated = false;
 
     QFile *m_logFile = nullptr;
 };

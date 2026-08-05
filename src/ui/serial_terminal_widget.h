@@ -56,6 +56,7 @@ private slots:
     void onPortsChanged();
     void onNewlineModeChanged();
     void onLocalEchoToggled(bool enabled);
+    void onRxImplicitCrToggled(bool enabled);
     void onLogToggled(bool enabled);
     void onClearClicked();
 
@@ -75,6 +76,7 @@ private:
     QComboBox *m_flow = nullptr;
     QComboBox *m_newline = nullptr;
     QCheckBox *m_localEcho = nullptr;
+    QCheckBox *m_rxImplicitCr = nullptr;
     QCheckBox *m_logging = nullptr;
     QPushButton *m_connectButton = nullptr;
     QPushButton *m_disconnectButton = nullptr;

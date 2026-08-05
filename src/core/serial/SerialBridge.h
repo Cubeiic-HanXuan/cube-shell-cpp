@@ -34,11 +34,13 @@ public:
     void start();
     void stop();
 
-    // 换行模式 / 本地回显是随时可改的终端行为，不需要重开串口。
+    // 换行模式 / 本地回显 / 接收时补 CR 都是随时可改的终端行为，不需要重开串口。
     void setNewlineMode(SerialSettings::NewlineMode mode) { m_newlineMode = mode; }
     SerialSettings::NewlineMode newlineMode() const { return m_newlineMode; }
     void setLocalEcho(bool enabled) { m_localEcho = enabled; }
     bool localEcho() const { return m_localEcho; }
+    void setRxImplicitCr(bool enabled) { m_rxImplicitCr = enabled; }
+    bool rxImplicitCr() const { return m_rxImplicitCr; }
 
     // 把一段文本当作用户输入发出去（含换行转换）。供"发送字符串"类功能复用。
     void sendText(const QString &text);
@@ -47,6 +49,14 @@ public:
     // 静态纯函数，便于单测（见 tests/serial_test.cpp）。
     static QByteArray applyNewlineMode(const QByteArray &input,
                                        SerialSettings::NewlineMode mode);
+
+    // 接收方向：给孤立的 LF 补上 CR，已经是 \r\n 的不动。
+    //
+    // prevWasCr 是**跨调用的状态**，必须由调用方持有并原样传回来：串口的
+    // \r 和 \n 完全可能被拆到两次 readyRead 里（尤其低波特率或大块数据），
+    // 若每次调用都从零开始判断，边界上的 \n 会被误当成孤立 LF 而多补一个 \r，
+    // 屏幕上就多出一个空行。函数返回前会把它更新为「本块最后一个字节是否为 \r」。
+    static QByteArray applyRxImplicitCr(const QByteArray &input, bool &prevWasCr);
 
 signals:
     // 供面板把字节回灌到终端（本地回显走这条路，与串口来的数据同一入口）。
@@ -64,6 +74,8 @@ private:
 
     SerialSettings::NewlineMode m_newlineMode = SerialSettings::NewlineMode::Cr;
     bool m_localEcho = false;
+    bool m_rxImplicitCr = true;   // 默认打开，避免每个新用户都先撞一次阶梯
+    bool m_prevWasCr = false;     // 跨 readyRead 的边界状态：上一块最后一字节是否为 \r
     bool m_running = false;
 };
 

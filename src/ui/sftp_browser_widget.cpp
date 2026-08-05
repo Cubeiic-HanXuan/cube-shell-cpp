@@ -13,6 +13,7 @@
 #include <QHeaderView>
 #include <QIcon>
 #include <QInputDialog>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -387,6 +388,21 @@ QString SftpBrowserWidget::selectedRemotePath() const
     return item->data(0, kPathRole).toString();
 }
 
+// 批量选中项的远端路径。对应本地侧 LocalFileBrowserWidget::selectedPaths。
+QStringList SftpBrowserWidget::selectedRemotePaths() const
+{
+    QStringList paths;
+    const QList<QTreeWidgetItem *> items = m_tree->selectedItems();
+    for (QTreeWidgetItem *item : items) {
+        if (item->data(0, kIsUpRole).toBool())
+            continue;
+        const QString p = item->data(0, kPathRole).toString();
+        if (!p.isEmpty())
+            paths.append(p);
+    }
+    return paths;
+}
+
 void SftpBrowserWidget::mkdir()
 {
     bool ok = false;
@@ -403,21 +419,42 @@ void SftpBrowserWidget::mkdir()
         QMessageBox::warning(this, tr("创建文件夹"), err.message);
 }
 
+// 删除：支持批量（多选时逐个递归删除）。对应Python: remove（批量 + 确认框）
 void SftpBrowserWidget::removeSelected()
 {
-    const QString path = selectedRemotePath();
-    if (path.isEmpty())
+    const QStringList paths = selectedRemotePaths();
+    if (paths.isEmpty())
         return;
-    if (QMessageBox::question(this, tr("删除"), tr("确定要递归删除 %1 吗？").arg(path)) != QMessageBox::Yes)
+    // 单项沿用原文案（含完整路径），多项时给出数量与文件名清单。
+    QString prompt;
+    if (paths.size() == 1) {
+        prompt = tr("确定要递归删除 %1 吗？").arg(paths.first());
+    } else {
+        QStringList names;
+        for (const QString &p : paths)
+            names.append(p.section(QLatin1Char('/'), -1));
+        prompt = tr("确定要递归删除选中的 %1 项吗？\n\n%2")
+                     .arg(paths.size())
+                     .arg(names.join(QLatin1Char('\n')));
+    }
+    if (QMessageBox::question(this, tr("删除"), prompt) != QMessageBox::Yes)
         return;
     SftpClient *sftp = m_sftp;
-    QThread *worker = QThread::create([sftp, path]() {
-        SshError err;
-        const bool ok = sftp->removeRecursive(path, &err);
-        QMetaObject::invokeMethod(sftp, [sftp, ok, err]() {
-            if (!ok)
-                emit sftp->operationFailed(QStringLiteral("remove"), QString(), err.message);
-        }, Qt::QueuedConnection);
+    // 整批在同一 worker 里顺序删除：SftpClient 内部串行化 libssh2，
+    // 并发多线程删除无收益且会争锁。失败项收集后一次性汇报。
+    QThread *worker = QThread::create([sftp, paths]() {
+        QStringList failed;
+        for (const QString &path : paths) {
+            SshError err;
+            if (!sftp->removeRecursive(path, &err))
+                failed.append(path.section(QLatin1Char('/'), -1));
+        }
+        if (!failed.isEmpty()) {
+            const QString msg = failed.join(QStringLiteral(", "));
+            QMetaObject::invokeMethod(sftp, [sftp, msg]() {
+                emit sftp->operationFailed(QStringLiteral("remove"), QString(), msg);
+            }, Qt::QueuedConnection);
+        }
     });
     connect(worker, &QThread::finished, this, &SftpBrowserWidget::refresh);
     startWorker(worker);
@@ -460,8 +497,16 @@ void SftpBrowserWidget::showContextMenu(const QPoint &pos)
 {
     if (!m_sftp)
         return;
-    if (QTreeWidgetItem *item = m_tree->itemAt(pos))
-        m_tree->setCurrentItem(item);
+    // 右键定位当前项，但不能破坏既有多选：setCurrentItem 的单参重载在
+    // ExtendedSelection 下等价于 ClearAndSelect，会把批量选中的文件全部取消。
+    // 点在已选中项上时用 NoUpdate 只移动 current、保留整个选区（与系统文件
+    // 管理器一致）；点在未选中项上才重设选择为该项。
+    if (QTreeWidgetItem *item = m_tree->itemAt(pos)) {
+        if (item->isSelected())
+            m_tree->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
+        else
+            m_tree->setCurrentItem(item);
+    }
 
     QMenu menu(this);
     // 图标与文字的间距样式与 Python 侧一致

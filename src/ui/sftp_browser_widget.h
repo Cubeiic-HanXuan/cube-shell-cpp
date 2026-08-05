@@ -75,6 +75,8 @@ private:
     void startWorker(QThread *worker);
     void populate(const QString &path, const SftpFileInfoList &entries);
     QString selectedRemotePath() const;
+    // 全部选中项的远端路径（已剔除 ".." 条目），供删除等批量操作使用。
+    QStringList selectedRemotePaths() const;
     static QString joinPath(const QString &dir, const QString &name);
 
     SshClient *m_client = nullptr;   // not owned

@@ -15,6 +15,7 @@
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -246,8 +247,16 @@ QStringList LocalFileBrowserWidget::selectedPaths() const
 // 对应Python: cube-shell.py::treeRight elif self.isConnected 分支（is_local）
 void LocalFileBrowserWidget::showContextMenu(const QPoint &pos)
 {
-    if (QTreeWidgetItem *item = m_tree->itemAt(pos))
-        m_tree->setCurrentItem(item);
+    // 右键定位当前项，但不能破坏既有多选：setCurrentItem 的单参重载在
+    // ExtendedSelection 下等价于 ClearAndSelect，会把批量选中的文件全部取消。
+    // 点在已选中项上时用 NoUpdate 只移动 current、保留整个选区（与系统文件
+    // 管理器一致）；点在未选中项上才重设选择为该项。
+    if (QTreeWidgetItem *item = m_tree->itemAt(pos)) {
+        if (item->isSelected())
+            m_tree->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
+        else
+            m_tree->setCurrentItem(item);
+    }
 
     QMenu menu(this);
     // 图标与文字的间距样式与 Python 侧一致

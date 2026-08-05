@@ -37,7 +37,7 @@ concurrency:
 env:
   QT_VERSION: '6.9.1'
   # 应用自身版本号（打包文件名用），与 Qt 版本无关；发版时手动改这里
-  APP_VERSION: '3.0.1'
+  APP_VERSION: '3.1.1'
   VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
 jobs:
@@ -130,49 +130,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 容器内 git 把挂进来的工作区判为「非本用户目录」会拒操作（dubious ownership）。
-      # 必须在任何 vcpkg clone / 子模块读取之前放行；仅容器（Rocky 8）需要。
-      - name: Trust workspace git dir (container)
-        if: matrix.name == 'linux-x86_64'
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      # ------------------------------------------------------------------ Qt
-      # 仅 macOS / Windows 用 install-qt-action；Linux 该 action 官方不支持，走下方 apt。
-      - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.qt_arch }})
-        if: matrix.platform != 'linux'
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          arch: ${{ matrix.qt_arch }}
-          modules: 'qtmultimedia'
-          cache: 'true'
-          cache-key-prefix: 'qt-${{ matrix.name }}'
-
-      # ------------------------------------------------------------- vcpkg
-      # vcpkg 用 manifest 模式（仓库根 vcpkg.json）。缓存 installed 目录避免每次
-      # 全量重编 OpenSSL/FreeRDP（首次约 10–20 分钟，命中缓存后秒级）。
-      - name: Restore vcpkg cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.VCPKG_ROOT }}
-            ${{ github.workspace }}/build/vcpkg_installed
-          key: vcpkg-${{ matrix.name }}-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**', 'vcpkg-ports/**') }}
-          restore-keys: vcpkg-${{ matrix.name }}-
-
-      - name: Bootstrap vcpkg
-        shell: bash
-        run: |
-          if [ ! -x "${VCPKG_ROOT}/vcpkg" ] && [ ! -f "${VCPKG_ROOT}/vcpkg.exe" ]; then
-            rm -rf "${VCPKG_ROOT}"
-            git clone --depth 1 https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"
-            if [ "${{ runner.os }}" = "Windows" ]; then
-              "${VCPKG_ROOT}/bootstrap-vcpkg.bat" -disableMetrics
-            else
-              "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
-            fi
-          fi
-
       # ------------------------------------------- Linux 构建期系统依赖
       # Qt Multimedia(QAudioSource) 需要 ALSA/pulse 头文件；X11/GL/fontconfig 等是
       # Qt GUI 与 vcpkg 构建 FreeRDP 的常规依赖。
@@ -217,6 +174,50 @@ jobs:
               libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev \
               libxcb-util-dev libxcb-xinerama0-dev libxcb-xkb-dev \
               bison flex gperf python3
+          fi
+
+      # 容器内 git 把挂进来的工作区判为「非本用户目录」会拒操作（dubious ownership）。
+      # 必须在任何 vcpkg clone / 子模块读取之前放行；仅容器（Rocky 8）需要。
+      # 注意：此步骤必须在安装 git 之后执行（上面的 dnf install 包含 git）。
+      - name: Trust workspace git dir (container)
+        if: matrix.name == 'linux-x86_64'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # ------------------------------------------------------------------ Qt
+      # 仅 macOS / Windows 用 install-qt-action；Linux 该 action 官方不支持，走下方 aqt。
+      - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.qt_arch }})
+        if: matrix.platform != 'linux'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ matrix.qt_arch }}
+          modules: 'qtmultimedia'
+          cache: 'true'
+          cache-key-prefix: 'qt-${{ matrix.name }}'
+
+      # ------------------------------------------------------------- vcpkg
+      # vcpkg 用 manifest 模式（仓库根 vcpkg.json）。缓存 installed 目录避免每次
+      # 全量重编 OpenSSL/FreeRDP（首次约 10–20 分钟，命中缓存后秒级）。
+      - name: Restore vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}
+            ${{ github.workspace }}/build/vcpkg_installed
+          key: vcpkg-${{ matrix.name }}-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**', 'vcpkg-ports/**') }}
+          restore-keys: vcpkg-${{ matrix.name }}-
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: |
+          if [ ! -x "${VCPKG_ROOT}/vcpkg" ] && [ ! -f "${VCPKG_ROOT}/vcpkg.exe" ]; then
+            rm -rf "${VCPKG_ROOT}"
+            git clone --depth 1 https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              "${VCPKG_ROOT}/bootstrap-vcpkg.bat" -disableMetrics
+            else
+              "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+            fi
           fi
 
       # Linux 需要新版 CMake（≥3.27）：vcpkg master 的脚本 z_vcpkg_spdx.cmake 用到

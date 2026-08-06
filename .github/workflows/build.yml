@@ -7,9 +7,11 @@
 #   Linux   : x86_64 (ubuntu-22.04)          + ARM64 (ubuntu-22.04-arm)，apt 系统 Qt6
 #             （用 22.04 而非最新版：链接更低版本 glibc，兼容更多旧发行版）
 #
-# 依赖：Qt6.9（install-qt-action，含 qtmultimedia）+ vcpkg manifest（vcpkg.json
-# 已含 freerdp/cjson/openssl/libssh2/yaml-cpp/zlib）。RDP 全平台开启
-# （-DCUBESHELL_WITH_RDP=ON）。
+# 依赖：Qt6.9（install-qt-action / aqt，含 qtmultimedia + qtserialport）+ vcpkg manifest
+#（vcpkg.json 只装第三方库：libssh2/openssl/yaml-cpp/zlib/freerdp/cjson；Qt 自身的
+#  SerialPort/Multimedia 模块一律走 Qt 安装，【不要】放进 vcpkg——否则 vcpkg 会去
+#  源码重编整套 qtbase，拖入 libpq/libb2 等 autotools 依赖链导致构建失败）。
+# RDP 全平台开启（-DCUBESHELL_WITH_RDP=ON）。
 #
 # Windows ARM64 关键：必须带 vcpkg overlay 三参数（vcpkg-triplets / vcpkg-ports），
 # 修复 OpenSSL ARM64 Release 被 MSVC 误编译导致 RDP TLS 握手崩溃——这两个 overlay
@@ -84,9 +86,9 @@ jobs:
             vs_arch: x64
             overlay: 'false'            # x64 无需 OpenSSL ARM64 overlay
 
-           # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
-           # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
-           # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
+          # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，必须用带 VS2026 的
+          # windows-11-vs2026-arm（public preview，CMake 4.3.3，支持 VS18 generator）。
+          # triplet 用 -static-md（动态 CRT）与 Qt 预编译包(/MD)对齐，否则 LNK2038。
           - name: windows-arm64
             os: windows-11-vs2026-arm
             platform: windows
@@ -127,61 +129,8 @@ jobs:
             vcpkg_triplet: arm64-linux
 
     steps:
-      # rockylinux:8 基础镜像不带 git，而 actions/checkout 没有 git 时会退化成
-      # 「REST 下载 tarball」——工作区里不会有 .git 目录，后续任何 git 操作
-      # （safe.directory、版本探测、vcpkg clone 前的环境检查）都会失败。
-      # 故必须在 Checkout【之前】把 git 装好，这是容器 job 的第一步。
-      - name: Install git in container (pre-checkout)
-        if: matrix.container != ''
-        run: |
-          set -e
-          if command -v git >/dev/null 2>&1; then
-            echo "git 已存在：$(git --version)"
-          elif command -v dnf >/dev/null 2>&1; then
-            dnf install -y git
-          elif command -v yum >/dev/null 2>&1; then
-            yum install -y git
-          elif command -v apt-get >/dev/null 2>&1; then
-            apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-          else
-            echo "ERROR: 容器内没有可用的包管理器来安装 git" >&2
-            exit 1
-          fi
-          git --version
-
       - name: Checkout
         uses: actions/checkout@v4
-
-      # 容器内 git 把挂进来的工作区判为「非本用户目录」会拒操作（dubious ownership）。
-      # 必须在任何 vcpkg clone / 子模块读取之前放行；仅容器（Rocky 8）需要。
-      # git 由上面 pre-checkout 步骤保证已安装。
-      - name: Trust workspace git dir (container)
-        if: matrix.container != ''
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      # ------------------------------------------- macOS 构建期系统依赖
-      # 1) autoconf/autoconf-archive/automake/libtool：vcpkg 里走 autotools 的端口
-      #    （libb2 等，由 Qt/FreeRDP 依赖链间接引入）在 configure 前要跑 autoreconf，
-      #    缺任一个都会在 vcpkg_make_configure 阶段直接 BUILD_FAILED。
-      #    macOS runner 默认不带这套 GNU autotools，必须显式装。
-      # 2) ninja：下面 Configure 用 -G Ninja，macOS runner 默认没有 ninja 可执行文件
-      #    （Linux 侧由 pip 装，Windows 走 VS generator 不需要）。
-      # 已预装的包 brew install 会返回非零，故用 || true 容错，避免 set -e 中断。
-      - name: Install macOS build dependencies
-        if: matrix.platform == 'macos'
-        run: |
-          set -e
-          brew install autoconf autoconf-archive automake libtool ninja || true
-          # 校验：这几个是硬依赖，装不上就早失败并给出清晰信息，
-          # 不要拖到 vcpkg 构建到一半才以晦涩的 autoreconf 错误暴露。
-          for t in autoconf automake libtool ninja; do
-            command -v "$t" >/dev/null || { echo "ERROR: $t 未安装成功" >&2; exit 1; }
-          done
-          # autoconf-archive 不提供同名可执行文件，改查它安装的 m4 宏目录。
-          brew --prefix autoconf-archive >/dev/null || {
-            echo "ERROR: autoconf-archive 未安装成功" >&2; exit 1; }
-          autoconf --version | head -n1
-          ninja --version
 
       # ------------------------------------------- Linux 构建期系统依赖
       # Qt Multimedia(QAudioSource) 需要 ALSA/pulse 头文件；X11/GL/fontconfig 等是
@@ -229,6 +178,13 @@ jobs:
               bison flex gperf python3
           fi
 
+      # 容器内 git 把挂进来的工作区判为「非本用户目录」会拒操作（dubious ownership）。
+      # 必须在任何 vcpkg clone / 子模块读取之前放行；仅容器（Rocky 8）需要。
+      # 注意：此步骤必须在安装 git 之后执行（上面的 dnf install 包含 git）。
+      - name: Trust workspace git dir (container)
+        if: matrix.name == 'linux-x86_64'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       # ------------------------------------------------------------------ Qt
       # 仅 macOS / Windows 用 install-qt-action；Linux 该 action 官方不支持，走下方 aqt。
       - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.qt_arch }})
@@ -237,7 +193,7 @@ jobs:
         with:
           version: ${{ env.QT_VERSION }}
           arch: ${{ matrix.qt_arch }}
-          modules: 'qtmultimedia'
+          modules: 'qtmultimedia qtserialport'
           cache: 'true'
           cache-key-prefix: 'qt-${{ matrix.name }}'
 
@@ -314,7 +270,7 @@ jobs:
           "$HOME/aqtenv/bin/aqt" install-qt ${{ matrix.aqt_host }} desktop ${{ env.QT_VERSION }} \
             ${{ matrix.aqt_arch }} \
             --outputdir "$HOME/Qt" \
-            --modules qtmultimedia
+            --modules qtmultimedia qtserialport
 
           # aqt 在不同架构下落地子目录名可能不同（x86_64 多为 <ver>/gcc_64，
           # ARM64 未必是 linux_gcc_arm64）。不硬编码路径，改为按 Qt6Config.cmake
@@ -344,6 +300,12 @@ jobs:
             exit 1
           fi
           echo "Qt6Multimedia OK: $QTDIR/lib/cmake/Qt6Multimedia"
+          # 校验 QtSerialPort 模块（串口功能模块；vcpkg.json 已移除 qtserialport，改由 Qt 提供）
+          if [ ! -f "$QTDIR/lib/cmake/Qt6SerialPort/Qt6SerialPortConfig.cmake" ]; then
+            echo "ERROR: Qt6SerialPortConfig.cmake 缺失，qtserialport 未正确安装" >&2
+            exit 1
+          fi
+          echo "Qt6SerialPort OK: $QTDIR/lib/cmake/Qt6SerialPort"
 
       # ------------------------------------------------------- Configure
       # Windows 用 Visual Studio generator（overlay 文档基于此验证，-A 指定架构）；

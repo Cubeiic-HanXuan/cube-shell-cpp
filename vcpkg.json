@@ -7,8 +7,7 @@
     "yaml-cpp",
     "zlib",
     "freerdp",
-    "cjson",
-    "qtserialport"
+    "cjson"
   ],
   "builtin-baseline": "39344dff01c5a5a0134caf2624cdd492f05d30ea"
 }

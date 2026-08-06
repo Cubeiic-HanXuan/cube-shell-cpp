@@ -119,15 +119,46 @@ private:
     void nextTab();
     void prevTab();
     void showTabContextMenu(QTabWidget *tabs, const QPoint &pos);
-    // 把 tabs 里 index 处的标签移到另一侧分屏（orientation 决定水平/垂直）。
+    // 把 tabs 里 index 处的标签拆到一个新建的相邻分屏（orientation 决定水平/垂直）。
+    // 多分屏：每次调用都新建一个 pane，而非在固定的第二个 pane 之间来回搬。
     void splitTab(QTabWidget *source, int index, Qt::Orientation orientation);
-    void updateSecondPaneVisibility();
+    // 新建一个 TerminalTabWidget 并接好全部信号（分屏的构造入口）。
+    TerminalTabWidget *createPane();
+    // 在 source 所在的 splitter 中，于 source 之后插入 pane。
+    // 若该 splitter 方向与 orientation 不符且不止一个子控件，则把 source
+    // 就地替换为一个新的子 splitter（嵌套），实现任意方向的自由分屏。
+    void insertPaneNextTo(QTabWidget *source, TerminalTabWidget *pane,
+                          Qt::Orientation orientation);
+    // 移除空 pane（首个 pane 常驻），并折叠只剩一个子控件的中间 splitter。
+    void pruneEmptyPanes();
+    // 把 splitter 的子控件尺寸重新均分。
+    static void equalizeSplitter(QSplitter *splitter);
+    // 焦点/激活 pane 管理：activeTabWidget 返回最后获得焦点的 pane。
     QTabWidget *activeTabWidget() const;
+    void setActivePane(TerminalTabWidget *pane);
+    // 焦点在分屏之间循环切换（Ctrl+Alt+方向 / 菜单）。
+    void focusNextPane(int delta);
+    // 全部分屏合并回第一个 pane。
+    void mergeAllPanes();
+    // 遍历所有 pane（替代原先写死的 {m_tabs, m_tabs2} 循环）。
+    QList<QTabWidget *> allPanes() const;
+    // 查找持有 page 的 pane，找不到返回 nullptr。
+    QTabWidget *paneOf(QWidget *page) const;
+    // 新标签页的落点：当前活动 pane（无则首个 pane）。
+    TerminalTabWidget *targetPane() const;
     void updateTerminalInfo();
 
     // --- 左侧文件浏览器（设备列表下方，随当前标签切换） ---
     // 对应Python: 连接后左侧 treeWidget 展示 SFTP/本地文件目录
-    void updateLeftPanel();
+    void updateLeftPanel(QTabWidget *pane = nullptr);
+    // 刷新文件浏览器标题栏：显示浏览器归属的“分屏 N · 标签名”。
+    // 多分屏下左栏被所有分屏共享，不标明归属时无法分辨当前看的是谁的目录。
+    void updateBrowserTitle(QTabWidget *pane, QWidget *page);
+    // 给活动分屏的标签栏加高亮边框，非活动分屏淡化 —— 与标题栏配合，
+    // 让“哪个分屏是当前焦点”一眼可见。
+    void updatePaneHighlight();
+    // pane 在 m_panes 中的序号（从 1 开始，用于界面展示）；找不到返回 0。
+    int paneNumber(QTabWidget *pane) const;
     // follow_folder 勾选时把当前浏览器同步到终端 cwd。
     // 对应Python: _on_follow_folder_changed → refreshDirs
     void syncBrowserToTerminalCwd();
@@ -223,10 +254,11 @@ private:
     QSplitter *m_splitter = nullptr;       // 左栏 | 终端区
     QSplitter *m_leftSplitter = nullptr;   // 左栏：设备列表 / 文件浏览器（上下）
     QStackedWidget *m_browserStack = nullptr; // 每个会话 Tab 一页文件浏览器
-    QSplitter *m_termSplitter = nullptr;   // 分屏：主标签页 | 副标签页
+    QLabel *m_browserTitle = nullptr;      // 文件浏览器标题栏（显示对应的分屏+标签）
+    QSplitter *m_termSplitter = nullptr;   // 顶层分屏容器（可嵌套子 splitter 实现多方向分屏）
     DeviceListWidget *m_deviceList = nullptr;
-    TerminalTabWidget *m_tabs = nullptr;   // 主标签页
-    TerminalTabWidget *m_tabs2 = nullptr;  // 分屏副标签页（默认隐藏）
+    QList<TerminalTabWidget *> m_panes;    // 全部分屏面板（首个常驻，其余按需创建/销毁）
+    QPointer<TerminalTabWidget> m_activePane; // 最后获得焦点的 pane
     QWidget *m_homePage = nullptr;         // 首页标签（index 0，不可关闭/移动）
     QLabel *m_statusBar = nullptr;
     QLabel *m_termSizeLabel = nullptr;

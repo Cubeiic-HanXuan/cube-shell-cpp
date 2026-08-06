@@ -32,6 +32,9 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <functional>
+#include <utility>
+
 #include "add_device_dialog.h"
 #include "device_list_widget.h"
 #include "local_file_browser_widget.h"
@@ -191,44 +194,41 @@ void MainWindow::setupUi()
 
     m_deviceList = new DeviceListWidget(this);
 
-    m_tabs = new TerminalTabWidget(this);
-    m_tabs2 = new TerminalTabWidget(this);
-    for (TerminalTabWidget *tabs : {m_tabs, m_tabs2}) {
-        // 关闭按钮由 TabCloseButton 自己画，不用 Qt 原生的。
-        tabs->setTabsClosable(false);
-        tabs->setMovable(true);          // 拖拽排序
-        // 不开 documentMode：Python 版 ShellTab 未设置（ui/main.py:107-112）。
-        // macOS 上 documentMode 会让 QMacStyle 按系统外观强制标签文字颜色，
-        // 深色主题下未选中标签被画成黑字（qdarktheme 的 QTabBar::tab 不设 color，
-        // 依赖 QWidget 继承色），导致不可读。
-        // Windows Terminal 风格标签：圆角悬浮标签，主题自适应（见上方 helper）。
-        tabs->setStyleSheet(windowsTerminalTabStyle());
-        tabs->tabBar()->setCursor(Qt::PointingHandCursor);
-        connect(tabs, &TerminalTabWidget::newLocalTerminalRequested,
-                this, &MainWindow::openLocalTerminal);
-    }
-    m_tabs2->setVisible(false);
+    // 首个 pane 常驻（承载首页），后续 pane 由 splitTab 按需创建。
+    TerminalTabWidget *firstPane = createPane();
 
-    // 首页：固定在主标签页 index 0，home 图标 + “首页”标题。
+    // 首页：固定在首个 pane 的 index 0，home 图标 + “首页”标题。
     // 对应Python: ShellTab.setTabText(indexOf(self.index), translate("首页"))
     //           + setTabIcon(0, ":icons8-home-48")
     m_homePage = createHomePage();
-    m_tabs->addTab(m_homePage, tr("首页"));
-    m_tabs->setTabIcon(0, QIcon(QStringLiteral(":/icons8-home-48.png")));
-    m_tabs->setCurrentIndex(0);
+    firstPane->addTab(m_homePage, tr("首页"));
+    firstPane->setTabIcon(0, QIcon(QStringLiteral(":/icons8-home-48.png")));
+    firstPane->setCurrentIndex(0);
 
-    // 分屏容器：主标签页 | 副标签页（拆分方向可切换）。
-    // 对应Python: ui/ 拖拽分屏逻辑（简化为菜单驱动的双 QTabWidget）
+    // 分屏容器：顶层 splitter，子控件可以是 pane 或嵌套的子 splitter。
+    // 嵌套让水平/垂直可以自由混排（如左侧一个终端，右侧上下再分两个）。
     m_termSplitter = new QSplitter(Qt::Horizontal, this);
-    m_termSplitter->addWidget(m_tabs);
-    m_termSplitter->addWidget(m_tabs2);
+    m_termSplitter->setChildrenCollapsible(false);
+    m_termSplitter->addWidget(firstPane);
 
     // 左栏：未连接时显示设备列表；连接后文件浏览器替换设备列表，
     // 设备控件仅保留底部两个复选框（跟随终端目录/远程监控）。
     // 对应Python: 连接成功后左侧 treeWidget 改展示 SFTP/本地文件目录
     m_browserStack = new QStackedWidget(this);
     m_browserStack->setVisible(false);
+    // 文件浏览器标题栏：显示归属的"分屏 N · 标签名"，多分屏下避免混淆。
+    m_browserTitle = new QLabel(this);
+    m_browserTitle->setStyleSheet(QStringLiteral(
+        "QLabel { "
+        "  background-color: palette(window); "
+        "  color: palette(text); "
+        "  padding: 4px 8px; "
+        "  border-bottom: 1px solid palette(mid); "
+        "  font-weight: bold; "
+        "}"));
+    m_browserTitle->setVisible(false);
     m_leftSplitter = new QSplitter(Qt::Vertical, this);
+    m_leftSplitter->addWidget(m_browserTitle);
     m_leftSplitter->addWidget(m_browserStack);
     m_leftSplitter->addWidget(m_deviceList);
     m_leftSplitter->setStretchFactor(0, 1);
@@ -275,24 +275,66 @@ void MainWindow::setupUi()
             resetStatusItems();
     });
 
-    for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
-                             static_cast<QTabWidget *>(m_tabs2)}) {
-        connect(tabs, &QTabWidget::tabCloseRequested, this,
-                [this, tabs](int index) { closeTabIn(tabs, index); });
-        connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](int) {
-            bindMonitorToTab(tabs->currentWidget());
-            updateTerminalInfo();
-            // 左侧文件浏览器跟随当前标签。对应Python: shell_tab_current_changed → refreshDirs
-            updateLeftPanel();
-            // AI 面板跟随当前 SSH 标签切换 Agent。对应Python: _connect_ai_to_current_tab
-            if (m_aiDock && m_aiDock->isVisible())
-                connectAiToCurrentTab();
-        });
-        // 标签右键菜单（关闭/分屏等）。
-        tabs->tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(tabs->tabBar(), &QTabBar::customContextMenuRequested, this,
-                [this, tabs](const QPoint &pos) { showTabContextMenu(tabs, pos); });
-    }
+    // 焦点落到任一 pane 内部时把它记为活动 pane —— 多分屏下不能再靠
+    // currentWidget()->hasFocus() 判断（终端内部的子控件持有焦点，
+    // 且 AI/文件面板抢焦点后原判断会整体退回首个 pane）。
+    connect(qApp, &QApplication::focusChanged, this,
+            [this](QWidget *, QWidget *now) {
+        if (!now)
+            return;
+        for (TerminalTabWidget *pane : std::as_const(m_panes)) {
+            if (pane == now || pane->isAncestorOf(now)) {
+                setActivePane(pane);
+                return;
+            }
+        }
+    });
+}
+
+// 新建一个分屏面板并接好全部信号。setupUi 的首个 pane 与 splitTab
+// 新增的 pane 共用此入口，保证两者行为完全一致。
+TerminalTabWidget *MainWindow::createPane()
+{
+    auto *tabs = new TerminalTabWidget(this);
+    // 关闭按钮由 TabCloseButton 自己画，不用 Qt 原生的。
+    tabs->setTabsClosable(false);
+    tabs->setMovable(true);          // 拖拽排序
+    // 不开 documentMode：Python 版 ShellTab 未设置（ui/main.py:107-112）。
+    // macOS 上 documentMode 会让 QMacStyle 按系统外观强制标签文字颜色，
+    // 深色主题下未选中标签被画成黑字（qdarktheme 的 QTabBar::tab 不设 color，
+    // 依赖 QWidget 继承色），导致不可读。
+    // Windows Terminal 风格标签：圆角悬浮标签，主题自适应（见上方 helper）。
+    tabs->setStyleSheet(windowsTerminalTabStyle());
+    tabs->tabBar()->setCursor(Qt::PointingHandCursor);
+    connect(tabs, &TerminalTabWidget::newLocalTerminalRequested,
+            this, &MainWindow::openLocalTerminal);
+
+    connect(tabs, &QTabWidget::tabCloseRequested, this,
+            [this, tabs](int index) { closeTabIn(tabs, index); });
+    connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](int) {
+        // 切换标签即是对该 pane 的操作 —— 先把它记为活动 pane。
+        // 不能只依赖 focusChanged：点击标签栏时 currentChanged 可能早于
+        // focusChanged 发出，此时 m_activePane 还指着另一个分屏，
+        // 下面几个 update* 就会去读错分屏的当前页（表现为在新分屏建终端后
+        // 点首页，左栏设备列表不显示）。
+        setActivePane(tabs);
+        bindMonitorToTab(tabs->currentWidget());
+        updateTerminalInfo();
+        // 左侧文件浏览器跟随当前标签。对应Python: shell_tab_current_changed → refreshDirs
+        updateLeftPanel(tabs);
+        // AI 面板跟随当前 SSH 标签切换 Agent。对应Python: _connect_ai_to_current_tab
+        if (m_aiDock && m_aiDock->isVisible())
+            connectAiToCurrentTab();
+    });
+    // 标签右键菜单（关闭/分屏等）。
+    tabs->tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tabs->tabBar(), &QTabBar::customContextMenuRequested, this,
+            [this, tabs](const QPoint &pos) { showTabContextMenu(tabs, pos); });
+
+    m_panes.append(tabs);
+    if (!m_activePane)
+        m_activePane = tabs;
+    return tabs;
 }
 
 // 首页：七条快捷键提示，水平/垂直居中。
@@ -354,8 +396,7 @@ void MainWindow::decorateSessionTab(QTabWidget *tabs, int index)
 
 void MainWindow::setTabConnected(QWidget *page, bool connected)
 {
-    for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
-                             static_cast<QTabWidget *>(m_tabs2)}) {
+    for (QTabWidget *tabs : allPanes()) {
         const int i = tabs->indexOf(page);
         if (i < 0)
             continue;
@@ -444,16 +485,58 @@ void MainWindow::setupMenus()
     toggleDevices->setChecked(true);
     connect(toggleDevices, &QAction::toggled, m_deviceList, &QWidget::setVisible);
     viewMenu->addSeparator();
-    viewMenu->addAction(tr("水平分屏"), this, [this]() {
+    // 分屏：每次调用都新建一个 pane，可无限次分下去（水平/垂直可混排）。
+    QAction *splitH = viewMenu->addAction(tr("水平分屏"), this, [this]() {
         QTabWidget *tabs = activeTabWidget();
         if (tabs)
             splitTab(tabs, tabs->currentIndex(), Qt::Horizontal);
     });
-    viewMenu->addAction(tr("垂直分屏"), this, [this]() {
+    splitH->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+D")));
+    QAction *splitV = viewMenu->addAction(tr("垂直分屏"), this, [this]() {
         QTabWidget *tabs = activeTabWidget();
         if (tabs)
             splitTab(tabs, tabs->currentIndex(), Qt::Vertical);
     });
+    splitV->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+    viewMenu->addSeparator();
+    // 分屏之间切换焦点 + 尺寸/合并管理。
+    QAction *nextPane = viewMenu->addAction(tr("下一个分屏"), this,
+                                            [this]() { focusNextPane(1); });
+    nextPane->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+Right")));
+    QAction *prevPane = viewMenu->addAction(tr("上一个分屏"), this,
+                                            [this]() { focusNextPane(-1); });
+    prevPane->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+Left")));
+    QAction *closePane = viewMenu->addAction(tr("关闭当前分屏"), this, [this]() {
+        QTabWidget *tabs = activeTabWidget();
+        if (!tabs || m_panes.count() <= 1)
+            return;   // 只剩一个分屏时不可关闭
+        // 把该 pane 的标签全部搬回首个 pane，再由 pruneEmptyPanes 摘除空壳。
+        TerminalTabWidget *first = m_panes.first();
+        if (tabs == first)
+            return;
+        while (tabs->count() > 0) {
+            const QString title = tabs->tabText(0);
+            QWidget *w = tabs->widget(0);
+            tabs->removeTab(0);
+            const int idx = first->addTab(w, title);
+            decorateSessionTab(first, idx);
+        }
+        pruneEmptyPanes();
+        first->setFocus();
+    });
+    closePane->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+W")));
+    viewMenu->addAction(tr("均分所有分屏"), this, [this]() {
+        // 递归均分整棵 splitter 树。
+        std::function<void(QSplitter *)> equalizeTree = [&](QSplitter *sp) {
+            equalizeSplitter(sp);
+            for (int i = 0; i < sp->count(); ++i) {
+                if (auto *child = qobject_cast<QSplitter *>(sp->widget(i)))
+                    equalizeTree(child);
+            }
+        };
+        equalizeTree(m_termSplitter);
+    });
+    viewMenu->addAction(tr("合并所有分屏"), this, &MainWindow::mergeAllPanes);
 
     // --- 终端 ---
     QMenu *termMenu = menuBar()->addMenu(tr("终端"));
@@ -994,7 +1077,7 @@ void MainWindow::showHermesPanel()
 {
     const QString tabName = QStringLiteral("Hermes Agent");
     // 已有 Hermes 标签页 → 直接切过去（主/副分屏都查）。
-    for (QTabWidget *tabs : {m_tabs, m_tabs2}) {
+    for (QTabWidget *tabs : allPanes()) {
         for (int i = 0; i < tabs->count(); ++i) {
             if (tabs->tabText(i) == tabName) {
                 tabs->setCurrentIndex(i);
@@ -1010,7 +1093,7 @@ void MainWindow::showHermesPanel()
     //(随 session tab 销毁,面板切回本地)。
     QStringList hosts;
     QList<CommandExecutor *> executors;
-    for (QTabWidget *tabs : {m_tabs, m_tabs2}) {
+    for (QTabWidget *tabs : allPanes()) {
         for (int i = 0; i < tabs->count(); ++i) {
             auto *session = qobject_cast<SshSessionTab *>(tabs->widget(i));
             if (!session || !session->terminal())
@@ -1038,9 +1121,12 @@ void MainWindow::showHermesPanel()
         QTermWidget *term = openLocalTerminalAt(QString());
         if (!term)
             return;
-        const int idx = m_tabs->indexOf(term);
-        if (idx >= 0)
-            m_tabs->setTabText(idx, QStringLiteral("hermes:%1").arg(profileName));
+        QTabWidget *pane = paneOf(term);
+        if (pane) {
+            const int idx = pane->indexOf(term);
+            if (idx >= 0)
+                pane->setTabText(idx, QStringLiteral("hermes:%1").arg(profileName));
+        }
         const QString command = QStringLiteral("hermes -p %1 chat").arg(profileName);
         // 延迟 500ms 发送,等 shell 就绪(与 openClaudeTerminal 一致)
         QTimer::singleShot(500, term, [term, command]() {
@@ -1052,8 +1138,9 @@ void MainWindow::showHermesPanel()
         });
     });
 
-    const int idx = m_tabs->addTab(panel, tabName);
-    m_tabs->setCurrentIndex(idx);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(panel, tabName);
+    pane->setCurrentIndex(idx);
     panel->refresh();   // 对应Python: Tab 激活时刷新
 }
 
@@ -1063,7 +1150,7 @@ void MainWindow::showClaudeCodePanel()
 {
     const QString tabName = QStringLiteral("Claude Code");
     // 已有 Claude Code 标签页 → 直接切过去。
-    for (QTabWidget *tabs : {m_tabs, m_tabs2}) {
+    for (QTabWidget *tabs : allPanes()) {
         for (int i = 0; i < tabs->count(); ++i) {
             if (tabs->tabText(i) == tabName) {
                 tabs->setCurrentIndex(i);
@@ -1076,7 +1163,7 @@ void MainWindow::showClaudeCodePanel()
 
     // 把已建立的 SSH 会话喂给面板的连接模式下拉框。
     // 对应Python: claude_code_panel.py::_refresh_connections（ssh_clients）
-    for (QTabWidget *tabs : {m_tabs, m_tabs2}) {
+    for (QTabWidget *tabs : allPanes()) {
         for (int i = 0; i < tabs->count(); ++i) {
             auto *session = qobject_cast<SshSessionTab *>(tabs->widget(i));
             if (!session || !session->terminal())
@@ -1103,8 +1190,9 @@ void MainWindow::showClaudeCodePanel()
     connect(panel, &ClaudeCodePanel::openTerminalRequested,
             this, &MainWindow::openClaudeTerminal);
 
-    const int idx = m_tabs->addTab(panel, tabName);
-    m_tabs->setCurrentIndex(idx);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(panel, tabName);
+    pane->setCurrentIndex(idx);
     // 首次显示由 panel 的 showEvent 触发初始化与首刷（对应Python 行 117-122）
 }
 
@@ -1116,9 +1204,11 @@ void MainWindow::openClaudeTerminal(const QString &command)
     if (!term)
         return;
     // Tab 名改为 claude 语义名。对应Python: add_new_tab(name=tab_name)
-    const int idx = m_tabs->indexOf(term);
-    if (idx >= 0)
-        m_tabs->setTabText(idx, claudeTabName(command));
+    if (QTabWidget *pane = paneOf(term)) {
+        const int idx = pane->indexOf(term);
+        if (idx >= 0)
+            pane->setTabText(idx, claudeTabName(command));
+    }
     // 对应Python: QTimer.singleShot(500, _send_terminal_line)；
     // Windows ConPTY 需要 \r 才能执行，macOS/Linux 用 \n。
     QTimer::singleShot(500, term, [term, command]() {
@@ -1361,15 +1451,6 @@ void MainWindow::importDevices()
 // 标签 / 分屏
 // ---------------------------------------------------------------------------
 
-QTabWidget *MainWindow::activeTabWidget() const
-{
-    // 副标签页可见且拥有焦点时优先；否则用主标签页。
-    if (m_tabs2->isVisible() && m_tabs2->currentWidget()
-            && m_tabs2->currentWidget()->hasFocus())
-        return m_tabs2;
-    return m_tabs;
-}
-
 void MainWindow::closeTabIn(QTabWidget *tabs, int index)
 {
     QWidget *w = tabs->widget(index);
@@ -1420,8 +1501,10 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
     tabs->removeTab(index);
     if (w)
         w->deleteLater();
-    updateSecondPaneVisibility();
-    updateLeftPanel();
+    pruneEmptyPanes();
+    // 关闭标签后，活动 pane 可能已被清理（pruneEmptyPanes）——刷新时指定
+    // 首个 pane，避免 activeTabWidget() 返回已销毁的 QPointer。
+    updateLeftPanel(m_panes.isEmpty() ? nullptr : m_panes.first());
 }
 
 void MainWindow::closeCurrentTab()
@@ -1473,48 +1556,260 @@ void MainWindow::showTabContextMenu(QTabWidget *tabs, const QPoint &pos)
     menu.addAction(tr("垂直分屏"), this, [this, tabs, index]() {
         splitTab(tabs, index, Qt::Vertical);
     });
+    // 已有多个分屏时，允许把标签直接搬到指定的另一个分屏（不新建 pane）。
+    if (m_panes.count() > 1) {
+        QMenu *moveMenu = menu.addMenu(tr("移动到分屏"));
+        for (int p = 0; p < m_panes.count(); ++p) {
+            TerminalTabWidget *dest = m_panes[p];
+            if (dest == tabs)
+                continue;   // 已在此分屏
+            moveMenu->addAction(tr("分屏 %1").arg(p + 1), this,
+                                [this, tabs, index, dest]() {
+                if (index < 0 || index >= tabs->count())
+                    return;
+                if (tabs->widget(index) == m_homePage)
+                    return;
+                const QString title = tabs->tabText(index);
+                QWidget *w = tabs->widget(index);
+                tabs->removeTab(index);
+                const int newIdx = dest->addTab(w, title);
+                decorateSessionTab(dest, newIdx);
+                dest->setCurrentIndex(newIdx);
+                pruneEmptyPanes();
+                dest->setFocus();
+            });
+        }
+    }
     menu.exec(tabs->tabBar()->mapToGlobal(pos));
 }
 
-// 把标签移到另一侧分屏。对应Python: ui/ 拖拽分屏逻辑（简化为菜单驱动）
+// 把标签拆到一个新建的相邻分屏。对应Python: ui/ 拖拽分屏逻辑（简化为菜单驱动）
 void MainWindow::splitTab(QTabWidget *source, int index, Qt::Orientation orientation)
 {
     if (index < 0 || index >= source->count())
         return;
     if (source->widget(index) == m_homePage)
         return;   // 首页不参与分屏
-    QTabWidget *target = (source == m_tabs) ? static_cast<QTabWidget *>(m_tabs2)
-                                            : static_cast<QTabWidget *>(m_tabs);
-    // 源里只有一个标签且目标为空 → 拆过去没有意义。
-    if (source->count() <= 1 && target->count() == 0)
-        return;
 
-    m_termSplitter->setOrientation(orientation);
+    TerminalTabWidget *newPane = createPane();
+    insertPaneNextTo(source, newPane, orientation);
 
     const QString title = source->tabText(index);
     QWidget *w = source->widget(index);
     source->removeTab(index);
-    const int newIdx = target->addTab(w, title);
+    const int newIdx = newPane->addTab(w, title);
     // removeTab 会销毁旧的 tabButton，移过去后重新装上圆点和关闭按钮。
-    decorateSessionTab(target, newIdx);
-    target->setCurrentIndex(newIdx);
-    updateSecondPaneVisibility();
+    decorateSessionTab(newPane, newIdx);
+    newPane->setCurrentIndex(newIdx);
+    newPane->setFocus();
+    // 刚从单分屏变多分屏时，原分屏的标题需要补上"分屏 1 ·"前缀。
+    updatePaneHighlight();
 }
 
-void MainWindow::updateSecondPaneVisibility()
+// 在 source 所在的 splitter 中，于 source 之后插入 pane，方向为 orientation。
+// 若 splitter 方向与 orientation 不符且不止一个子控件，则把 source 就地
+// 替换为一个新的子 splitter（嵌套），实现水平+垂直混排的自由分屏。
+void MainWindow::insertPaneNextTo(QTabWidget *source, TerminalTabWidget *pane,
+                                  Qt::Orientation orientation)
 {
-    const bool show = m_tabs2->count() > 0;
-    m_tabs2->setVisible(show);
-    if (show) {
-        const int half = qMax(1, m_termSplitter->width() / 2);
-        m_termSplitter->setSizes({half, half});
+    auto *splitter = qobject_cast<QSplitter *>(source->parentWidget());
+    if (!splitter)
+        return;   // source 不在 splitter 里（理论不应发生）
+
+    const int sourceIdx = splitter->indexOf(source);
+    if (sourceIdx < 0)
+        return;
+
+    // 当前 splitter 方向与目标方向一致，或只有一个子控件（可自由改方向）→ 直接插入。
+    if (splitter->orientation() == orientation || splitter->count() == 1) {
+        splitter->setOrientation(orientation);
+        splitter->insertWidget(sourceIdx + 1, pane);
+        equalizeSplitter(splitter);
+        return;
     }
+
+    // 方向不一致且 splitter 有多个子控件 → 不能改变现有 splitter 方向，
+    // 否则会打乱其他 pane 的布局。解决：把 source 就地替换为一个嵌套的子 splitter，
+    // 子 splitter 内装 source 和 pane，方向为 orientation。
+    auto *subSplitter = new QSplitter(orientation, splitter);
+    subSplitter->setChildrenCollapsible(false);
+    // 先从父 splitter 摘下 source 的尺寸，再用子 splitter 换上去，
+    // 保证嵌套前后父 splitter 其余子控件的尺寸不变。
+    const QList<int> oldSizes = splitter->sizes();
+    splitter->insertWidget(sourceIdx, subSplitter);
+    source->setParent(subSplitter);
+    subSplitter->addWidget(source);
+    subSplitter->addWidget(pane);
+    splitter->setSizes(oldSizes);   // 恢复父 splitter 原尺寸分布
+    equalizeSplitter(subSplitter);  // 子 splitter 内两个 pane 均分
+}
+
+// 清理空 pane 并折叠只剩一个子控件的中间 splitter。
+// 首个 pane（承载首页）常驻，其余 pane 空时自动移除。
+void MainWindow::pruneEmptyPanes()
+{
+    // 逆序遍历 pane 列表，删除时不影响后续索引。
+    for (int i = m_panes.count() - 1; i >= 1; --i) {
+        TerminalTabWidget *pane = m_panes[i];
+        if (pane->count() == 0) {
+            m_panes.removeAt(i);
+            // 从 splitter 树中摘下。QSplitter 没有 removeWidget()，
+            // 标准做法是 setParent(nullptr)——先 hide 避免它短暂
+            // 变成顶层窗口而闪一下。
+            pane->hide();
+            pane->setParent(nullptr);
+            pane->deleteLater();
+        }
+    }
+
+    // 折叠只剩一个子控件的中间 splitter：把该子控件提到祖父 splitter 替换掉
+    // 该子 splitter，避免嵌套层级无限增长（反复分屏 + 关闭后容易留下空壳）。
+    std::function<void(QSplitter *)> collapseSingleChild = [&](QSplitter *sp) {
+        for (int i = 0; i < sp->count(); ++i) {
+            if (auto *child = qobject_cast<QSplitter *>(sp->widget(i)))
+                collapseSingleChild(child);
+        }
+        if (sp == m_termSplitter)
+            return;   // 顶层 splitter 不折叠
+        if (sp->count() == 1) {
+            QWidget *only = sp->widget(0);
+            auto *grandpa = qobject_cast<QSplitter *>(sp->parentWidget());
+            if (!grandpa)
+                return;
+            const int spIdx = grandpa->indexOf(sp);
+            const QList<int> oldSizes = grandpa->sizes();
+            grandpa->insertWidget(spIdx, only);
+            grandpa->setSizes(oldSizes);
+            sp->deleteLater();
+        }
+    };
+    collapseSingleChild(m_termSplitter);
+
+    // pane 数量变了：高亮标记按"是否多分屏"重算（降回单分屏时清除所有高亮）。
+    // 活动 pane 若刚被删除，QPointer 已归零，改指首个 pane。
+    if (!m_activePane && !m_panes.isEmpty())
+        m_activePane = m_panes.first();
+    updatePaneHighlight();
+}
+
+// 把 splitter 的子控件尺寸重新均分（新建 pane 时保证不挤占其他 pane）。
+void MainWindow::equalizeSplitter(QSplitter *splitter)
+{
+    const int n = splitter->count();
+    if (n == 0)
+        return;
+    const int total = (splitter->orientation() == Qt::Horizontal)
+                          ? splitter->width() : splitter->height();
+    const int avg = qMax(1, total / n);
+    QList<int> sizes;
+    sizes.reserve(n);
+    for (int i = 0; i < n; ++i)
+        sizes << avg;
+    splitter->setSizes(sizes);
+}
+
+QTabWidget *MainWindow::activeTabWidget() const
+{
+    // 返回最后获得焦点的 pane。若 m_activePane 已被销毁（QPointer 归零），
+    // 则退回首个 pane（理论上不会发生，pruneEmptyPanes 保证首个 pane 常驻）。
+    if (m_activePane)
+        return m_activePane;
+    return m_panes.isEmpty() ? nullptr : m_panes.first();
+}
+
+void MainWindow::setActivePane(TerminalTabWidget *pane)
+{
+    if (m_activePane == pane)
+        return;
+    m_activePane = pane;
+    updatePaneHighlight();
+}
+
+// 给活动分屏加高亮左边框，非活动分屏保持原样。只有一个分屏时不加任何标记
+// （无需区分），避免单分屏用户看到多余的装饰。
+void MainWindow::updatePaneHighlight()
+{
+    const bool multi = m_panes.count() > 1;
+    for (TerminalTabWidget *pane : std::as_const(m_panes)) {
+        const bool active = multi && (pane == m_activePane);
+        // 在标签样式基础上追加高亮边框，切主题时 windowsTerminalTabStyle()
+        // 会重新取色，这里跟着一起重建。
+        QString qss = windowsTerminalTabStyle();
+        if (active) {
+            qss += QStringLiteral(
+                "QTabWidget::pane { border-top: 2px solid palette(highlight); }");
+        }
+        pane->setStyleSheet(qss);
+    }
+}
+
+// 焦点在分屏之间循环切换。delta=1 向后，delta=-1 向前。
+// 对应快捷键 Ctrl+Alt+Tab / Ctrl+Alt+Shift+Tab（或菜单"下一个分屏"/"上一个分屏"）。
+void MainWindow::focusNextPane(int delta)
+{
+    if (m_panes.count() <= 1)
+        return;   // 只有一个 pane，无需切换
+    const int current = m_activePane ? m_panes.indexOf(m_activePane) : 0;
+    const int next = (current + delta + m_panes.count()) % m_panes.count();
+    m_panes[next]->setFocus();
+}
+
+// 全部分屏合并回首个 pane：把其他 pane 的全部标签搬到首个 pane，再清空其他 pane。
+void MainWindow::mergeAllPanes()
+{
+    if (m_panes.count() <= 1)
+        return;
+    TerminalTabWidget *first = m_panes.first();
+    for (int i = 1; i < m_panes.count(); ++i) {
+        QTabWidget *pane = m_panes[i];
+        while (pane->count() > 0) {
+            const QString title = pane->tabText(0);
+            QWidget *w = pane->widget(0);
+            pane->removeTab(0);
+            const int idx = first->addTab(w, title);
+            decorateSessionTab(first, idx);
+        }
+    }
+    pruneEmptyPanes();
+    first->setFocus();
+    // 合并后只剩一个分屏 → 标题不再显示"分屏 1 ·"前缀，高亮也消失。
+    updateLeftPanel(first);
+    updatePaneHighlight();
+}
+
+QList<QTabWidget *> MainWindow::allPanes() const
+{
+    QList<QTabWidget *> result;
+    result.reserve(m_panes.count());
+    for (TerminalTabWidget *pane : m_panes)
+        result.append(pane);
+    return result;
+}
+
+QTabWidget *MainWindow::paneOf(QWidget *page) const
+{
+    for (QTabWidget *pane : allPanes()) {
+        if (pane->indexOf(page) >= 0)
+            return pane;
+    }
+    return nullptr;
+}
+
+// 新标签页的落点：当前活动 pane（无则首个 pane）。
+TerminalTabWidget *MainWindow::targetPane() const
+{
+    if (m_activePane)
+        return m_activePane.data();
+    return m_panes.isEmpty() ? nullptr : m_panes.first();
 }
 
 // 状态栏终端信息（大小/编码）。
 void MainWindow::updateTerminalInfo()
 {
-    QWidget *w = activeTabWidget()->currentWidget();
+    QTabWidget *tabs = activeTabWidget();
+    if (!tabs)
+        return;
+    QWidget *w = tabs->currentWidget();
     // 仅远程 SSH 会话标签页显示设备列表底部的两个会话开关。
     // 对应Python: 未连接时 follow_folder / remote_monitoring 不可见
     if (m_deviceList)
@@ -1522,6 +1817,10 @@ void MainWindow::updateTerminalInfo()
     QTermWidget *term = qobject_cast<QTermWidget *>(w);
     if (!term && w)
         term = w->findChild<QTermWidget *>();
+    // setupUi 里首页 addTab 会触发 currentChanged，此时 setupStatusBar 尚未
+    // 运行，标签还不存在——早退避免解引用空指针。
+    if (!m_termSizeLabel)
+        return;
     if (term)
         m_termSizeLabel->setText(QStringLiteral("%1×%2")
                                      .arg(term->screenColumnsCount())
@@ -1537,12 +1836,21 @@ void MainWindow::updateTerminalInfo()
 // 左侧文件浏览器切到当前标签对应的页，并替换设备列表（仅留底部复选框）；
 // 无对应页（首页/未连接）则收起浏览器、恢复设备列表。
 // 对应Python: shell_tab_current_changed 里文件树随 Tab 切换/清空的逻辑
-void MainWindow::updateLeftPanel()
+void MainWindow::updateLeftPanel(QTabWidget *pane)
 {
-    QWidget *page = activeTabWidget()->currentWidget();
+    // 同 updateTerminalInfo：setupUi 中首页 addTab 触发的 currentChanged
+    // 早于左栏控件创建，此处提前返回。
+    if (!m_browserStack || !m_deviceList || !m_leftSplitter)
+        return;
+    // pane 非空表示由该 pane 的 currentChanged 触发 —— 必须用它，不能用
+    // activeTabWidget()：焦点可能还留在另一个分屏上（在新分屏建终端后点
+    // 首页，焦点仍属新分屏），那样会取错页面导致设备列表不显示。
+    QTabWidget *tabs = pane ? pane : activeTabWidget();
+    QWidget *page = tabs ? tabs->currentWidget() : nullptr;
     QWidget *browser = page ? m_tabBrowsers.value(page) : nullptr;
     if (!browser) {
         m_browserStack->setVisible(false);
+        m_browserTitle->setVisible(false);
         m_deviceList->setBrowserMode(false);
         return;
     }
@@ -1550,16 +1858,45 @@ void MainWindow::updateLeftPanel()
     m_deviceList->setBrowserMode(true);
     if (!m_browserStack->isVisible()) {
         m_browserStack->setVisible(true);
+        m_browserTitle->setVisible(true);
         if (!m_leftBrowserSized) {
             // 首次展开：文件树占满左栏，设备控件压缩到底部复选框行高度。
-            m_leftSplitter->setSizes({m_leftSplitter->height(), 1});
+            m_leftSplitter->setSizes({1, m_leftSplitter->height(), 1});
             m_leftBrowserSized = true;
         }
     }
+    // 更新标题栏显示对应的分屏和标签信息。
+    updateBrowserTitle(tabs, page);
     // 本机终端 + 跟随目录：切回来时同步一次终端 cwd。
     // 对应Python: follow_folder 勾选时切 tab 自动 refreshDirs
     if (m_deviceList->followFolderEnabled())
         syncBrowserToTerminalCwd();
+}
+
+// 刷新文件浏览器标题栏：显示"分屏 N · 标签名"，让用户知道当前看的是谁的目录。
+void MainWindow::updateBrowserTitle(QTabWidget *pane, QWidget *page)
+{
+    if (!m_browserTitle || !pane || !page)
+        return;
+    const int num = paneNumber(pane);
+    const int idx = pane->indexOf(page);
+    if (num == 0 || idx < 0) {
+        m_browserTitle->clear();
+        return;
+    }
+    const QString tabTitle = pane->tabText(idx);
+    // 多分屏时显示"分屏 2 · SSH: host"；只有一个分屏时省略"分屏 1 ·"前缀。
+    if (m_panes.count() > 1)
+        m_browserTitle->setText(tr("分屏 %1 · %2").arg(num).arg(tabTitle));
+    else
+        m_browserTitle->setText(tabTitle);
+}
+
+// pane 在 m_panes 中的序号（从 1 开始，用于界面展示）；找不到返回 0。
+int MainWindow::paneNumber(QTabWidget *pane) const
+{
+    const int idx = m_panes.indexOf(qobject_cast<TerminalTabWidget *>(pane));
+    return (idx >= 0) ? (idx + 1) : 0;
 }
 
 // 把当前标签的文件浏览器同步到终端当前工作目录。
@@ -1726,9 +2063,10 @@ QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
         const QString base = QFileInfo(startDir).fileName();
         title += QStringLiteral(" - ") + (base.isEmpty() ? startDir : base);
     }
-    const int idx = m_tabs->addTab(term, title);
-    decorateSessionTab(m_tabs, idx);
-    m_tabs->setCurrentIndex(idx);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(term, title);
+    decorateSessionTab(pane, idx);
+    pane->setCurrentIndex(idx);
     updateTerminalInfo();
 
     // 左侧展示本地文件目录（初始 home）。
@@ -1745,7 +2083,7 @@ QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
     updateLeftPanel();
 
     connect(term, &QTermWidget::finished, this, [this, term]() {
-        for (QTabWidget *tabs : {m_tabs, m_tabs2}) {
+        for (QTabWidget *tabs : allPanes()) {
             const int i = tabs->indexOf(term);
             if (i >= 0) {
                 closeTabIn(tabs, i);
@@ -1802,10 +2140,11 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
     if (tab->terminal() && tab->terminal()->terminal())
         connect(tab->terminal()->terminal(), &QTermWidget::aiRequested,
                 this, &MainWindow::toggleAiPanel);
-    const int idx = m_tabs->addTab(tab, device.name.isEmpty() ? device.host : device.name);
-    decorateSessionTab(m_tabs, idx);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(tab, device.name.isEmpty() ? device.host : device.name);
+    decorateSessionTab(pane, idx);
     setTabConnected(tab, false);   // 连上之前先亮红点
-    m_tabs->setCurrentIndex(idx);
+    pane->setCurrentIndex(idx);
     setStatus(tr("正在连接 %1@%2…").arg(device.username, device.host));
 
     connect(tab, &SshSessionTab::connected, this, [this, device, tab]() {
@@ -1838,7 +2177,7 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
     connect(tab, &SshSessionTab::connectionFailed, this, [this, tab](const QString &msg) {
         setStatus(tr("连接失败"));
         QMessageBox::warning(this, tr("SSH 连接失败"), msg);
-        for (QTabWidget *tabs : {m_tabs, m_tabs2}) {
+        for (QTabWidget *tabs : allPanes()) {
             const int i = tabs->indexOf(tab);
             if (i >= 0) {
                 closeTabIn(tabs, i);
@@ -1915,10 +2254,11 @@ void MainWindow::openRdpTab(const RdpSettings &settings)
     const QString title = resolved.host.isEmpty()
                               ? tr("RDP 连接")
                               : QStringLiteral("RDP: %1").arg(resolved.host);
-    const int idx = m_tabs->addTab(panel, title);
-    decorateSessionTab(m_tabs, idx);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(panel, title);
+    decorateSessionTab(pane, idx);
     setTabConnected(panel, false);   // 连上之前先亮红点
-    m_tabs->setCurrentIndex(idx);
+    pane->setCurrentIndex(idx);
 
     RdpClient *client = panel->client();
     connect(client, &RdpClient::connected, this, [this, panel]() {
@@ -1926,8 +2266,7 @@ void MainWindow::openRdpTab(const RdpSettings &settings)
         const QString host = panel->client()->settings().host;
         setStatus(tr("RDP 已连接：%1").arg(host));
         // 标题跟随实际连接主机（空白面板手填 / 断开后重连均在此复位）。
-        for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
-                                 static_cast<QTabWidget *>(m_tabs2)}) {
+        for (QTabWidget *tabs : allPanes()) {
             const int i = tabs->indexOf(panel);
             if (i >= 0) {
                 tabs->setTabText(i, QStringLiteral("RDP: %1").arg(host));
@@ -1940,8 +2279,7 @@ void MainWindow::openRdpTab(const RdpSettings &settings)
         setStatus(tr("RDP 已断开：%1").arg(panel->client()->settings().host));
         // Tab 标题加“[断开]”前缀（面板内可重连，连上后由 connected 分支复位）。
         const QString prefix = tr("[断开] ");
-        for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
-                                 static_cast<QTabWidget *>(m_tabs2)}) {
+        for (QTabWidget *tabs : allPanes()) {
             const int i = tabs->indexOf(panel);
             if (i >= 0) {
                 const QString text = tabs->tabText(i);
@@ -1975,10 +2313,11 @@ void MainWindow::openSerialTab(const SerialSettings &settings)
     const QString title = settings.portName.isEmpty()
                               ? tr("串口连接")
                               : QStringLiteral("Serial: %1").arg(settings.portName);
-    const int idx = m_tabs->addTab(panel, title);
-    decorateSessionTab(m_tabs, idx);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(panel, title);
+    decorateSessionTab(pane, idx);
     setTabConnected(panel, false);   // 连上之前先亮红点
-    m_tabs->setCurrentIndex(idx);
+    pane->setCurrentIndex(idx);
 
     connect(panel, &SerialTerminalWidget::connected, this, [this, panel]() {
         setTabConnected(panel, true);
@@ -1986,8 +2325,7 @@ void MainWindow::openSerialTab(const SerialSettings &settings)
         setStatus(tr("串口已连接：%1 @%2 %3")
                       .arg(s.portName).arg(s.baudRate).arg(s.frameFormat()));
         // 标题跟随实际连接的端口（空白面板手选 / 断开后重连均在此复位）。
-        for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
-                                 static_cast<QTabWidget *>(m_tabs2)}) {
+        for (QTabWidget *tabs : allPanes()) {
             const int i = tabs->indexOf(panel);
             if (i >= 0) {
                 tabs->setTabText(i, QStringLiteral("Serial: %1").arg(s.portName));
@@ -2000,8 +2338,7 @@ void MainWindow::openSerialTab(const SerialSettings &settings)
         setStatus(tr("串口已断开：%1").arg(panel->client()->settings().portName));
         // Tab 标题加“[断开]”前缀（面板内可重连，连上后由 connected 分支复位）。
         const QString prefix = tr("[断开] ");
-        for (QTabWidget *tabs : {static_cast<QTabWidget *>(m_tabs),
-                                 static_cast<QTabWidget *>(m_tabs2)}) {
+        for (QTabWidget *tabs : allPanes()) {
             const int i = tabs->indexOf(panel);
             if (i >= 0) {
                 const QString text = tabs->tabText(i);
@@ -2042,7 +2379,7 @@ void MainWindow::showSettings()
             });
     // 切换 dark/light 后重建标签页 QSS（颜色按新主题取值），无需重启。
     connect(&dlg, &SettingsDialog::appearanceChanged, this, [this](const QString &) {
-        for (TerminalTabWidget *tabs : {m_tabs, m_tabs2})
+        for (TerminalTabWidget *tabs : std::as_const(m_panes))
             tabs->setStyleSheet(windowsTerminalTabStyle());
     });
     dlg.exec();

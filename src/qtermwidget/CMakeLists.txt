@@ -88,6 +88,20 @@ target_link_libraries(qtermwidget PUBLIC
     Qt6::Widgets
 )
 
+# Linux/Unix 的 KPty 用 openpty()/forkpty()（KPty.cpp，<pty.h>）。这两个符号定义在
+# libutil（glibc）里，不在 libc——必须显式链接，否则链接期 undefined reference to
+# `openpty'。Ubuntu 上常被工具链/Qt 间接带入而侥幸通过，Rocky/RHEL 等更「干净」的
+# 链接环境会直接报错。macOS 的 openpty 在 libSystem（无需额外库），故仅 Unix 非 Apple 链接。
+if(UNIX AND NOT APPLE)
+    find_library(UTIL_LIBRARY util)   # → /usr/lib64/libutil.so（glibc）
+    if(UTIL_LIBRARY)
+        target_link_libraries(qtermwidget PUBLIC ${UTIL_LIBRARY})
+    else()
+        # 极少数环境找不到 libutil.so（如静态/精简镜像），退化为按名链接
+        target_link_libraries(qtermwidget PUBLIC util)
+    endif()
+endif()
+
 target_compile_definitions(qtermwidget PRIVATE
     QTERMWIDGET_VERSION_MAJOR=2
     QTERMWIDGET_VERSION_MINOR=2

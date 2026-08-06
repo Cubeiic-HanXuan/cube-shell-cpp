@@ -157,6 +157,7 @@ jobs:
               libxcb-devel xcb-util-keysyms-devel xcb-util-image-devel \
               xcb-util-wm-devel xcb-util-renderutil-devel xcb-util-devel \
               libXinerama-devel \
+              wayland-devel libwayland-client libwayland-cursor libwayland-egl \
               bison flex gperf
             # Rocky 8 自带 GCC 8.5（2018），不满足 Qt 6.9 对 C++17 noexcept 比较运算符的
             # 要求——会报 "static assertion failed: Use *_NON_NOEXCEPT version of the macro"
@@ -482,10 +483,13 @@ jobs:
           # x86_64 在 Rocky 8 容器（dnf，root）；ARM64 在 ubuntu 裸机（apt，sudo）。
           if [ -f /etc/redhat-release ]; then
             dnf install -y epel-release
+            # XCB 库供 xcb 平台插件；wayland-cursor/wayland-egl 供 wayland 平台插件
+            # （libqwayland-egl/libqwayland-generic 依赖它们，否则打包自检 not found）。
             dnf install -y patchelf \
               libxcb xcb-util xcb-util-cursor xcb-util-image xcb-util-keysyms \
               xcb-util-renderutil xcb-util-wm \
-              libxkbcommon libxkbcommon-x11
+              libxkbcommon libxkbcommon-x11 \
+              wayland-devel libwayland-client libwayland-cursor libwayland-egl
           else
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends patchelf \
@@ -537,15 +541,18 @@ jobs:
               esac
             done
           done
-          # 兜底：上面 ldd 只抓得到"能解析出路径"的依赖。对关键的 XCB/XKB 库，
+          # 兜底：上面 ldd 只抓得到"能解析出路径"的依赖。对关键的 XCB/XKB/wayland 库，
           # 直接从系统库缓存(ldconfig -p)按名查找并拷入，确保一个不漏。
           # 注意：xcb-util-cursor 在 Rocky/RHEL 上不带 libxcb-util.so，lxcb-util 仅
           # Ubuntu 有；Rocky 上查不到就跳过，不致命。
+          # wayland-cursor/wayland-egl/wayland-client 是 wayland 平台插件
+          # （libqwayland-egl/libqwayland-generic）的依赖，漏了会在目标机报 not found。
           for lib in libxcb-cursor.so.0 libxkbcommon.so.0 libxkbcommon-x11.so.0 \
                      libxcb-icccm.so.4 libxcb-image.so.0 libxcb-keysyms.so.1 \
                      libxcb-randr.so.0 libxcb-render-util.so.0 libxcb-shape.so.0 \
                      libxcb-shm.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 \
-                     libxcb-xinerama.so.0 libxcb-xkb.so.1 libxcb-util.so.1 libxcb-render.so.0 libxcb.so.1; do
+                     libxcb-xinerama.so.0 libxcb-xkb.so.1 libxcb-util.so.1 libxcb-render.so.0 libxcb.so.1 \
+                     libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1; do
             [ -f "dist/lib/$lib" ] && continue   # 已收集过则跳过
             src="$(ldconfig -p | awk -v L="$lib" '$1==L {print $NF; exit}')"
             [ -n "$src" ] && [ -f "$src" ] && cp -L "$src" "dist/lib/$lib" 2>/dev/null || true

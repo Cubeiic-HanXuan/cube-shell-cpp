@@ -158,6 +158,32 @@ jobs:
               xcb-util-wm-devel xcb-util-renderutil-devel xcb-util-devel \
               libXinerama-devel \
               bison flex gperf
+            # Rocky 8 自带 GCC 8.5（2018），不满足 Qt 6.9 对 C++17 noexcept 比较运算符的
+            # 要求——会报 "static assertion failed: Use *_NON_NOEXCEPT version of the macro"
+            # （Qt 头文件 qmetatype.h/qvariant.h/qdatetime.h 等大面积 static_assert 失败）。
+            # 用官方 gcc-toolset-11（GCC 11，装在 /opt/rh，不改系统 glibc）顶替。
+            # 保留 glibc 2.28 底座不变（这是我们选 Rocky 8 的目的），只换编译器。
+            dnf install -y gcc-toolset-11-gcc gcc-toolset-11-gcc-c++ || \
+              dnf install -y gcc-toolset-12-gcc gcc-toolset-12-gcc-c++
+            # 激活 toolset：把它的 bin 放 PATH 最前，并显式设 CC/CXX。
+            # 注意 source .../enable 只对当前 shell 有效，CI 每步是新 shell，必须写进
+            # GITHUB_PATH / GITHUB_ENV 让后续 Configure/Build 步骤都用 GCC 11。
+            TSBIN="$(ls -d /opt/rh/gcc-toolset-1*/root/usr/bin 2>/dev/null | sort -V | tail -n1)"
+            if [ -n "$TSBIN" ]; then
+              echo "$TSBIN" >> "$GITHUB_PATH"
+              echo "CC=$TSBIN/gcc"  >> "$GITHUB_ENV"
+              echo "CXX=$TSBIN/g++" >> "$GITHUB_ENV"
+              # vcpkg 的 x64-linux triplet 走 cc/c++（不读 CC/CXX 环境变量）。toolset 的
+              # bin 里通常已带 cc→gcc 软链，但为防 vcpkg 绕过 PATH 命中 /usr/bin/cc(GCC8)，
+              # 在 /usr/local/bin（PATH 靠前）显式补 cc/c++ 指向 toolset 的 gcc/g++。
+              ln -sf "$TSBIN/gcc" /usr/local/bin/cc
+              ln -sf "$TSBIN/g++" /usr/local/bin/c++
+              echo "/usr/local/bin" >> "$GITHUB_PATH"
+              echo "gcc-toolset activated: $TSBIN"
+              "$TSBIN/g++" --version | head -1
+            else
+              echo "WARNING: 未找到 gcc-toolset bin，仍用系统默认 gcc" >&2
+            fi
             # Rocky 8 默认 python3 是 3.6（太老），把 3.11 顶到前面（不影响 dnf，它用 platform-python）
             alternatives --set python3 /usr/bin/python3.11 || \
               ln -sf /usr/bin/python3.11 /usr/local/bin/python3

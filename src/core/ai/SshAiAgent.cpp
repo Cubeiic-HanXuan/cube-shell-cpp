@@ -4,6 +4,7 @@
 
 #include "SshAiAgent.h"
 
+#include "SensitiveDataMasker.h"
 #include "TerminalExecutor.h"
 #include "ssh/CommandExecutor.h"
 
@@ -247,10 +248,13 @@ void SshAiAgent::diagnoseError(const QString &command,
     QString prompt = QStringLiteral(
         "刚才执行的命令失败了，请帮我诊断原因并给出修复建议。\n\n"
         "命令: %1\n退出码: %2\n").arg(command).arg(exitCode);
+    // 诊断直接把命令输出拼进 prompt，同样需先脱敏再发给大模型。
     if (!stdoutText.isEmpty())
-        prompt += QStringLiteral("标准输出:\n%1\n").arg(stdoutText.left(2000));
+        prompt += QStringLiteral("标准输出:\n%1\n")
+                      .arg(SensitiveDataMasker::mask(stdoutText).left(2000));
     if (!stderrText.isEmpty())
-        prompt += QStringLiteral("标准错误:\n%1\n").arg(stderrText.left(2000));
+        prompt += QStringLiteral("标准错误:\n%1\n")
+                      .arg(SensitiveDataMasker::mask(stderrText).left(2000));
     prompt += QStringLiteral(
         "\n用户的原始任务是：%1\n"
         "请分析问题原因并提供修复方案，确保最终完成用户的任务。"

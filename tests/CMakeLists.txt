@@ -173,6 +173,18 @@ target_link_libraries(safety_checker_test PRIVATE
     cube_core
 )
 
+# SensitiveDataMasker 脱敏规则 test（私钥/密码/IP；pure logic）。
+qt_add_executable(sensitive_masker_test
+    sensitive_masker_test.cpp
+)
+target_include_directories(sensitive_masker_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(sensitive_masker_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # ComposeYaml parse/dump/round-trip + predefined services loading test
 # (yaml-cpp comes in transitively through cube_core; pure logic).
 qt_add_executable(compose_yaml_test
@@ -283,6 +295,7 @@ add_test(NAME url_dispatch_test COMMAND url_dispatch_test)
 add_test(NAME platform_test COMMAND platform_test)
 add_test(NAME sse_parser_test COMMAND sse_parser_test)
 add_test(NAME safety_checker_test COMMAND safety_checker_test)
+add_test(NAME sensitive_masker_test COMMAND sensitive_masker_test)
 add_test(NAME compose_yaml_test COMMAND compose_yaml_test)
 if(CUBESHELL_WITH_LOCALPROC)
     add_test(NAME docker_manager_test COMMAND docker_manager_test)

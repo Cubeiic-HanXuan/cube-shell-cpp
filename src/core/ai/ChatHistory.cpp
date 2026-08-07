@@ -4,6 +4,7 @@
 
 #include "ChatHistory.h"
 
+#include "SensitiveDataMasker.h"
 #include "config/GlobalState.h"
 
 #include <QDateTime>
@@ -71,8 +72,12 @@ void ChatHistory::addCommandResult(const QString &command,
                                    const QString &stderrText, int exitCode,
                                    const QString &description)
 {
-    const QString truncatedStdout = truncateOutput(stripAnsi(stdoutText));
-    const QString truncatedStderr = truncateOutput(stripAnsi(stderrText));
+    // 脱敏在截断/清理之前：先把命令打印出的凭据/IP 打码，再做长度处理，
+    // 确保发往大模型的内容永不携带敏感信息（见 SensitiveDataMasker.h）。
+    const QString truncatedStdout =
+        truncateOutput(stripAnsi(SensitiveDataMasker::mask(stdoutText)));
+    const QString truncatedStderr =
+        truncateOutput(stripAnsi(SensitiveDataMasker::mask(stderrText)));
 
     QStringList parts;
     parts << QStringLiteral("[命令执行结果]");

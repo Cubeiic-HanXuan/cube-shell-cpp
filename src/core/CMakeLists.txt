@@ -48,6 +48,7 @@ set(CORE_SOURCES
     ai/AiChatWorker.cpp         # port of core/ai/worker.py
     ai/CommandSafetyChecker.cpp # port of core/ai/safety.py
     ai/ChatHistory.cpp          # port of core/ai/conversation.py (+JSON persistence)
+    ai/SensitiveDataMasker.cpp  # 发往大模型前的敏感信息脱敏（私钥/密码/IP）
     ai/MarkdownRenderer.cpp     # port of core/ai/ai_panel.py rendering logic
     ai/SshAiAgent.cpp           # port of core/ai/ssh_agent.py
     ai/TerminalExecutor.cpp     # port of core/ai/ssh_agent.py::_TerminalExecutor

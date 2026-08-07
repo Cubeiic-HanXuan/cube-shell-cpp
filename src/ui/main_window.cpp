@@ -185,7 +185,12 @@ MainWindow::MainWindow(QWidget *parent)
     loadDevices();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+    // 置位析构标志：~QWidget 删子对象时各 tab 的 destroyed lambda 会检查它，
+    // 避免在 hash 销毁中状态下访问 m_aiAgents（退出时 hash 随本对象整体销毁）。
+    m_destroying = true;
+}
 
 // ---------------------------------------------------------------------------
 // UI 搭建
@@ -815,8 +820,15 @@ void MainWindow::connectAiToCurrentTab()
         }
         // 会话若在 closeTabIn 之外被销毁（应用退出等），同步摘掉哈希项，
         // 避免悬垂键；agent 作为子对象随之析构，m_activeAiAgent 由 QPointer 置空。
+        // m_destroying 守卫：MainWindow 析构删子对象时本 lambda 仍会被 destroyed
+        // 触发，但此刻 m_aiAgents 已处销毁中状态，remove 会 UAF——直接返回，
+        // 退出时 hash 随 MainWindow 整体销毁，无需逐项 remove。
         connect(session, &QObject::destroyed, this,
-                [this, session]() { m_aiAgents.remove(session); });
+                [this, session]() {
+                    if (m_destroying)
+                        return;
+                    m_aiAgents.remove(session);
+                });
 
         // 异步构建服务器画像注入系统提示词。Builder parent 为 agent → 随之销毁。
         // 对应Python: ServerProfile 首次 AI 交互时异步构建

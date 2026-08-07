@@ -319,6 +319,10 @@ private:
     // AI 助手集成：每个 SSH 会话标签一个 SshAiAgent（懒建，parent 为会话标签）。
     // 对应Python: cube-shell.py:5605-5695 _ai_agents 管理
     QHash<SshSessionTab *, SshAiAgent *> m_aiAgents;
+    // MainWindow 正在析构标志：退出时 ~QWidget 删子对象会触发各 tab 的 destroyed
+    // lambda 访问 m_aiAgents，但此刻 hash 已处销毁中状态，remove 会 UAF 崩溃。
+    // 置位后 lambda 直接返回——退出时 hash 随 MainWindow 整体销毁，无需逐项 remove。
+    bool m_destroying = false;
     // QPointer 守卫会话在 closeTabIn 之外被销毁（应用退出）时的悬垂。
     QPointer<SshAiAgent> m_activeAiAgent;
     AiChatWorker *m_plainChatWorker = nullptr;   // 普通聊天模式（无工具）

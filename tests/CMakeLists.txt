@@ -187,7 +187,9 @@ target_link_libraries(compose_yaml_test PRIVATE
 )
 
 # DockerManager static parse helpers + compose path rule test (pure logic,
-# no docker CLI / network).
+# no docker CLI / network)。DockerManager 本体在 CUBESHELL_WITH_LOCALPROC=OFF
+#（鸿蒙）时不编译，测试同步摘除。
+if(CUBESHELL_WITH_LOCALPROC)
 qt_add_executable(docker_manager_test
     docker_manager_test.cpp
 )
@@ -198,9 +200,12 @@ target_link_libraries(docker_manager_test PRIVATE
     Qt6::Core
     cube_core
 )
+endif()
 
 # FRP 模块：包名映射 + FrpInstaller 纯函数 + traversal 配置逐字对比 +
 # frpc.toml 写入/回读往返（离线，不发起网络请求）。
+# CUBESHELL_WITH_LOCALPROC=OFF（鸿蒙）时 FrpInstaller/FrpManager 不编译，测试同步摘除。
+if(CUBESHELL_WITH_LOCALPROC)
 qt_add_executable(frp_installer_test
     frp_installer_test.cpp
 )
@@ -211,6 +216,7 @@ target_link_libraries(frp_installer_test PRIVATE
     Qt6::Core
     cube_core
 )
+endif()
 
 # CommandIndex / CommandHistory / extractCommandFromPrompt unit test
 # (pure logic, no network, no GUI display).
@@ -278,8 +284,10 @@ add_test(NAME platform_test COMMAND platform_test)
 add_test(NAME sse_parser_test COMMAND sse_parser_test)
 add_test(NAME safety_checker_test COMMAND safety_checker_test)
 add_test(NAME compose_yaml_test COMMAND compose_yaml_test)
-add_test(NAME docker_manager_test COMMAND docker_manager_test)
-add_test(NAME frp_installer_test COMMAND frp_installer_test)
+if(CUBESHELL_WITH_LOCALPROC)
+    add_test(NAME docker_manager_test COMMAND docker_manager_test)
+    add_test(NAME frp_installer_test COMMAND frp_installer_test)
+endif()
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
 if(CUBESHELL_WITH_SERIAL)

@@ -9,7 +9,9 @@
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
+#ifdef CUBESHELL_WITH_LOCALPROC
 #include "forwarder/FrpManager.h"
+#endif
 
 namespace cubeshell {
 
@@ -63,6 +65,7 @@ TunnelConfigWidget::TunnelConfigWidget(TunnelPool *pool, QWidget *parent)
     refresh();
 }
 
+#ifdef CUBESHELL_WITH_LOCALPROC
 void TunnelConfigWidget::setFrpManager(FrpManager *frp)
 {
     m_frp = frp;
@@ -74,6 +77,7 @@ void TunnelConfigWidget::setFrpManager(FrpManager *frp)
                 m_log->setText(QStringLiteral("[%1] %2").arg(name, line));
             }, Qt::QueuedConnection);
 }
+#endif // CUBESHELL_WITH_LOCALPROC
 
 // 对应Python: cube-shell.py::tunnel_refresh
 void TunnelConfigWidget::refresh()

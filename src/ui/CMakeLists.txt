@@ -25,9 +25,6 @@ set(UI_SOURCES
     dialogs/SettingsDialog.cpp
     dialogs/AddTunnelDialog.cpp
     dialogs/TunnelConfigWidget.cpp
-    dialogs/DockerManagerDialog.cpp
-    dialogs/DockerSoftDialog.cpp
-    dialogs/NatDialog.cpp
     dialogs/ProcessManagerDialog.cpp
     dialogs/LinuxCommandsDialog.cpp
     dialogs/AiSettingsDialog.cpp
@@ -35,13 +32,25 @@ set(UI_SOURCES
     # --- editors (对应Python: ui/code_editor.py / ui/text_editor.py) ---
     editors/CodeEditor.cpp
     editors/TextEditor.cpp
-
-    # --- Docker Compose 可视化编辑器 (对应Python: core/docker/docker_compose_editor.py) ---
-    editors/DockerComposeEditor.cpp
-    editors/ServiceConfigWidget.cpp
-    editors/ServiceSearchDialog.cpp
-    editors/DockerDaemonConfigDialog.cpp
 )
+
+# Docker/内网穿透相关对话框与编辑器：后端 DockerManager/FrpManager 在
+# CUBESHELL_WITH_LOCALPROC=OFF（鸿蒙沙箱禁止 exec）时不编译，UI 同步摘除。
+# （TunnelConfigWidget 保留：主体走 TunnelPool/SSH 端口转发，frp 仅作可选
+#  状态展示，widget 内部按 CUBESHELL_WITH_LOCALPROC 宏自行摘除。）
+if(CUBESHELL_WITH_LOCALPROC)
+    list(APPEND UI_SOURCES
+        dialogs/DockerManagerDialog.cpp
+        dialogs/DockerSoftDialog.cpp
+        dialogs/NatDialog.cpp
+
+        # --- Docker Compose 可视化编辑器 (对应Python: core/docker/docker_compose_editor.py) ---
+        editors/DockerComposeEditor.cpp
+        editors/ServiceConfigWidget.cpp
+        editors/ServiceSearchDialog.cpp
+        editors/DockerDaemonConfigDialog.cpp
+    )
+endif()
 
 # 串口 UI（CUBESHELL_WITH_SERIAL=ON 时才编译；宏由 cube_core PUBLIC 传递过来）。
 if(CUBESHELL_WITH_SERIAL)

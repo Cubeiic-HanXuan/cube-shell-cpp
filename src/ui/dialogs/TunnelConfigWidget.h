@@ -15,7 +15,9 @@ class QTreeWidgetItem;
 
 namespace cubeshell {
 
+#ifdef CUBESHELL_WITH_LOCALPROC
 class FrpManager;
+#endif
 
 class TunnelConfigWidget : public QWidget {
     Q_OBJECT
@@ -23,8 +25,10 @@ public:
     // pool 由主窗口拥有（credential resolver 也在主窗口设置）；不转移所有权。
     explicit TunnelConfigWidget(TunnelPool *pool, QWidget *parent = nullptr);
 
+#ifdef CUBESHELL_WITH_LOCALPROC
     // 可选注入 FrpManager 用于展示 frpc/frps 状态（Phase 5 全量接入）。
     void setFrpManager(FrpManager *frp);
+#endif
 
     // 重新加载 tunnel.json 并刷新列表。
     // 对应Python: cube-shell.py::tunnel_refresh
@@ -46,7 +50,9 @@ private:
     static QString stateText(TunnelPool::TunnelState state);
 
     TunnelPool *m_pool;              // 不拥有
+#ifdef CUBESHELL_WITH_LOCALPROC
     FrpManager *m_frp = nullptr;     // 不拥有
+#endif
 
     QTreeWidget *m_tree = nullptr;
     QPushButton *m_startStop = nullptr;

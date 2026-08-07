@@ -8,7 +8,6 @@
 // the UI thread); keystrokes from the emulation are forwarded to the channel.
 
 #include <QObject>
-#include <QRegularExpression>
 #include <QThread>
 
 #include <atomic>
@@ -54,6 +53,15 @@ private:
     void readLoop();           // runs on the worker thread
     void onEmulationSendData(const char *data, int length);
 
+    // 从字节流中剥掉 OSC 7 序列，并把其中的 cwd 路径追加到 paths。
+    // 纯字节扫描：不做 UTF-8 解码，避免多字节字符被网络分包切断后损坏。
+    static QByteArray stripOsc7(const QByteArray &in, QList<QByteArray> &paths);
+    // 剥除 _CUBE_ID=<数字>;<空白> 前缀，保留其后的真实命令（字节级）。
+    static QByteArray stripCubeIdPrefix(const QByteArray &in);
+    // 丢弃含任一标记的整行（按 \r 切分）。标记均为 ASCII，字节级比较安全。
+    static QByteArray dropMarkerLines(const QByteArray &in,
+                                      const QList<QByteArray> &markers);
+
     Konsole::Session *m_session;
     SshClient *m_client;
 
@@ -62,8 +70,15 @@ private:
 
     ShellMfaWatcher *m_mfaWatcher = nullptr;
 
-    static const QRegularExpression s_osc7Pattern;
-    static const QRegularExpression s_cubeIdPattern;
+    // 返回 in 末尾「不完整多字节 UTF-8 序列」的字节数（0 表示尾部完整）。
+    // readChannel 按固定大小切块，切点可能落在多字节字符中间。
+    static int incompleteUtf8TailLen(const QByteArray &in);
+
+    // 跨读取块的残留字节：尾部不完整的 UTF-8 序列留到下一块拼接后再处理。
+    // 不这样做的话，QString::fromUtf8 会把半个字符换成 U+FFFD，字节流被永久
+    // 破坏且长度改变，提示符里的 ANSI 序列随之断裂 —— 表现为按上下键翻历史
+    // 时提示符被冲掉、readline 重绘错位。仅读线程访问，无需加锁。
+    QByteArray m_residual;
 };
 
 } // namespace cubeshell

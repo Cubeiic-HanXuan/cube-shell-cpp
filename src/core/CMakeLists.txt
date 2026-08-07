@@ -34,11 +34,6 @@ set(CORE_SOURCES
     terminal/CommandIndex.cpp   # port of function/ssh_prompt_client.py::load_linux_commands + _compute_suggestions
     terminal/CommandHistory.cpp # port of cube-shell.py::_add_history_entry/_history_suggestions 等
 
-    # --- tunnels / forwarding ---
-    forwarder/FrpManager.cpp    # port of core/frp_manager.py
-    forwarder/FrpInstaller.cpp  # port of core/frp_manager.py (下载/解压/远端部署)
-    forwarder/FrpConnectWorker.cpp # port of cube-shell.py::FRPConnectThread
-
     # --- url dispatch ---
     url_dispatch/UrlHandler.cpp   # port of core/url_dispatch/url_handler.py
     url_dispatch/BastionClient.cpp # port of core/url_dispatch/bastion_client.py
@@ -58,18 +53,16 @@ set(CORE_SOURCES
     ai/TerminalExecutor.cpp     # port of core/ai/ssh_agent.py::_TerminalExecutor
     ai/CommandConfirmDialog.cpp # port of core/ai/confirm_dialog.py
     ai/AiChatPanel.cpp          # port of core/ai/ai_panel.py UI
-    ai/VoiceInput.cpp           # port of core/ai/voice_input.py
     ai/ServerProfileBuilder.cpp # port of core/ai/server_profile.py
 
-    # --- docker ---
-    docker/DockerManager.cpp    # port of core/docker/ (CLI + compose 编辑)
+    # --- docker (compose YAML 解析；纯数据层，不起子进程) ---
     docker/ComposeYaml.cpp      # port of yaml.safe_load/dump + util.get_compose_service
 
     # --- update ---
     update/UpdateChecker.cpp    # port of core/update/ (version + github_api + platform_match)
     update/UpdateDownloader.cpp # port of core/update/installer.py (下载+安装器调起)
 
-    # --- hermes ---
+    # --- hermes（HTTP/SSE 部分；本地 CLI 后端见 LOCALPROC 分支） ---
     hermes/HermesBackend.cpp    # port of core/hermes/backend.py (+自带 SSE 解析)
     hermes/HermesTaskModel.cpp  # port of core/hermes/cron_widget.py (CronWorker)
     hermes/HermesGateway.cpp    # port of core/hermes/gateway_widget.py + skills_widget.py
@@ -89,6 +82,31 @@ set(CORE_SOURCES
     claude_code/McpPanel.cpp           # port of core/claude_code/mcp_widget.py (MCP Tab)
     claude_code/McpEditDialog.cpp      # port of core/claude_code/mcp_widget.py::McpEditDialog
 )
+
+# 语音输入（QAudioSource 采集 + HTTP 识别）。HarmonyOS 上 QtMultimedia
+# 支持不完整，CUBESHELL_WITH_VOICE=OFF 时整体不编译，也不链接 Qt6::Multimedia。
+if(CUBESHELL_WITH_VOICE)
+    list(APPEND CORE_SOURCES
+        ai/VoiceInput.cpp       # port of core/ai/voice_input.py
+    )
+endif()
+
+# 依赖 QProcess 起本地子进程的模块。HarmonyOS 沙箱禁止 exec，
+# CUBESHELL_WITH_LOCALPROC=OFF 时整体不编译，UI 侧入口由同名宏摘除。
+#   * frp 内网穿透  —— 需要下载并运行 frpc/frps 二进制
+#   * docker CLI    —— 需要调用本机 docker 命令（ComposeYaml 纯解析层不受影响，
+#                      走 SSH 管理远程 Docker 的路径也不在此列）
+if(CUBESHELL_WITH_LOCALPROC)
+    list(APPEND CORE_SOURCES
+        # --- tunnels / forwarding ---
+        forwarder/FrpManager.cpp    # port of core/frp_manager.py
+        forwarder/FrpInstaller.cpp  # port of core/frp_manager.py (下载/解压/远端部署)
+        forwarder/FrpConnectWorker.cpp # port of cube-shell.py::FRPConnectThread
+
+        # --- docker (CLI 驱动部分) ---
+        docker/DockerManager.cpp    # port of core/docker/ (CLI + compose 编辑)
+    )
+endif()
 
 # Finder integration: Objective-C++ on macOS, plain stub elsewhere.
 # 对应Python: core/finder_integration.py (platform.system() == 'Darwin' 分支)
@@ -134,9 +152,21 @@ target_link_libraries(cube_core PUBLIC
     Qt6::Widgets   # ThemeManager (QApplication)
     Qt6::Network
     Qt6::Concurrent
-    Qt6::Multimedia # VoiceInput (QAudioSource/QMediaDevices)
     qtermwidget
 )
+
+# 语音输入（VoiceInput，QAudioSource/QMediaDevices）。宏用 PUBLIC：
+# cube_ui 侧的 AI 面板要靠它摘除麦克风按钮等入口代码。
+if(CUBESHELL_WITH_VOICE)
+    target_compile_definitions(cube_core PUBLIC CUBESHELL_WITH_VOICE=1)
+    target_link_libraries(cube_core PUBLIC Qt6::Multimedia)
+endif()
+
+# 本地子进程工具集（frp / docker CLI）。同样 PUBLIC：cube_ui 的
+# NatDialog / DockerManagerDialog 等入口要按此摘除。
+if(CUBESHELL_WITH_LOCALPROC)
+    target_compile_definitions(cube_core PUBLIC CUBESHELL_WITH_LOCALPROC=1)
+endif()
 
 # ComposeYaml 解析任意 Compose YAML。对应Python: PyYAML。
 # 目标名已在顶层 CMakeLists 统一为 yaml-cpp::yaml-cpp（find_package/FetchContent 兼容）。

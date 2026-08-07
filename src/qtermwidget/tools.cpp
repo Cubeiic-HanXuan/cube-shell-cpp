@@ -69,11 +69,23 @@ void addCustomColorSchemeDir(const QString &customDir)
 QStringList getColorSchemesDirs()
 {
     QStringList rval;
+
+    // 1. 编进二进制的 qrc 资源（前缀 "/color-schemes"，见 qtermwidget_res.qrc）。
+    //    QDir 可直接枚举 qrc 路径，QFile/QSettings 也能读 ":/..."。这是鸿蒙 HAP
+    //    （无可探测 resources/ 目录）下唯一可靠的来源，桌面平台同样可用作兜底。
+    //    仅在确实有文件时采用，避免 qrc 未挂到可执行目标时产生一个空目录命中。
+    const QString qrcDir = QStringLiteral(":/color-schemes");
+    if (QDir(qrcDir).exists()
+        && !QDir(qrcDir).entryList(QStringList(QStringLiteral("*.colorscheme"))).isEmpty())
+        rval << qrcDir + QLatin1Char('/');
+
+    // 2. 文件系统候选（macOS bundle / 可执行旁 resources/ / 编译期源码树），
+    //    取探测顺序里的第一个命中项，保持与既有行为一致。
     const QStringList candidates =
         resourceDirCandidates(QStringLiteral("color-schemes"), COLORSCHEMES_DIR);
     for (const QString &dir : candidates) {
         if (QDir(dir).exists()) {
-            rval << dir;    // 取探测顺序里的第一个命中项
+            rval << dir;
             break;
         }
     }

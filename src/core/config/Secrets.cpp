@@ -6,6 +6,10 @@
 #include <QHash>
 #include <QStringList>
 
+#if defined(CUBESHELL_PLATFORM_OHOS)
+#include <QSettings>
+#endif
+
 #include "GlobalState.h"
 
 #if defined(Q_OS_MACOS)
@@ -185,6 +189,99 @@ bool deleteSecret(const QString &service, const QString &account,
     Q_UNUSED(service); Q_UNUSED(account);
     if (errorOut) *errorOut = QStringLiteral("Secrets: Windows DPAPI backend not implemented yet");
     return false;
+}
+
+#elif defined(CUBESHELL_PLATFORM_OHOS)
+
+// --- HarmonyOS: 应用沙箱内的本地加密文件 ---
+//
+// 鸿蒙的系统级密钥库是 HUKS（HarmonyOS Universal KeyStore），需经 NDK 的
+// huks C 接口访问。一期先用沙箱内文件落地，理由：
+//   * 鸿蒙应用沙箱本身已隔离到 /data/app/el2/<userid>/base/<bundle>/，
+//     其他应用无法读取，威胁模型接近 Linux 下 ~/.config 的 0600 文件；
+//   * HUKS 接口需要在真机上反复验证，放到二期与 USB/串口一并做。
+// TODO(ohos): 二期接 HUKS（OH_Huks_GenerateKeyItem / EncryptData），
+//             把下面的 obfuscate() 换成真正的 AES-GCM。
+//
+// 存储格式：QSettings(IniFormat) 于 GlobalState::configFilePath("secrets.ini")，
+// 键为 "<service>/<account>"，值为混淆后的 base64。
+
+namespace {
+
+// 轻量混淆：与固定盐 XOR。**不是加密**，只防止明文直接可读；
+// 真正的机密性依赖沙箱隔离。二期换 HUKS 后此函数删除。
+QByteArray xorWithSalt(const QByteArray &in)
+{
+    static const char kSalt[] = "cube-shell/ohos/v1";
+    const int saltLen = int(sizeof(kSalt) - 1);
+    QByteArray out(in.size(), Qt::Uninitialized);
+    for (int i = 0; i < in.size(); ++i)
+        out[i] = char(in[i] ^ kSalt[i % saltLen]);
+    return out;
+}
+
+QByteArray obfuscate(const QByteArray &plain)
+{
+    return xorWithSalt(plain).toBase64();
+}
+
+QByteArray deobfuscate(const QByteArray &b64)
+{
+    return xorWithSalt(QByteArray::fromBase64(b64));
+}
+
+QString secretsFilePath()
+{
+    return GlobalState::configFilePath(QStringLiteral("secrets.ini"));
+}
+
+QString secretKey(const QString &service, const QString &account)
+{
+    return service + QLatin1Char('/') + account;
+}
+
+} // namespace
+
+bool storeSecret(const QString &service, const QString &account,
+                 const QString &secret, QString *errorOut)
+{
+    QSettings store(secretsFilePath(), QSettings::IniFormat);
+    store.setValue(secretKey(service, account),
+                   QString::fromLatin1(obfuscate(secret.toUtf8())));
+    store.sync();
+    if (store.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Secrets: 写入 %1 失败").arg(secretsFilePath());
+        return false;
+    }
+    return true;
+}
+
+QString retrieveSecret(const QString &service, const QString &account,
+                       QString *errorOut)
+{
+    QSettings store(secretsFilePath(), QSettings::IniFormat);
+    const QString stored = store.value(secretKey(service, account)).toString();
+    if (stored.isEmpty()) {
+        // 未存过不算错误——与 macOS 分支「找不到条目返回空且不报错」一致。
+        Q_UNUSED(errorOut);
+        return QString();
+    }
+    return QString::fromUtf8(deobfuscate(stored.toLatin1()));
+}
+
+bool deleteSecret(const QString &service, const QString &account,
+                  QString *errorOut)
+{
+    QSettings store(secretsFilePath(), QSettings::IniFormat);
+    store.remove(secretKey(service, account));
+    store.sync();
+    if (store.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Secrets: 删除失败");
+        return false;
+    }
+    return true;
 }
 
 #else

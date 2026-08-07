@@ -37,6 +37,70 @@ if(WIN32 AND VCPKG_TARGET_TRIPLET MATCHES "static-md")
 endif()
 
 # ---------------------------------------------------------------------------
+# 目标平台：鸿蒙PC（HarmonyOS 5 / OpenHarmony，麒麟 X90 ARM64）
+# ---------------------------------------------------------------------------
+# 见 docs/鸿蒙PC适配方案.md。
+#
+# 鸿蒙PC 虽是桌面形态（键鼠/窗口/菜单，Qt Widgets 主场），但应用模型与手机相同：
+# HAP 包 + 沙箱，因而三类能力在系统层面就不存在，只能整体裁剪：
+#   1. 无本地 shell —— 拿不到 forkpty/posix_openpt，本地终端标签页不可实现；
+#      SSH/串口终端不受影响（走 Session::runEmptyPTY() + 手动接管 emulation
+#      字节流，即 SerialBridge 已验证的模式），qtermwidget 渲染能力 100% 保留。
+#   2. 禁止 exec 子进程 —— QProcess 全线不可用，frp/docker CLI/claude CLI
+#      等「起本地进程」的功能失去载体。
+#   3. Qt 模块子集 —— 官方 Qt for OpenHarmony 不含 QtSerialPort，
+#      QtMultimedia 支持不完整。
+#
+# 落地约束：本开关**默认 OFF**，且所有裁剪都收敛在下面这一个 if() 内。
+# 桌面三平台（macOS/Windows/Linux）不传 -DCUBESHELL_PLATFORM_OHOS=ON 时，
+# 此段整体不执行，源码路径与编译产物与适配前逐字节一致。
+option(CUBESHELL_PLATFORM_OHOS "Build for HarmonyOS PC (OpenHarmony, aarch64-linux-ohos)" OFF)
+
+# 三个新开关的默认值随平台走：桌面 ON（保持现状），鸿蒙 OFF（能力不存在）。
+# 用变量做默认值而非事后 FORCE，是为了让 `cmake -LH` 展示的值就是真实生效值，
+# 同时保留使用者显式覆盖的余地（例如二期串口/RDP 补齐后单独打开）。
+if(CUBESHELL_PLATFORM_OHOS)
+    set(CUBESHELL_LOCAL_CAP_DEFAULT OFF)
+else()
+    set(CUBESHELL_LOCAL_CAP_DEFAULT ON)
+endif()
+
+# 本地终端后端（KPty/KPtyDevice/KPtyProcess/Pty/ConPtyProcess）。
+# OFF 时 qtermwidget 只保留远程数据源（SSH/串口）的渲染路径。
+option(CUBESHELL_WITH_LOCALPTY
+    "Build the local shell terminal backend (forkpty / ConPty)"
+    ${CUBESHELL_LOCAL_CAP_DEFAULT})
+
+# 语音输入（core/ai/VoiceInput，QAudioSource 采集 + HTTP 识别）。
+# OFF 时不再需要 Qt6::Multimedia，find_package 也随之跳过。
+option(CUBESHELL_WITH_VOICE
+    "Build voice input (Qt Multimedia / QAudioSource)"
+    ${CUBESHELL_LOCAL_CAP_DEFAULT})
+
+# 依赖 QProcess 起本地子进程的工具集：frp 内网穿透、本地 docker CLI、
+# claude/hermes 的本地 CLI 后端、本地文件管理器调起（open/explorer/xdg-open）。
+option(CUBESHELL_WITH_LOCALPROC
+    "Build tools that spawn local subprocesses (frp / docker CLI / local CLI backends)"
+    ${CUBESHELL_LOCAL_CAP_DEFAULT})
+
+if(CUBESHELL_PLATFORM_OHOS)
+    # 源码侧统一用这一个宏做条件编译（Qt 侧的 Q_OS_OHOS 需 Qt for OHOS 才定义，
+    # 这里自定义宏可让裁剪在任意工具链下都成立，也便于 clangd 索引）。
+    add_compile_definitions(CUBESHELL_PLATFORM_OHOS=1)
+
+    # 串口与 RDP 的 option() 在下方声明（历史顺序）。option() 不会覆盖已存在的
+    # 缓存条目，因此这里先写入缓存即可让后续 option() 保持 OFF，
+    # 且 find_package(Qt6 SerialPort) 不会被触发。
+    set(CUBESHELL_WITH_SERIAL OFF CACHE BOOL
+        "Serial port is unavailable on HarmonyOS (no QtSerialPort module)" FORCE)
+    set(CUBESHELL_WITH_RDP OFF CACHE BOOL
+        "RDP is unavailable on HarmonyOS (FreeRDP not ported yet)" FORCE)
+
+    message(STATUS "cube-shell: 目标平台为鸿蒙PC（OpenHarmony）——"
+                   "已裁剪 本地终端/串口/RDP/语音/本地子进程工具")
+endif()
+
+# ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
 # Workaround: Qt 6.9's FindWrapOpenGL.cmake unconditionally links the AGL
@@ -55,8 +119,12 @@ find_package(Qt6 REQUIRED COMPONENTS
     Widgets
     Network
     Concurrent
-    Multimedia      # VoiceInput (QAudioSource 录音)
 )
+# VoiceInput 需要 QtMultimedia（QAudioSource）。
+# HarmonyOS 上 QtMultimedia 支持不完整，默认关闭。
+if(CUBESHELL_WITH_VOICE)
+    find_package(Qt6 REQUIRED COMPONENTS Multimedia)
+endif()
 
 qt_standard_project_setup()
 
@@ -89,6 +157,10 @@ if(CUBESHELL_WITH_SSH)
     #   1. a caller-provided static lib (LIBSSH2_LIBRARY / LIBSSH2_INCLUDE_DIR)
     #   2. a system / brew install (find_library + find_path)
     #   3. FetchContent: build libssh2 from source (self-contained fallback)
+    #      — NOT available on OHOS: FetchContent uses the host toolchain, not the
+    #        cross-compiler.  OHOS builds MUST pre-cross-compile libssh2 (and its
+    #        transitive deps) with the OHOS NDK, then pass them via
+    #        LIBSSH2_LIBRARY / LIBSSH2_INCLUDE_DIR.
     find_path(LIBSSH2_INCLUDE_DIR NAMES libssh2.h
         HINTS ${LIBSSH2_INCLUDE_DIR} /tmp/libssh2-install/include /opt/homebrew/include /usr/local/include)
     find_library(LIBSSH2_LIBRARY NAMES libssh2 ssh2
@@ -99,7 +171,7 @@ if(CUBESHELL_WITH_SSH)
         set(LIBSSH2_INCLUDE_DIRS ${LIBSSH2_INCLUDE_DIR})
         set(LIBSSH2_LIBRARIES ${LIBSSH2_LIBRARY})
         message(STATUS "libssh2 found: ${LIBSSH2_LIBRARY}")
-    else()
+    elseif(NOT CUBESHELL_PLATFORM_OHOS)
         message(STATUS "libssh2 not found locally; fetching and building from source")
         include(FetchContent)
         FetchContent_Declare(libssh2
@@ -113,6 +185,14 @@ if(CUBESHELL_WITH_SSH)
         set(LIBSSH2_FOUND TRUE)
         set(LIBSSH2_INCLUDE_DIRS ${libssh2_SOURCE_DIR}/include)
         set(LIBSSH2_LIBRARIES libssh2_static OpenSSL::SSL OpenSSL::Crypto)
+    else()
+        message(FATAL_ERROR
+            "cube-shell OHOS: libssh2 not found, and FetchContent is unavailable on "
+            "OHOS (it would use the host toolchain, not the OHOS NDK).\n"
+            "  Cross-compile openssl/zlib/libssh2 with the OHOS NDK first "
+            "(see scripts/build-ohos-deps.sh), then re-run cmake with:\n"
+            "  -DLIBSSH2_INCLUDE_DIR=<...>/aarch64-linux-ohos/include\n"
+            "  -DLIBSSH2_LIBRARY=<...>/aarch64-linux-ohos/lib/libssh2.a")
     endif()
 
     if(NOT LIBSSH2_FOUND)
@@ -234,6 +314,14 @@ if(APPLE)
 
     # bundle 整体装到 <prefix>/（即 <prefix>/cube-shell.app）。
     install(TARGETS cube-shell BUNDLE DESTINATION .)
+elseif(CUBESHELL_PLATFORM_OHOS)
+    # 鸿蒙：qt-cmake 把 qt_add_executable 建成 MODULE library（由 HAP 壳加载，
+    # 不是独立可执行文件）。补 LIBRARY DESTINATION；HAP 打包由 DevEco/
+    # harmonydeployqt 负责（见 docs/鸿蒙PC适配方案.md 阶段 4），install 仅作占位。
+    install(TARGETS cube-shell
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
 else()
     # Linux / Windows: 裸可执行文件装到 bin/。
     install(TARGETS cube-shell RUNTIME DESTINATION bin)
@@ -306,9 +394,17 @@ message(STATUS "")
 message(STATUS "cube-shell configuration summary")
 message(STATUS "  Qt version      : ${Qt6_VERSION}")
 message(STATUS "  Build type      : ${CMAKE_BUILD_TYPE}")
+if(CUBESHELL_PLATFORM_OHOS)
+    message(STATUS "  Target platform : HarmonyOS PC (OpenHarmony)")
+else()
+    message(STATUS "  Target platform : Desktop (macOS / Windows / Linux)")
+endif()
 message(STATUS "  SSH (libssh2)   : ${CUBESHELL_WITH_SSH}")
 message(STATUS "  RDP (FreeRDP)   : ${CUBESHELL_WITH_RDP}")
 message(STATUS "  Serial (QtSerialPort): ${CUBESHELL_WITH_SERIAL}")
+message(STATUS "  Local PTY       : ${CUBESHELL_WITH_LOCALPTY}")
+message(STATUS "  Voice input     : ${CUBESHELL_WITH_VOICE}")
+message(STATUS "  Local subproc   : ${CUBESHELL_WITH_LOCALPROC}")
 if(CUBESHELL_WITH_RDP)
     # 诊断用：cjson 目标存在时 CMake 会把 WinPR 传递过来的裸名 cjson 解析成绝对
     # 路径；不存在时就只能靠上面的 link_directories 兜底。

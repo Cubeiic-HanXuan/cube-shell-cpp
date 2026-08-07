@@ -9,16 +9,11 @@
 
 set(QTERMWIDGET_SOURCES
     # --- core emulation / screen ---
-    # screen.cpp
-    # vt102_emulation.cpp
-    # emulation.cpp
-    # terminal_character_decoder.cpp
     Character.cpp
     CharacterColor.cpp
     konsole_wcwidth.cpp
     tools.cpp
     KProcess.cpp
-    KPty.cpp
     BlockArray.cpp
     ColorScheme.cpp
     KeyboardTranslator.cpp
@@ -31,37 +26,20 @@ set(QTERMWIDGET_SOURCES
     Emulation.cpp
     Vt102Emulation.cpp
     Filter.cpp
-    KPtyDevice.cpp
-    KPtyProcess.cpp
-    Pty.cpp
     SearchBar.cpp
     # --- wave 3: top-level ---
     Session.cpp
     TerminalDisplay.cpp
     HistorySearch.cpp
     qtermwidget.cpp
-
-    # --- rendering / widget ---
-    # terminal_display.cpp
-    # qtermwidget.cpp
-    # filter.cpp
-    # color_scheme.cpp
-    # keyboard_translator.cpp
-
-    # --- process / pty ---
-    # session.cpp
-    # shell_command.cpp
-    # kprocess.cpp
-    # kpty.cpp
-    # kpty_device.cpp
-    # kptyprocess.cpp
-    # pty.cpp
-
-    # --- misc ---
-    # tools.cpp
-    # search_bar.cpp
-    # history_search.cpp
 )
+
+# 本地终端后端（KPty/KPtyDevice/KPtyProcess/Pty）。
+# HarmonyOS 沙箱下无 forkpty/posix_openpt——CUBESHELL_WITH_LOCALPTY=OFF，
+# 终端只走 Session::runEmptyPTY() + 手动接管 emulation 字节流的远程数据源路径。
+if(CUBESHELL_WITH_LOCALPTY)
+    list(APPEND QTERMWIDGET_SOURCES KPty.cpp Pty.cpp KPtyDevice.cpp KPtyProcess.cpp)
+endif()
 
 # Placeholder translation unit kept only until enough real sources exist.
 # Currently unused since Character.cpp / CharacterColor.cpp are enabled.
@@ -74,7 +52,7 @@ add_library(qtermwidget STATIC ${QTERMWIDGET_SOURCES})
 
 # Windows 走 ConPTY（CreatePseudoConsole 位于 kernel32.lib，MSVC 默认链接，
 # 无需额外 target_link_libraries）；其余平台继续使用 KPty 系列实现。
-if(WIN32)
+if(WIN32 AND CUBESHELL_WITH_LOCALPTY)
     target_sources(qtermwidget PRIVATE ConPtyProcess.cpp)
 endif()
 
@@ -92,7 +70,7 @@ target_link_libraries(qtermwidget PUBLIC
 # libutil（glibc）里，不在 libc——必须显式链接，否则链接期 undefined reference to
 # `openpty'。Ubuntu 上常被工具链/Qt 间接带入而侥幸通过，Rocky/RHEL 等更「干净」的
 # 链接环境会直接报错。macOS 的 openpty 在 libSystem（无需额外库），故仅 Unix 非 Apple 链接。
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND CUBESHELL_WITH_LOCALPTY)
     find_library(UTIL_LIBRARY util)   # → /usr/lib64/libutil.so（glibc）
     if(UTIL_LIBRARY)
         target_link_libraries(qtermwidget PUBLIC ${UTIL_LIBRARY})
@@ -114,3 +92,9 @@ target_compile_definitions(qtermwidget PRIVATE
     COLORSCHEMES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/color-schemes"
     TRANSLATIONS_DIR="${CMAKE_SOURCE_DIR}/resources/translations/qtermwidget"
 )
+
+# 本地终端后端的可用性。PUBLIC：Session.h/qtermwidget.h 的使用者（cube_core 的
+# SshBridge/SerialBridge、cube_ui 的终端面板）也要按此摘除「起本地 shell」的调用。
+if(CUBESHELL_WITH_LOCALPTY)
+    target_compile_definitions(qtermwidget PUBLIC CUBESHELL_WITH_LOCALPTY=1)
+endif()

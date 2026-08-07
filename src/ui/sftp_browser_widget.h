@@ -45,6 +45,11 @@ public:
     void setCurrentPath(const QString &path);
     QString currentPath() const { return m_cwd; }
 
+    // 在路径栏左侧显示/隐藏分屏序号徽章（多分屏时避免混淆 SFTP 目录归属）。
+    // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
+    // tabTitle: 用于 tooltip 的标签名，展示完整的“分屏 N · 标签名”。
+    void setPaneIndicator(int paneNumber, int totalPanes, const QString &tabTitle);
+
 private slots:
     void onItemDoubleClicked(QTreeWidgetItem *item, int column);
     void goUp();
@@ -84,6 +89,7 @@ private:
     SftpUploaderCore *m_uploader = nullptr; // child，分片上传
 
     QLineEdit *m_pathEdit = nullptr;
+    QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章
     QTreeWidget *m_tree = nullptr;
     QProgressBar *m_progress = nullptr;
     QLabel *m_status = nullptr;

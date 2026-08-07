@@ -1,6 +1,7 @@
 #include "local_file_browser_widget.h"
 
 #include "file_icons.h"
+#include "pane_badge.h"
 #include "dialogs/CompressDialog.h"
 #include "editors/TextEditor.h"
 
@@ -13,6 +14,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QItemSelectionModel>
@@ -20,11 +22,17 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#ifndef CUBESHELL_PLATFORM_OHOS
 #include <QProcess>
+#endif
 #include <QSaveFile>
+#ifndef CUBESHELL_PLATFORM_OHOS
 #include <QStandardPaths>
+#endif
 #include <QStyle>
+#ifndef CUBESHELL_PLATFORM_OHOS
 #include <QThread>
+#endif
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -86,8 +94,16 @@ static QString ownerText(const QFileInfo &fi)
 LocalFileBrowserWidget::LocalFileBrowserWidget(QWidget *parent)
     : QWidget(parent)
 {
-    // 顶部仅保留路径栏，与 SftpBrowserWidget 一致（".." 行负责返回上级）。
+    // 顶部路径栏：左侧徽章（多分屏时显示序号）+ 路径编辑框。
+    m_paneBadge = createPaneBadge(this);
     m_pathEdit = new QLineEdit(this);
+
+    auto *pathBar = new QWidget(this);
+    auto *pathLayout = new QHBoxLayout(pathBar);
+    pathLayout->setContentsMargins(0, 0, 0, 0);
+    pathLayout->setSpacing(4);
+    pathLayout->addWidget(m_paneBadge);
+    pathLayout->addWidget(m_pathEdit, 1);
 
     // 平铺列表（非展开树），五列表头与 SFTP 浏览器 / Python 侧一致。
     // 对应Python: handle_file_tree_updated 里 setRootIsDecorated(False)/setIndentation(0)
@@ -113,7 +129,7 @@ LocalFileBrowserWidget::LocalFileBrowserWidget(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(2, 2, 2, 2);
     layout->setSpacing(0);
-    layout->addWidget(m_pathEdit);
+    layout->addWidget(pathBar);
     layout->addWidget(m_tree, 1);
 
     connect(m_pathEdit, &QLineEdit::returnPressed, this, &LocalFileBrowserWidget::onPathEdited);
@@ -135,6 +151,13 @@ void LocalFileBrowserWidget::setRootPath(const QString &path)
     m_rootPath = clean;
     m_pathEdit->setText(clean);
     populate();
+}
+
+// 刷新路径栏左侧的分屏徽章。单分屏时隐藏，完整信息走 tooltip。
+void LocalFileBrowserWidget::setPaneIndicator(int paneNumber, int totalPanes,
+                                             const QString &tabTitle)
+{
+    updatePaneBadge(m_paneBadge, paneNumber, totalPanes, tabTitle);
 }
 
 // 渲染当前目录（平铺，首行为 ".." 返回上级）。
@@ -278,17 +301,26 @@ void LocalFileBrowserWidget::showContextMenu(const QPoint &pos)
     addItem(QStringLiteral(":/createfile.png"), tr("创建文件"), &LocalFileBrowserWidget::createFileHere);
     addItem(QStringLiteral(":/refresh.png"), tr("刷新"), &LocalFileBrowserWidget::refresh);
     // 本机专属两项。对应Python: is_local 时的 action_new_local_terminal / action_show_in_explorer
+#ifdef CUBESHELL_WITH_LOCALPTY
+    // 鸿蒙：无本地 shell，「新建位于文件夹位置的终端窗口」入口摘除。
     addItem(QStringLiteral(":/icons8-ssh-48.png"), tr("新建位于文件夹位置的终端窗口"),
             &LocalFileBrowserWidget::openTerminalHere);
+#endif
+#ifndef CUBESHELL_PLATFORM_OHOS
+    // 鸿蒙沙箱：无系统文件管理器可调起（也无 exec），入口摘除。
     addItem(QStringLiteral(":/open.png"), tr("在文件资源管理器中显示"),
             &LocalFileBrowserWidget::showInFileManager);
+#endif
     addItem(QStringLiteral(":/permissions-48.png"), tr("权限"), &LocalFileBrowserWidget::showPermissions);
     menu.addSeparator();
     addItem(QStringLiteral(":/remove.png"), tr("删除"), &LocalFileBrowserWidget::removeSelected);
     addItem(QStringLiteral(":/icons-rename-48.png"), tr("重命名"), &LocalFileBrowserWidget::renameSelected);
     menu.addSeparator();
+#ifndef CUBESHELL_PLATFORM_OHOS
+    // 解压/新建压缩本机实现走 tar/zip 外部命令；鸿蒙沙箱禁止 exec，入口摘除。
     addItem(QStringLiteral(":/icons-unzip-48.png"), tr("解压"), &LocalFileBrowserWidget::decompressSelected);
     addItem(QStringLiteral(":/icons8-zip-48.png"), tr("新建压缩"), &LocalFileBrowserWidget::compressSelected);
+#endif
     menu.exec(m_tree->viewport()->mapToGlobal(pos));
 }
 
@@ -416,8 +448,10 @@ void LocalFileBrowserWidget::createFileHere()
     }
 }
 
+#ifdef CUBESHELL_WITH_LOCALPTY
 // 选中目录则在该目录、否则在当前目录新开本机终端（由外层接线）。
 // 对应Python: open_local_terminal_in_selected_folder
+// 鸿蒙：无本地 shell，菜单入口已摘除，本槽不编译。
 void LocalFileBrowserWidget::openTerminalHere()
 {
     QString target = m_rootPath;
@@ -426,8 +460,11 @@ void LocalFileBrowserWidget::openTerminalHere()
         target = sel;
     emit newTerminalRequested(target);
 }
+#endif // CUBESHELL_WITH_LOCALPTY
 
+#ifndef CUBESHELL_PLATFORM_OHOS
 // 跨平台“在文件资源管理器中显示”。对应Python: util.open_file_in_explorer
+// 鸿蒙沙箱：无系统文件管理器可调起，本槽不编译。
 void LocalFileBrowserWidget::showInFileManager()
 {
     const QString path = selectedPath();
@@ -452,6 +489,7 @@ void LocalFileBrowserWidget::showInFileManager()
         QProcess::startDetached(QStringLiteral("xdg-open"), {QFileInfo(path).absolutePath()});
 #endif
 }
+#endif // !CUBESHELL_PLATFORM_OHOS
 
 // 权限对话框：用户/分组/其他 × R/W/X 九个复选框 → chmod。
 // 对应Python: show_auth + Auth.ok_auth（is_local 分支 os.chmod）
@@ -547,8 +585,10 @@ void LocalFileBrowserWidget::renameSelected()
     populate();
 }
 
+#ifndef CUBESHELL_PLATFORM_OHOS
 // 本机解压：按后缀调用系统 unzip/tar（后台线程，避免大包卡 UI）。
 // 对应Python: unzip → DecompressThread（is_local 分支 zipfile/tarfile）
+// 鸿蒙沙箱：禁止 exec，本槽与 compressSelected 一并摘除（菜单入口已隐藏）。
 void LocalFileBrowserWidget::decompressSelected()
 {
     const QStringList paths = selectedPaths();
@@ -653,5 +693,6 @@ void LocalFileBrowserWidget::compressSelected()
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     worker->start();
 }
+#endif // !CUBESHELL_PLATFORM_OHOS
 
 } // namespace cubeshell

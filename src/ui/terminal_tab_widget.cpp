@@ -103,6 +103,10 @@ TerminalTabWidget::TerminalTabWidget(QWidget *parent)
         "QToolButton#newLocalTerminalButton:focus { border-color: palette(highlight); }"));
     connect(m_newButton, &QToolButton::clicked,
             this, &TerminalTabWidget::newLocalTerminalRequested);
+#ifndef CUBESHELL_WITH_LOCALPTY
+    // 鸿蒙：无本地 shell，"+"（新建本机终端）按钮没有可用动作，整体隐藏。
+    m_newButton->setVisible(false);
+#endif
 
     QTabBar *bar = tabBar();
     connect(bar, &QTabBar::tabMoved, this, [this](int, int) { schedulePosition(); });

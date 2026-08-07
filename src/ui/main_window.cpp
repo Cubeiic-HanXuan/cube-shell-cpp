@@ -46,12 +46,16 @@
 #include "dialogs/AboutDialog.h"
 #include "dialogs/AddTunnelDialog.h"
 #include "dialogs/AiSettingsDialog.h"
+#ifdef CUBESHELL_WITH_LOCALPROC
 #include "dialogs/DockerManagerDialog.h"
 #include "dialogs/DockerSoftDialog.h"
+#endif
 #include "dialogs/LinuxCommandsDialog.h"
 #include "dialogs/ProcessManagerDialog.h"
+#ifdef CUBESHELL_WITH_LOCALPROC
 #include "dialogs/NatDialog.h"
 #include "forwarder/FrpManager.h"
+#endif
 #include "dialogs/SettingsDialog.h"
 #include "dialogs/TunnelConfigWidget.h"
 
@@ -63,7 +67,9 @@
 #include "ai/SshAiAgent.h"
 #include "ai/TerminalExecutor.h"
 #include "claude_code/ClaudeCodePanel.h"
+#ifdef CUBESHELL_WITH_LOCALPROC
 #include "docker/DockerManager.h"
+#endif
 #include "hermes/HermesPanel.h"
 #include "ssh/CommandExecutor.h"
 #include "ssh/SshBridge.h"
@@ -216,19 +222,8 @@ void MainWindow::setupUi()
     // 对应Python: 连接成功后左侧 treeWidget 改展示 SFTP/本地文件目录
     m_browserStack = new QStackedWidget(this);
     m_browserStack->setVisible(false);
-    // 文件浏览器标题栏：显示归属的"分屏 N · 标签名"，多分屏下避免混淆。
-    m_browserTitle = new QLabel(this);
-    m_browserTitle->setStyleSheet(QStringLiteral(
-        "QLabel { "
-        "  background-color: palette(window); "
-        "  color: palette(text); "
-        "  padding: 4px 8px; "
-        "  border-bottom: 1px solid palette(mid); "
-        "  font-weight: bold; "
-        "}"));
-    m_browserTitle->setVisible(false);
+
     m_leftSplitter = new QSplitter(Qt::Vertical, this);
-    m_leftSplitter->addWidget(m_browserTitle);
     m_leftSplitter->addWidget(m_browserStack);
     m_leftSplitter->addWidget(m_deviceList);
     m_leftSplitter->setStretchFactor(0, 1);
@@ -245,8 +240,10 @@ void MainWindow::setupUi()
 
     connect(m_deviceList, &DeviceListWidget::activated,
             this, &MainWindow::openSshSession);
+#ifdef CUBESHELL_WITH_LOCALPTY
     connect(m_deviceList, &DeviceListWidget::localTerminalRequested,
             this, &MainWindow::openLocalTerminal);
+#endif
     connect(m_deviceList, &DeviceListWidget::addRequested,
             this, &MainWindow::addDevice);
     connect(m_deviceList, &DeviceListWidget::editRequested,
@@ -306,8 +303,10 @@ TerminalTabWidget *MainWindow::createPane()
     // Windows Terminal 风格标签：圆角悬浮标签，主题自适应（见上方 helper）。
     tabs->setStyleSheet(windowsTerminalTabStyle());
     tabs->tabBar()->setCursor(Qt::PointingHandCursor);
+#ifdef CUBESHELL_WITH_LOCALPTY
     connect(tabs, &TerminalTabWidget::newLocalTerminalRequested,
             this, &MainWindow::openLocalTerminal);
+#endif
 
     connect(tabs, &QTabWidget::tabCloseRequested, this,
             [this, tabs](int index) { closeTabIn(tabs, index); });
@@ -540,8 +539,10 @@ void MainWindow::setupMenus()
 
     // --- 终端 ---
     QMenu *termMenu = menuBar()->addMenu(tr("终端"));
+#ifdef CUBESHELL_WITH_LOCALPTY
     QAction *newTerm = termMenu->addAction(tr("新建本机终端"), this, &MainWindow::openLocalTerminal);
     newTerm->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+#endif
 #ifdef CUBESHELL_WITH_RDP
     // 新建空白 RDP 面板，连接参数由用户在表单中填写后点“连接”。
     // 对应Python: 设备协议为 rdp 时走 open_rdp_tab；C++ 侧另提供手动入口
@@ -649,14 +650,21 @@ void MainWindow::setupToolbar()
         return act;
     };
 
+#ifdef CUBESHELL_WITH_LOCALPROC
+    // Docker/常用容器依赖本机或远程 docker CLI 子进程驱动（DockerManager）；
+    // 鸿蒙沙箱禁止 exec，入口摘除。走 SSH 管理远程 Docker 的纯数据层不受影响。
     addTool(QStringLiteral(":/icons8-docker-48.png"), tr("Docker 管理"),
             tr("Docker 容器管理"), &MainWindow::showDockerManager);
     addTool(QStringLiteral(":/icons8-container-48.png"), tr("常用容器"),
             tr("常用容器安装"), &MainWindow::showDockerSoft);
+#endif
     addTool(QStringLiteral(":/tunnel-diode.png"), tr("SSH 隧道"),
             tr("SSH 隧道管理"), &MainWindow::showTunnelManager);
+#ifdef CUBESHELL_WITH_LOCALPROC
+    // 内网穿透（frp）需要下载并运行 frpc/frps 本地二进制，鸿蒙摘除。
     addTool(QStringLiteral(":/icons8-nat-48.png"), tr("内网穿透"),
             tr("内网穿透设置"), &MainWindow::showNatDialog);
+#endif
     addTool(QStringLiteral(":/icons8-processor-48.png"), tr("进程管理"),
             tr("远程进程管理"), &MainWindow::showProcessManager);
     addTool(QStringLiteral(":/icons8-hermes-48.png"), QStringLiteral("Hermes Agent"),
@@ -1114,8 +1122,11 @@ void MainWindow::showHermesPanel()
     }
     panel->setAvailableConnections(hosts, executors);
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     // Agent 页请求"在终端中打开"→ 新开本机终端跑 hermes chat。
     // 对应Python: agent_widget.open_terminal_requested → 主窗开终端
+    // 鸿蒙：无本地 shell，hermes CLI 本地运行载体不存在；面板内已按
+    // CUBESHELL_WITH_LOCALPROC 隐藏该入口，这里同步不接线。
     connect(panel, &HermesPanel::openTerminalRequested,
             this, [this](const QString &profileName) {
         QTermWidget *term = openLocalTerminalAt(QString());
@@ -1137,6 +1148,7 @@ void MainWindow::showHermesPanel()
 #endif
         });
     });
+#endif // CUBESHELL_WITH_LOCALPTY
 
     TerminalTabWidget *pane = targetPane();
     const int idx = pane->addTab(panel, tabName);
@@ -1185,10 +1197,13 @@ void MainWindow::showClaudeCodePanel()
         }
     }
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     // 子面板请求在终端执行 claude 命令 → 新开本机终端。
     // 对应Python: panel.open_terminal_requested.connect(open_claude_terminal)
+    // 鸿蒙：无本地 shell，claude CLI 本地运行载体不存在（面板远程模式仍可用）。
     connect(panel, &ClaudeCodePanel::openTerminalRequested,
             this, &MainWindow::openClaudeTerminal);
+#endif
 
     TerminalTabWidget *pane = targetPane();
     const int idx = pane->addTab(panel, tabName);
@@ -1196,8 +1211,10 @@ void MainWindow::showClaudeCodePanel()
     // 首次显示由 panel 的 showEvent 触发初始化与首刷（对应Python 行 117-122）
 }
 
+#ifdef CUBESHELL_WITH_LOCALPTY
 // 在新本机终端中执行 claude 命令（延迟 500ms 发送，等 shell 就绪）。
 // 对应Python: cube-shell.py::open_claude_terminal（行 1314-1337）
+// 鸿蒙：无本地 shell，本函数整体不编译（其唯一发信方也在 LOCALPTY 内摘除）。
 void MainWindow::openClaudeTerminal(const QString &command)
 {
     QTermWidget *term = openLocalTerminalAt(QString());
@@ -1219,6 +1236,7 @@ void MainWindow::openClaudeTerminal(const QString &command)
 #endif
     });
 }
+#endif // CUBESHELL_WITH_LOCALPTY
 
 // 对应Python: cube-shell.py::_claude_tab_name（行 1282-1300）：
 // 命令可能包裹了切目录前缀，按语义提取而非取最后一个 token。
@@ -1462,11 +1480,13 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
         m_browserStack->removeWidget(browser);
         browser->deleteLater();
     }
+#ifdef CUBESHELL_WITH_LOCALPROC
     // 会话标签被关闭：其 dockerExecutor 将随之销毁，先从 Docker 后端撤下。
     if (m_dockerManager && m_dockerExecutor && m_dockerExecutor->parent() == w) {
         m_dockerManager->setRemoteExecutor(nullptr);
         m_dockerExecutor = nullptr;
     }
+#endif
     // 进程管理对话框同样只引用不持有 executor，一并撤下。
     if (m_processExecutor && m_processExecutor->parent() == w) {
         if (m_processManagerDialog)
@@ -1737,10 +1757,12 @@ void MainWindow::updatePaneHighlight()
         QString qss = windowsTerminalTabStyle();
         if (active) {
             qss += QStringLiteral(
-                "QTabWidget::pane { border-top: 2px solid palette(highlight); }");
+                "QTabWidget::pane { border-top: 1px solid palette(highlight); }");
         }
         pane->setStyleSheet(qss);
     }
+    // 分屏数变化时徽章的显示条件（多分屏才显示）和序号都可能变，一并重算。
+    refreshPaneIndicators();
 }
 
 // 焦点在分屏之间循环切换。delta=1 向后，delta=-1 向前。
@@ -1850,7 +1872,6 @@ void MainWindow::updateLeftPanel(QTabWidget *pane)
     QWidget *browser = page ? m_tabBrowsers.value(page) : nullptr;
     if (!browser) {
         m_browserStack->setVisible(false);
-        m_browserTitle->setVisible(false);
         m_deviceList->setBrowserMode(false);
         return;
     }
@@ -1858,38 +1879,47 @@ void MainWindow::updateLeftPanel(QTabWidget *pane)
     m_deviceList->setBrowserMode(true);
     if (!m_browserStack->isVisible()) {
         m_browserStack->setVisible(true);
-        m_browserTitle->setVisible(true);
         if (!m_leftBrowserSized) {
             // 首次展开：文件树占满左栏，设备控件压缩到底部复选框行高度。
-            m_leftSplitter->setSizes({1, m_leftSplitter->height(), 1});
+            m_leftSplitter->setSizes({m_leftSplitter->height(), 1});
             m_leftBrowserSized = true;
         }
     }
-    // 更新标题栏显示对应的分屏和标签信息。
-    updateBrowserTitle(tabs, page);
+    // 更新浏览器路径栏的分屏徽章。
+    updatePaneIndicator(tabs, page);
     // 本机终端 + 跟随目录：切回来时同步一次终端 cwd。
     // 对应Python: follow_folder 勾选时切 tab 自动 refreshDirs
     if (m_deviceList->followFolderEnabled())
         syncBrowserToTerminalCwd();
 }
 
-// 刷新文件浏览器标题栏：显示"分屏 N · 标签名"，让用户知道当前看的是谁的目录。
-void MainWindow::updateBrowserTitle(QTabWidget *pane, QWidget *page)
+// 刷新文件浏览器路径栏左侧的分屏徽章，让用户知道当前看的是谁的目录。
+// 单分屏时徽章隐藏（无歧义），多分屏时显示序号 + tooltip 给出完整标签名。
+void MainWindow::updatePaneIndicator(QTabWidget *pane, QWidget *page)
 {
-    if (!m_browserTitle || !pane || !page)
+    if (!pane || !page)
+        return;
+    QWidget *browser = m_tabBrowsers.value(page);
+    if (!browser)
         return;
     const int num = paneNumber(pane);
     const int idx = pane->indexOf(page);
-    if (num == 0 || idx < 0) {
-        m_browserTitle->clear();
-        return;
+    const QString tabTitle = (idx >= 0) ? pane->tabText(idx) : QString();
+    const int total = m_panes.count();
+    if (auto *sftp = qobject_cast<SftpBrowserWidget *>(browser))
+        sftp->setPaneIndicator(num, total, tabTitle);
+    else if (auto *local = qobject_cast<LocalFileBrowserWidget *>(browser))
+        local->setPaneIndicator(num, total, tabTitle);
+}
+
+// 重刷全部标签的徽章：徽章可见性取决于分屏总数，分屏增减时整体重算，
+// 否则刚分屏/合并时已有浏览器的徽章会停留在旧状态。
+void MainWindow::refreshPaneIndicators()
+{
+    for (TerminalTabWidget *pane : std::as_const(m_panes)) {
+        for (int i = 0; i < pane->count(); ++i)
+            updatePaneIndicator(pane, pane->widget(i));
     }
-    const QString tabTitle = pane->tabText(idx);
-    // 多分屏时显示"分屏 2 · SSH: host"；只有一个分屏时省略"分屏 1 ·"前缀。
-    if (m_panes.count() > 1)
-        m_browserTitle->setText(tr("分屏 %1 · %2").arg(num).arg(tabTitle));
-    else
-        m_browserTitle->setText(tabTitle);
 }
 
 // pane 在 m_panes 中的序号（从 1 开始，用于界面展示）；找不到返回 0。
@@ -2029,6 +2059,7 @@ void MainWindow::resetStatusItems()
 // 终端 / 会话
 // ---------------------------------------------------------------------------
 
+#ifdef CUBESHELL_WITH_LOCALPTY
 void MainWindow::openLocalTerminal()
 {
     openLocalTerminalAt(QString());
@@ -2036,6 +2067,7 @@ void MainWindow::openLocalTerminal()
 
 // startDir 非空时以其为 shell 初始工作目录（延迟启动：先设目录再 run）。
 // 对应Python: cube-shell.py::open_local_terminal_in_selected_folder（start_dir）
+// 鸿蒙：无本地 shell，本函数整体不编译（所有调用方均已按 LOCALPTY 摘除）。
 QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
 {
     const bool hasDir = !startDir.isEmpty() && QFileInfo(startDir).isDir();
@@ -2094,6 +2126,7 @@ QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
     });
     return term;
 }
+#endif // CUBESHELL_WITH_LOCALPTY
 
 void MainWindow::openSshSession(const DeviceEntry &stub)
 {
@@ -2189,12 +2222,14 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
     connect(tab, &SshSessionTab::disconnected, this, [this, device, tab]() {
         setStatus(tr("已断开：%1").arg(device.host));
         setTabConnected(tab, false);
+#ifdef CUBESHELL_WITH_LOCALPROC
         // Docker 后端若正用着该会话的 executor，撤下避免悬垂
         // （DockerManager 持裸指针，凭 QPointer 判归属）。
         if (m_dockerManager && m_dockerExecutor && m_dockerExecutor->parent() == tab) {
             m_dockerManager->setRemoteExecutor(nullptr);
             m_dockerExecutor = nullptr;
         }
+#endif
         // 进程管理对话框同理：撤下该会话的 executor，避免刷新到已断连接。
         if (m_processExecutor && m_processExecutor->parent() == tab) {
             if (m_processManagerDialog)
@@ -2623,11 +2658,13 @@ void MainWindow::showWindowsIntegration()
 // Docker 管理 / 左侧工具栏占位入口
 // ---------------------------------------------------------------------------
 
+#ifdef CUBESHELL_WITH_LOCALPROC
 // 显示 Docker 对话框前刷新后端上下文：懒建 DockerManager，并把当前活动
 // SSH 会话的 CommandExecutor（objectName "dockerExecutor"，会话内复用）
 // 喂给它；无活动 SSH 连接时置空 executor，回到"未连接"行为。
 // 对应Python: cube-shell.py:1039-1045 的 isConnected 判定 +
 // showClaudeCodePanel 的 executor 复用模式（见上方 569-589 行段落）
+// 鸿蒙（LOCALPROC=OFF）：DockerManager 不编译，本节整体摘除。
 void MainWindow::ensureDockerManager()
 {
     if (!m_dockerManager)
@@ -2720,6 +2757,7 @@ void MainWindow::showNatDialog()
     m_natDialog->raise();
     m_natDialog->activateWindow();
 }
+#endif // CUBESHELL_WITH_LOCALPROC
 
 // 对应Python: cube-shell.py:1390-1399 showProcessManagerDialog
 void MainWindow::showProcessManager()

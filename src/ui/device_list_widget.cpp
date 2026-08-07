@@ -199,8 +199,11 @@ void DeviceListWidget::onContextMenu(const QPoint &pos)
         menu.addAction(tr("添加配置"), this, &DeviceListWidget::addRequested);
         menu.addAction(tr("新建分组"), this, &DeviceListWidget::createGroup);
         menu.addSeparator();
+#ifdef CUBESHELL_WITH_LOCALPTY
+        // 鸿蒙：无本地 shell，「新建本机终端」入口摘除。
         menu.addAction(tr("新建本机终端"), this,
                        &DeviceListWidget::localTerminalRequested);
+#endif
         menu.addAction(tr("保存设备配置"), this, &DeviceListWidget::saveRequested);
     }
 

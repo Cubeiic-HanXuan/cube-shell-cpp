@@ -34,6 +34,7 @@
 #include "dialogs/CompressDialog.h"
 #include "editors/TextEditor.h"
 #include "file_icons.h"
+#include "pane_badge.h"
 
 namespace cubeshell {
 
@@ -87,10 +88,18 @@ static QString ownerText(const SftpFileInfo &e)
 SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     : QWidget(parent)
 {
-    // 顶部仅保留路径栏，所有文件操作走右键菜单。
+    // 顶部路径栏：左侧徽章（多分屏时显示序号）+ 路径编辑框。
     // 对应Python: add_line_edit(pwd) 在文件树顶部展示当前目录
+    m_paneBadge = createPaneBadge(this);
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setText(m_cwd);
+
+    auto *pathBar = new QWidget(this);
+    auto *pathLayout = new QHBoxLayout(pathBar);
+    pathLayout->setContentsMargins(0, 0, 0, 0);
+    pathLayout->setSpacing(4);
+    pathLayout->addWidget(m_paneBadge);
+    pathLayout->addWidget(m_pathEdit, 1);
 
     // 平铺列表（非展开树），五列表头与 Python 侧一致。
     // 对应Python: handle_file_tree_updated 里 setRootIsDecorated(False)/setIndentation(0)
@@ -123,7 +132,7 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(2, 2, 2, 2);
     layout->setSpacing(0);
-    layout->addWidget(m_pathEdit);
+    layout->addWidget(pathBar);
     layout->addWidget(m_tree, 1);
     layout->addWidget(m_progress);
     layout->addWidget(m_status);
@@ -252,6 +261,13 @@ void SftpBrowserWidget::setCurrentPath(const QString &path)
     if (clean == m_cwd)
         return;
     loadPath(clean);
+}
+
+// 刷新路径栏左侧的分屏徽章。单分屏时隐藏，完整信息走 tooltip。
+void SftpBrowserWidget::setPaneIndicator(int paneNumber, int totalPanes,
+                                         const QString &tabTitle)
+{
+    updatePaneBadge(m_paneBadge, paneNumber, totalPanes, tabTitle);
 }
 
 void SftpBrowserWidget::loadPath(const QString &path)

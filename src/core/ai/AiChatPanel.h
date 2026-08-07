@@ -33,7 +33,9 @@ class QVBoxLayout;
 
 namespace cubeshell {
 
+#ifdef CUBESHELL_WITH_VOICE
 class VoiceInput;
+#endif
 
 // 单条命令卡片，显示命令、风险等级、描述及操作按钮。
 // 对应Python: ai_panel.py::CommandCard
@@ -171,7 +173,9 @@ private:
     int m_lastBubbleHeight = 0;
 
     MarkdownRenderer m_renderer;
-    VoiceInput *m_voiceInput = nullptr;
+#ifdef CUBESHELL_WITH_VOICE
+    VoiceInput *m_voiceInput = nullptr;   // CUBESHELL_WITH_VOICE=OFF 时未创建
+#endif
 };
 
 } // namespace cubeshell

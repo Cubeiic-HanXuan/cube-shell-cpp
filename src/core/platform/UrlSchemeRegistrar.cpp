@@ -7,7 +7,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#ifndef CUBESHELL_PLATFORM_OHOS
 #include <QProcess>
+#endif
 
 #ifdef Q_OS_WIN
 #include <QSettings>
@@ -17,7 +19,9 @@ namespace cubeshell {
 
 namespace {
 
+#ifndef CUBESHELL_PLATFORM_OHOS
 // 对应Python: _get_exe_path（C++ 下无 frozen 分支，可执行文件即自身）
+// 鸿蒙：无任何使用方（公开接口直接短路返回），不编译。
 QString exePath()
 {
     return QCoreApplication::applicationFilePath();
@@ -35,8 +39,12 @@ QString schemeDescription(const QString &scheme)
         return QStringLiteral("CubeShell SSH Protocol");
     return QStringLiteral("CubeShell %1 Protocol").arg(scheme);
 }
+#endif // !CUBESHELL_PLATFORM_OHOS
 
-#if defined(Q_OS_MACOS)
+// macOS 分支在鸿蒙上不编译：鸿蒙无 bundle/PlistBuddy/lsregister，
+// 且 Q_OS_MACOS 与 CUBESHELL_PLATFORM_OHOS 不会同时出现在真实工具链下
+//（此处防御的是 OHOS 宏开在 macOS 宿主机上的交叉配置检查场景）。
+#if defined(Q_OS_MACOS) && !defined(CUBESHELL_PLATFORM_OHOS)
 
 // 当前 .app bundle 的 Info.plist 路径；非 bundle 运行（裸可执行文件）返回空。
 QString bundleInfoPlistPath()
@@ -225,6 +233,10 @@ bool unregisterWin(const QStringList &schemes)
     return classes.status() == QSettings::NoError;
 }
 
+#elif defined(CUBESHELL_PLATFORM_OHOS)
+// 鸿蒙：无 .desktop/xdg-mime 概念（系统交互走 Want/Uri），Linux 分支的
+// 辅助函数与 QProcess 调用整体不编译；公开接口在下方直接返回 true。
+
 #else // Linux / other Unix
 
 // 对应Python: _register_linux 里的 desktop 文件路径
@@ -314,6 +326,12 @@ QStringList UrlSchemeRegistrar::defaultSchemes()
 
 bool UrlSchemeRegistrar::isRegistered(const QStringList &schemes)
 {
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    // 鸿蒙：URL/深度链接经应用市场 HAP 声明，系统侧无桌面式 scheme 注册概念；
+    // 按「已注册」处理，避免启动期反复尝试写桌面文件。
+    Q_UNUSED(schemes);
+    return true;
+#else
     const QStringList effective = schemes.isEmpty() ? defaultSchemes() : schemes;
 #if defined(Q_OS_MACOS)
     return isRegisteredMac(effective);
@@ -322,11 +340,17 @@ bool UrlSchemeRegistrar::isRegistered(const QStringList &schemes)
 #else
     return isRegisteredLinux(effective);
 #endif
+#endif
 }
 
 bool UrlSchemeRegistrar::registerSchemes(const QStringList &schemes,
                                          const QString &exePathOverride)
 {
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    Q_UNUSED(schemes);
+    Q_UNUSED(exePathOverride);
+    return true;
+#else
     const QStringList effective = schemes.isEmpty() ? defaultSchemes() : schemes;
     const QString exe = exePathOverride.isEmpty() ? exePath() : exePathOverride;
 #if defined(Q_OS_MACOS)
@@ -337,10 +361,15 @@ bool UrlSchemeRegistrar::registerSchemes(const QStringList &schemes,
 #else
     return registerLinux(effective, exe);
 #endif
+#endif
 }
 
 bool UrlSchemeRegistrar::unregisterSchemes(const QStringList &schemes)
 {
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    Q_UNUSED(schemes);
+    return true;
+#else
     const QStringList effective = schemes.isEmpty() ? defaultSchemes() : schemes;
 #if defined(Q_OS_MACOS)
     return unregisterMac(effective);
@@ -348,6 +377,7 @@ bool UrlSchemeRegistrar::unregisterSchemes(const QStringList &schemes)
     return unregisterWin(effective);
 #else
     return unregisterLinux(effective);
+#endif
 #endif
 }
 

@@ -90,11 +90,13 @@ private:
     void refreshDeviceList();
     bool saveDevices();
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     void openLocalTerminal();
     // 以 dir 为工作目录新开本机终端（文件树右键“新建位于文件夹位置的终端窗口”）。
     // 返回新建的终端（openClaudeTerminal 需要向其发送命令）。
     // 对应Python: cube-shell.py::open_local_terminal_in_selected_folder
     QTermWidget *openLocalTerminalAt(const QString &dir);
+#endif
     void openSshSession(const DeviceEntry &device);
     void setStatus(const QString &text);
 
@@ -148,12 +150,15 @@ private:
     TerminalTabWidget *targetPane() const;
     void updateTerminalInfo();
 
-    // --- 左侧文件浏览器（设备列表下方，随当前标签切换） ---
+    // --- 左侧文件浏览器（设备列表下方,随当前标签切换） ---
     // 对应Python: 连接后左侧 treeWidget 展示 SFTP/本地文件目录
     void updateLeftPanel(QTabWidget *pane = nullptr);
-    // 刷新文件浏览器标题栏：显示浏览器归属的“分屏 N · 标签名”。
+    // 刷新文件浏览器的分屏徽章：在路径栏左侧显示归属的”分屏 N”序号。
     // 多分屏下左栏被所有分屏共享，不标明归属时无法分辨当前看的是谁的目录。
-    void updateBrowserTitle(QTabWidget *pane, QWidget *page);
+    void updatePaneIndicator(QTabWidget *pane, QWidget *page);
+    // 重刷全部标签的徽章。徽章是否可见取决于分屏总数，分屏增减时必须整体重算，
+    // 否则要等用户切一次标签徽章才更新。
+    void refreshPaneIndicators();
     // 给活动分屏的标签栏加高亮边框，非活动分屏淡化 —— 与标题栏配合，
     // 让“哪个分屏是当前焦点”一眼可见。
     void updatePaneHighlight();
@@ -197,9 +202,11 @@ private:
     void onCommandsStepMode(const QList<AiCommand> &commands, SshAiAgent *agent);
     void showHermesPanel();
     void showClaudeCodePanel();
+#ifdef CUBESHELL_WITH_LOCALPTY
     // 在新本机终端中执行 claude 命令（Claude Code 面板的 openTerminalRequested）。
     // 对应Python: cube-shell.py::open_claude_terminal（行 1314-1337）
     void openClaudeTerminal(const QString &command);
+#endif
     // 根据 claude 命令语义生成终端 Tab 名称。
     // 对应Python: cube-shell.py::_claude_tab_name（行 1282-1300）
     static QString claudeTabName(const QString &command);
@@ -239,22 +246,25 @@ private:
 
     // 左侧工具栏入口（未移植的工具先占位）。
     // 对应Python: cube-shell.py::setupLeftToolbar 绑定的各 show*Dialog
+#ifdef CUBESHELL_WITH_LOCALPROC
     void showDockerManager();
     void showDockerSoft();
     void showNatDialog();
+#endif
     void showProcessManager();
 
+#ifdef CUBESHELL_WITH_LOCALPROC
     // 显示 Docker 对话框前刷新后端上下文：懒建 DockerManager，并把当前
     // 活动 SSH 会话的 CommandExecutor 喂给它（无活动连接则置空回本地态）。
     // 对应Python: cube-shell.py:1007-1077 懒加载 + isConnected 上下文
     void ensureDockerManager();
+#endif
 
     void onBastionConnect(const BastionConnectParams &params);
 
     QSplitter *m_splitter = nullptr;       // 左栏 | 终端区
     QSplitter *m_leftSplitter = nullptr;   // 左栏：设备列表 / 文件浏览器（上下）
     QStackedWidget *m_browserStack = nullptr; // 每个会话 Tab 一页文件浏览器
-    QLabel *m_browserTitle = nullptr;      // 文件浏览器标题栏（显示对应的分屏+标签）
     QSplitter *m_termSplitter = nullptr;   // 顶层分屏容器（可嵌套子 splitter 实现多方向分屏）
     DeviceListWidget *m_deviceList = nullptr;
     QList<TerminalTabWidget *> m_panes;    // 全部分屏面板（首个常驻，其余按需创建/销毁）
@@ -285,11 +295,13 @@ private:
 
     // Docker 管理（全部懒加载）。
     // 对应Python: cube-shell.py:1007-1077 _docker_manager_dialog / _docker_soft_dialog
+#ifdef CUBESHELL_WITH_LOCALPROC
     DockerManager *m_dockerManager = nullptr;
     DockerManagerDialog *m_dockerManagerDialog = nullptr;
     DockerSoftDialog *m_dockerSoftDialog = nullptr;
     // DockerManager 侧持裸指针；QPointer 守卫会话销毁后的悬垂 executor。
     QPointer<CommandExecutor> m_dockerExecutor;
+#endif
 
     // 远程进程管理（懒加载）。
     // 对应Python: cube-shell.py:1390-1399 showProcessManagerDialog
@@ -299,8 +311,10 @@ private:
     // 内网穿透（懒加载）。
     // 对应Python: cube-shell.py::_ensure_nat_dialog 的 self._nat_dialog
     //           + core/frp_manager.py::get_frp_manager 单例
+#ifdef CUBESHELL_WITH_LOCALPROC
     NatDialog *m_natDialog = nullptr;
     FrpManager *m_frpManager = nullptr;
+#endif
 
     // AI 助手集成：每个 SSH 会话标签一个 SshAiAgent（懒建，parent 为会话标签）。
     // 对应Python: cube-shell.py:5605-5695 _ai_agents 管理

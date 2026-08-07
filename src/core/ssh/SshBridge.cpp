@@ -21,15 +21,99 @@
 
 namespace cubeshell {
 
-// OSC 7: ESC ] 7 ; file://hostname/path  BEL  or  ESC ] 7 ; ... ESC \
-// 对应C++: re.compile(rb'\x1b\]7;file://[^/]*(.*?)(?:\x07|\x1b\\)')
-const QRegularExpression SshBridge::s_osc7Pattern(
-    QStringLiteral("\x1b\\]7;file://[^/]*(.*?)(?:\x07|\x1b\\\\)"));
+// OSC 7 剥离：ESC ] 7 ; file://<host>/<path> 以 BEL(\x07) 或 ST(ESC \) 结束。
+//
+// 纯字节扫描而非正则 —— 正则要先 QString::fromUtf8()，而 readChannel 按固定
+// 大小切块，切点可能落在多字节 UTF-8 字符中间；fromUtf8 会把不完整序列换成
+// U+FFFD，原始字节永久丢失且长度改变，转回 toUtf8 后送进终端就是乱码，
+// 提示符里的 ANSI 序列一旦被截断，整段渲染都会错乱。
+QByteArray SshBridge::stripOsc7(const QByteArray &in, QList<QByteArray> &paths)
+{
+    static const QByteArray kPrefix = QByteArrayLiteral("\x1b]7;file://");
+    if (!in.contains(kPrefix))
+        return in;
 
-// AI command marker prefix: _CUBE_ID=<digits>;<optional whitespace>
-// 对应C++: re.compile(rb'_CUBE_ID=\d+;\s*')
-const QRegularExpression SshBridge::s_cubeIdPattern(
-    QStringLiteral("_CUBE_ID=\\d+;\\s*"));
+    QByteArray out;
+    out.reserve(in.size());
+    int pos = 0;
+    while (pos < in.size()) {
+        const int start = in.indexOf(kPrefix, pos);
+        if (start < 0) {
+            out.append(in.mid(pos));
+            break;
+        }
+        out.append(in.mid(pos, start - pos));
+
+        // 找结束符：BEL 或 ESC \。
+        const int bodyStart = start + kPrefix.size();
+        int end = -1;
+        int endLen = 0;
+        for (int i = bodyStart; i < in.size(); ++i) {
+            if (in.at(i) == '\x07') {
+                end = i;
+                endLen = 1;
+                break;
+            }
+            if (in.at(i) == '\x1b' && i + 1 < in.size() && in.at(i + 1) == '\\') {
+                end = i;
+                endLen = 2;
+                break;
+            }
+        }
+        if (end < 0) {
+            // 序列未结束（被分包切断）：整段留给下一块拼接后再处理。
+            out.append(in.mid(start));
+            break;
+        }
+
+        // host 与 path 以第一个 '/' 分界，path 含该斜杠。
+        const QByteArray body = in.mid(bodyStart, end - bodyStart);
+        const int slash = body.indexOf('/');
+        if (slash >= 0)
+            paths.append(body.mid(slash));
+
+        pos = end + endLen;
+    }
+    return out;
+}
+
+// 丢弃包含任一标记的整行。行以 \r 分隔（shell 回显用 \r\n）。
+QByteArray SshBridge::dropMarkerLines(const QByteArray &in,
+                                      const QList<QByteArray> &markers)
+{
+    bool hit = false;
+    for (const QByteArray &m : markers) {
+        if (in.contains(m)) {
+            hit = true;
+            break;
+        }
+    }
+    if (!hit)
+        return in;
+
+    const QList<QByteArray> lines = in.split('\r');
+    QList<QByteArray> kept;
+    kept.reserve(lines.size());
+    for (const QByteArray &line : lines) {
+        bool drop = false;
+        for (const QByteArray &m : markers) {
+            if (line.contains(m)) {
+                drop = true;
+                break;
+            }
+        }
+        if (!drop)
+            kept.append(line);
+    }
+
+    QByteArray out;
+    for (int i = 0; i < kept.size(); ++i) {
+        if (i > 0)
+            out.append('\r');
+        out.append(kept.at(i));
+    }
+    return out;
+}
 
 SshBridge::SshBridge(Konsole::Session *session, SshClient *client, QObject *parent)
     : QObject(parent)
@@ -90,6 +174,79 @@ void SshBridge::onEmulationSendData(const char *data, int length)
     m_client->writeChannel(QByteArray(data, length));
 }
 
+// 剥除 _CUBE_ID=<数字>;<后随空白> 前缀，保留其后的真实命令。
+// 等价于旧的 s_cubeIdPattern 正则，但在字节上做，避免 UTF-8 往返。
+QByteArray SshBridge::stripCubeIdPrefix(const QByteArray &in)
+{
+    static const QByteArray kMarker = QByteArrayLiteral("_CUBE_ID=");
+    if (!in.contains(kMarker))
+        return in;
+
+    QByteArray out;
+    out.reserve(in.size());
+    int pos = 0;
+    while (pos < in.size()) {
+        const int start = in.indexOf(kMarker, pos);
+        if (start < 0) {
+            out.append(in.mid(pos));
+            break;
+        }
+        out.append(in.mid(pos, start - pos));
+
+        int i = start + kMarker.size();
+        // 必须紧跟至少一位数字，否则不是标记，原样保留。
+        const int digitsStart = i;
+        while (i < in.size() && in.at(i) >= '0' && in.at(i) <= '9')
+            ++i;
+        if (i == digitsStart || i >= in.size() || in.at(i) != ';') {
+            out.append(kMarker);
+            pos = start + kMarker.size();
+            continue;
+        }
+        ++i;   // 跳过 ';'
+        // 吞掉后随空白（对应正则的 \s*）。
+        while (i < in.size() && QChar::isSpace(static_cast<unsigned char>(in.at(i))))
+            ++i;
+        pos = i;
+    }
+    return out;
+}
+
+// 返回末尾不完整多字节 UTF-8 序列的字节数（0 表示尾部完整）。
+// 连续字节规律（RFC 3629）：
+//   0xxxxxxx                  — 1 字节 (ASCII)
+//   110xxxxx 10xxxxxx          — 2 字节
+//   1110xxxx 10xxxxxx 10xxxxxx — 3 字节
+//   11110xxx 10xxxxxx 10xxxxxx 10xxxxxx — 4 字节
+int SshBridge::incompleteUtf8TailLen(const QByteArray &in)
+{
+    if (in.isEmpty())
+        return 0;
+    // 从尾部倒查续字节（0b10xxxxxx），一个合法序列最多 3 个。
+    int need = 0;
+    int i = in.size() - 1;
+    while (i >= 0 && need < 3
+           && (static_cast<unsigned char>(in.at(i)) & 0xC0) == 0x80) {
+        ++need;
+        --i;
+    }
+    if (i < 0)
+        return need;   // 全是续字节：前缀在上一块里，整块留待拼接
+
+    const unsigned char c = static_cast<unsigned char>(in.at(i));
+    if ((c & 0x80) == 0)
+        return 0;      // ASCII：已是序列边界（孤立续字节属编码错误，照原样送出）
+
+    int expect = 0;
+    if ((c & 0xE0) == 0xC0)      expect = 1;
+    else if ((c & 0xF0) == 0xE0) expect = 2;
+    else if ((c & 0xF8) == 0xF0) expect = 3;
+    else return 0;     // 非法前缀，不保留
+
+    // 续字节已齐 → 尾部完整；否则连前缀一起留下（need + 前缀 1 字节）。
+    return need >= expect ? 0 : need + 1;
+}
+
 void SshBridge::readLoop()
 {
     while (m_running) {
@@ -105,60 +262,48 @@ void SshBridge::readLoop()
         if (data.isEmpty())
             break; // EOF / closed
 
+        // 先拼上一块留下的不完整 UTF-8 尾巴，再把本块新的不完整尾巴留下。
+        // 顺序很重要：必须在任何 fromUtf8 / 内容过滤之前完成。
+        if (!m_residual.isEmpty()) {
+            data.prepend(m_residual);
+            m_residual.clear();
+        }
+        if (const int tail = incompleteUtf8TailLen(data); tail > 0) {
+            m_residual = data.right(tail);
+            data.chop(tail);
+            if (data.isEmpty())
+                continue; // 整块都是半个字符，等下一块
+        }
+
         // MFA / OTP prompt detection (watcher strips ANSI itself; non-blocking,
         // has a cooldown to avoid re-triggering).
         const QString prompt = m_mfaWatcher->feed(data);
         if (!prompt.isEmpty())
             emit shellMfaPromptDetected(prompt);
 
-        const QString dataStr = QString::fromUtf8(data);
+        // TerminalExecutor 需要原始数据（含哨兵）,必须在过滤之前发出。
+        // AI 侧做文本分析,U+FFFD 无害,可以安全转 QString。
+        emit rawDataForAi(QString::fromUtf8(data));
 
-        // TerminalExecutor 需要原始数据（含哨兵），必须在过滤之前发出。
-        emit rawDataForAi(dataStr);
+        // 字节级过滤：OSC 7、shell-integration hook、AI marker。
+        QList<QByteArray> cwdPaths;
+        QByteArray clean = stripOsc7(data, cwdPaths);
+        for (const QByteArray &path : std::as_const(cwdPaths))
+            emit cwdChanged(QString::fromUtf8(path));
 
-        // OSC 7 cwd reporting.
-        auto it = s_osc7Pattern.globalMatch(dataStr);
-        while (it.hasNext()) {
-            const QString path = it.next().captured(1);
-            if (!path.isEmpty())
-                emit cwdChanged(path);
-        }
+        static const QList<QByteArray> kMarkers = {
+            QByteArrayLiteral("__cs_osc7"),
+            QByteArrayLiteral("__cube_end"),
+            QByteArrayLiteral("PAGER=cat"),
+            QByteArrayLiteral("__CUBE_AI_END__")
+        };
+        clean = dropMarkerLines(clean, kMarkers);
 
-        // Filtering is done on the UTF-8 string form (OSC7 / cube markers are
-        // all ASCII), then converted back to bytes for the terminal.
-        QString clean = dataStr;
+        // _CUBE_ID=N;<空白> 前缀剥除（保留其后的真实命令）。
+        clean = stripCubeIdPrefix(clean);
 
-        // Strip OSC 7 sequences so they don't render as garbage.
-        clean.remove(s_osc7Pattern);
-
-        // Drop shell-integration hook echo lines (__cs_osc7).
-        if (clean.contains(QLatin1String("__cs_osc7"))) {
-            const QStringList lines = clean.split(QLatin1Char('\r'));
-            QStringList kept;
-            for (const QString &l : lines)
-                if (!l.contains(QLatin1String("__cs_osc7")))
-                    kept << l;
-            clean = kept.join(QLatin1Char('\r'));
-        }
-
-        // Drop AI command-marker echo lines (hook 回显 + 哨兵输出行)。
-        if (clean.contains(QLatin1String("__cube_end")) || clean.contains(QLatin1String("PAGER=cat"))
-            || clean.contains(QLatin1String("__CUBE_AI_END__"))) {
-            const QStringList lines = clean.split(QLatin1Char('\r'));
-            QStringList kept;
-            for (const QString &l : lines)
-                if (!l.contains(QLatin1String("__cube_end")) && !l.contains(QLatin1String("PAGER=cat"))
-                    && !l.contains(QLatin1String("__CUBE_AI_END__")))
-                    kept << l;
-            clean = kept.join(QLatin1Char('\r'));
-        }
-        // Replace _CUBE_ID=N; prefix, keeping the actual command.
-        if (clean.contains(QLatin1String("_CUBE_ID=")))
-            clean.remove(s_cubeIdPattern);
-
-        const QByteArray cleanBytes = clean.toUtf8();
-        if (!cleanBytes.isEmpty())
-            emit dataReceived(cleanBytes);
+        if (!clean.isEmpty())
+            emit dataReceived(clean);
     }
 
     m_running = false;

@@ -151,6 +151,44 @@ endif()
    运行期探测路径补 OHOS 分支
 5. 签名（调试证书 → 发布证书）→ 出 HAP → 真机调测 → AppGallery PC 端上架
 
+> **进度（2026-08-06）**：未签名 HAP 已可一键盘出并**在模拟器跑起来**——
+> `./scripts/build-ohos-app.sh --clean --hap`，产物
+> `build-ohos/hap/entry/build/default/outputs/default/entry-default-unsigned.hap`（约 117 MB，
+> 内含 `libcube-shell.so` + Qt6 Core/Gui/Widgets/Network + 第三方依赖库）。
+> 已验证在 Huawei 2in1 模拟器（API 24）上 `hdc install` + `aa start` 后进入前台、UI 响应输入。
+> 签名/上架仍待做。
+>
+> **运行到模拟器/设备**：
+> ```bash
+> HDC=~/Library/OpenHarmony/Sdk/23/toolchains/hdc
+> $HDC install -r build-ohos/hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+> $HDC shell aa start -b org.qtproject.example.cube_shell -a QAbility   # 启动
+> $HDC shell aa force-stop org.qtproject.example.cube_shell             # 停止
+> ```
+>
+> **关键踩坑 ①（hvigor `00303168 SDK component missing`）**：hvigorw 只认
+> 「完整 HarmonyOS SDK」布局——`<root>/<stage>/{openharmony,hms}/<component>` 且组件根带
+> `sdk-pkg.json`。单独下载的 API 23 SDK（`~/Library/OpenHarmony/Sdk/23`）只有
+> `oh-uni-package.json`、无此布局，hvigor 扫不到。解决：把 `DEVECO_SDK_HOME` 指向
+> **DevEco Studio 自带的完整 SDK** `/Applications/DevEco-Studio.app/Contents/sdk`
+> （API 26，含资源编译依赖 `toolchains/lib/libimage_transcoder_shared.dylib`）。
+> 生成的 `build-profile.json5` 无需手改（`compatibleSdkVersion 6.1.0(23)` 保留，
+> `compileSdkVersion` 留空由 hvigor 取 SDK 的 26.0.0）。脚本已内置该默认值。
+>
+> **关键踩坑 ②（启动即崩 jscrash `handleAbilityStageOnCreate of undefined`）**：
+> Qt for OHOS 的预编译 `libQt6Gui/Network/Core.so` 动态依赖一批第三方库，但 Qt 安装包
+> 与鸿蒙系统都不附带，导致 `libqohos.so` dlopen 失败、`import qpa` 得到 undefined：
+>   - Gui → `libfontconfig` `libfreetype` `libpng16`；Network → `libbrotlidec/common`；
+>     Core → `libicui18n/uc/data`（ICU **78**，符号后缀 `_78`，版本必须匹配）
+>   - 由 `scripts/build-ohos-qt-deps.sh` 用 OHOS NDK 交叉编译，并以
+>     「裸名 + SONAME 名」两套文件名拷进 `entry/libs/arm64-v8a/`（Qt 按裸名 dlopen，
+>     这批库彼此按 SONAME 名引用，OHOS 按文件名加载，两种都得在）。
+>   - `build-ohos-app.sh --hap` 已自动调用该脚本注入并重打 HAP。
+>
+> **关键踩坑 ③（`--clean` 后 harmonydeployqt 报 `uv_cwd ENOENT`）**：hvigor 缓存了
+> 被删的 `build-ohos/hap` 旧路径。脚本在 `--clean --hap` 时会一并 `--stop-daemon` +
+> 清 `~/.hvigor`。
+
 ---
 
 ## 4. 关键工程模板

@@ -14,11 +14,25 @@ namespace cubeshell {
 //   macOS:   both config and data map to ~/Library/Application Support
 //   Windows: both map to %LOCALAPPDATA%
 //   Linux:   config -> $XDG_CONFIG_HOME (~/.config), data -> ~/.local/share
+//   OHOS:    sandbox AppConfigLocation / AppDataLocation
+//            (/data/app/el2/<user>/base/<bundle>/haps/entry/files/...)
 // QStandardPaths::GenericConfigLocation on macOS is ~/Library/Preferences,
 // which does NOT match appdirs — hence the platform switch below.
 static QString appdirsBase(bool wantData)
 {
-#if defined(Q_OS_MACOS)
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    // 鸿蒙：Generic*Location 在沙箱里解析为空串/沙箱外路径，配置会写丢
+    // （问题1「重启后找不到配置文件」的根因）。
+    //
+    // 注意：不能用 AppConfigLocation——Qt 把它映射到鸿蒙的
+    //   .../preferences/cube-shell
+    // 目录，而 preferences/ 是鸿蒙给「轻量 KV 偏好存储(Preferences 数据库)」
+    // 预留的目录，不适合放 devices.json/theme.json/groups.json 这类 JSON 文档。
+    // AppDataLocation 映射到应用文件目录 files/，才是放文档的正确位置。
+    // config 与 data 共用它（同 macOS/Windows 的 appdirs 语义：config == data）。
+    Q_UNUSED(wantData);
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+#elif defined(Q_OS_MACOS)
     Q_UNUSED(wantData);
     // appdirs: ~/Library/Application Support (config == data on macOS)
     return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
@@ -43,8 +57,14 @@ GlobalState &GlobalState::instance()
 // 对应Python: cube-shell.py::get_config_directory (appdirs.user_config_dir + makedirs)
 QString GlobalState::configDir()
 {
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    // 鸿蒙：AppDataLocation 已含应用名(.../files/cube-shell)，直接用即可
+    // （不再追加 /cube-shell）。
+    const QString dir = appdirsBase(false);
+#else
     const QString dir = appdirsBase(false) + QLatin1Char('/')
                         + QLatin1String(vars::APP_NAME);
+#endif
     QDir().mkpath(dir); // os.makedirs(config_dir, exist_ok=True)
     return dir;
 }
@@ -53,8 +73,12 @@ QString GlobalState::configDir()
 // (core/ai/audit.py::AuditLogger.__init__, core/update/platform_match.py 等)
 QString GlobalState::dataDir()
 {
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    const QString dir = appdirsBase(true);
+#else
     const QString dir = appdirsBase(true) + QLatin1Char('/')
                         + QLatin1String(vars::APP_NAME);
+#endif
     QDir().mkpath(dir);
     return dir;
 }

@@ -16,10 +16,13 @@
 #include <QThread>
 
 #include "Emulation.h"
-#include "Pty.h"
 #include "ShellCommand.h"
 #include "TerminalDisplay.h" // 并行移植模块,契约名 (见 assumptions)
 #include "Vt102Emulation.h"
+
+#ifdef CUBESHELL_WITH_LOCALPTY
+#include "Pty.h"
+#endif
 
 #if defined(Q_OS_UNIX)
 #  include <csignal>
@@ -34,14 +37,17 @@ int Session::lastSessionId = 0;
 // 对应C++: Session::Session(QObject* parent)
 Session::Session(QObject *parent)
     : QObject(parent)
+    , _shellProcess(nullptr)   // CUBESHELL_WITH_LOCALPTY=OFF 时恒为空
     , _receivedTextDecoder("UTF-8") // 对应 codecs.getincrementaldecoder('utf-8')(errors='replace')
 {
     // ---- 核心组件 ----
+#ifdef CUBESHELL_WITH_LOCALPTY
     // 对应C++: _shellProcess = new Pty();
     _shellProcess = new Pty(this);
     // 对应C++: ptySlaveFd = _shellProcess->pty()->slaveFd();
     if (_shellProcess->pty())
         _ptySlaveFd = _shellProcess->pty()->slaveFd();
+#endif
 
     // 对应C++: _emulation = new Vt102Emulation();
     _emulation = new Vt102Emulation();
@@ -66,6 +72,7 @@ Session::Session(QObject *parent)
     // connect(_emulation, &Vt102Emulation::cursorChanged, this, &Session::cursorChanged);
     connect(_emulation, &Emulation::cursorChanged, this, &Session::cursorChanged);
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     // _shellProcess->setUtf8Mode(true);
     _shellProcess->setUtf8Mode(true);
 
@@ -77,12 +84,15 @@ Session::Session(QObject *parent)
     connect(_emulation, &Emulation::lockPtyRequest, _shellProcess, &Pty::lockPty);
     // connect(_emulation, SIGNAL(useUtf8Request(bool)), _shellProcess, SLOT(setUtf8Mode(bool)));
     connect(_emulation, &Emulation::useUtf8Request, _shellProcess, &Pty::setUtf8Mode);
+#endif
     // connect(_shellProcess, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(done(int,QProcess::ExitStatus)));
+#ifdef CUBESHELL_WITH_LOCALPTY
 #ifdef Q_OS_WIN
     connect(_shellProcess, &Pty::processExited, this, &Session::done);
 #else
     connect(_shellProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &Session::done);
 #endif
+#endif // CUBESHELL_WITH_LOCALPTY
 
     // ---- 监控定时器 (对应 _setupMonitorTimer) ----
     // 对应C++: _monitorTimer = new QTimer(this);
@@ -105,7 +115,12 @@ Session::~Session()
 // 对应C++: bool Session::isRunning() const
 bool Session::isRunning() const
 {
+#ifdef CUBESHELL_WITH_LOCALPTY
     return _shellProcess && _shellProcess->state() == QProcess::Running;
+#else
+    // 无本地 PTY：运行态由外部数据源（SSH/串口）管理，Session 自身恒为「未在跑本地进程」。
+    return false;
+#endif
 }
 
 // 对应C++: void Session::setProfileKey(const QString &)
@@ -437,6 +452,7 @@ bool Session::sendSignal(int sig)
     if (processId() <= 0)
         return false;
 
+#ifdef CUBESHELL_WITH_LOCALPTY
 #if defined(Q_OS_UNIX)
     // 对应C++: int result = ::kill(static_cast<pid_t>(_shellProcess->processId()), signal);
     const int result = ::kill(static_cast<pid_t>(_shellProcess->processId()), sig);
@@ -449,6 +465,11 @@ bool Session::sendSignal(int sig)
     Q_UNUSED(sig);
     return false;
 #endif
+#else
+    // HarmonyOS: no local shell, signals not applicable.
+    Q_UNUSED(sig);
+    return false;
+#endif // CUBESHELL_WITH_LOCALPTY
 }
 
 // 对应C++: void Session::setAutoClose(bool)
@@ -465,8 +486,10 @@ void Session::setFlowControlEnabled(bool enabled)
 
     _flowControl = enabled;
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     if (_shellProcess)
         _shellProcess->setFlowControlEnabled(_flowControl);
+#endif
 
     Q_EMIT flowControlEnabledChanged(enabled);
 }
@@ -494,16 +517,20 @@ void Session::sendKeyEvent(QKeyEvent *event) const
 // 对应C++: int Session::processId() const
 int Session::processId() const
 {
+#ifdef CUBESHELL_WITH_LOCALPTY
     if (_shellProcess)
         return static_cast<int>(_shellProcess->processId());
+#endif
     return -1;
 }
 
 // 对应C++: int Session::foregroundProcessId() const
 int Session::foregroundProcessId() const
 {
+#ifdef CUBESHELL_WITH_LOCALPTY
     if (_shellProcess)
         return _shellProcess->foregroundProcessGroup();
+#endif
     return -1;
 }
 
@@ -538,6 +565,7 @@ bool Session::hasDarkBackground() const
 // 对应C++: void Session::refresh()
 void Session::refresh()
 {
+#ifdef CUBESHELL_WITH_LOCALPTY
     if (!_shellProcess)
         return;
 
@@ -549,6 +577,9 @@ void Session::refresh()
         if (_shellProcess)
             _shellProcess->setWindowSize(existingSize.height(), existingSize.width());
     });
+#endif
+    // 无本地 PTY：远程终端的尺寸同步走 applyPendingTerminalSize() 的
+    // terminalSizeApplied 信号，无需对本地 PTY 做抖窗。
 }
 
 // 对应C++: int Session::getPtySlaveFd() const
@@ -565,8 +596,16 @@ int Session::windowId() const
 }
 
 // 对应C++: void Session::run()
+//
+// 起本地 shell。CUBESHELL_WITH_LOCALPTY=OFF（鸿蒙沙箱无本地 shell）时整体不编译——
+// 该形态下终端只有远程数据源，入口方 qtermwidget/上层面板走 runEmptyPTY()。
 void Session::run()
 {
+#ifndef CUBESHELL_WITH_LOCALPTY
+    qWarning("Session::run(): 本地 shell 在本平台不可用（CUBESHELL_WITH_LOCALPTY=OFF），"
+             "请改用 runEmptyPTY() + 外部数据源（SSH/串口）");
+    return;
+#else
     if (!_shellProcess || !_emulation)
         return;
 
@@ -639,12 +678,23 @@ void Session::run()
     QTimer::singleShot(100, this, [this]() { updateTerminalSize(); });
 
     Q_EMIT started();
+#endif // CUBESHELL_WITH_LOCALPTY
 }
 
 // 对应C++: void Session::runEmptyPTY()
+//
+// 「空 PTY」模式：终端不起本地 shell，字节流由外部数据源（SSH 通道 / 串口）
+// 经 Emulation::sendData 与 onReceiveBlock 双向接管。SshBridge/SerialBridge 都走这条路。
+//
+// CUBESHELL_WITH_LOCALPTY=OFF（鸿蒙）时 _shellProcess 为空：本函数不再有 Pty
+// 可配置，但**仍必须发出 started()**，否则上层桥接拿不到会话就绪信号。
 void Session::runEmptyPTY()
 {
-    if (!_shellProcess || !_emulation)
+    if (!_emulation)
+        return;
+
+#ifdef CUBESHELL_WITH_LOCALPTY
+    if (!_shellProcess)
         return;
 
     _shellProcess->setFlowControlEnabled(_flowControl);
@@ -655,6 +705,9 @@ void Session::runEmptyPTY()
     disconnect(_emulation, &Emulation::sendData, _shellProcess, &Pty::sendData);
 
     _shellProcess->setEmptyPTYProperties();
+#endif
+    // 鸿蒙：构造函数从未建立 emulation→Pty 连接，无需 disconnect；
+    // 流控/erase 字符等 PTY termios 属性没有承载对象，跳过即可。
 
     Q_EMIT started();
 }
@@ -671,6 +724,7 @@ void Session::close()
     _autoClose = true;
     _wantedClose = true;
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     if (_shellProcess)
         _shellProcess->blockSignals(true);
 
@@ -680,6 +734,8 @@ void Session::close()
         // 等待时间不能太长,否则阻塞UI线程
         _shellProcess->waitForFinished(100);
     }
+#endif
+    // 无本地 PTY：无本地进程可杀，远程通道的关闭由桥接层（SshBridge/SerialBridge）负责。
 
     // 强制发出 finished 信号
     QTimer::singleShot(1, this, [this]() { Q_EMIT finished(); });
@@ -761,10 +817,14 @@ void Session::done(int exitCode, QProcess::ExitStatus exitStatus)
     // message 构造仅用于上游调试输出,此处省略;保留 finished 的发射逻辑。
     QString message;
     if (!_wantedClose || exitCode != 0) {
+#ifdef CUBESHELL_WITH_LOCALPTY
         if (_shellProcess && _shellProcess->exitStatus() == QProcess::NormalExit)
             message = QStringLiteral("Session '%1' exited with code %2.").arg(_nameTitle).arg(exitCode);
         else
             message = QStringLiteral("Session '%1' crashed.").arg(_nameTitle);
+#else
+        message = QStringLiteral("Session '%1' exited with code %2.").arg(_nameTitle).arg(exitCode);
+#endif
     }
 
     if (!_wantedClose && exitStatus != QProcess::NormalExit)
@@ -896,11 +956,15 @@ void Session::applyPendingTerminalSize()
     if (!size.isValid() || size == _appliedTerminalSize)
         return;
 
+#ifdef CUBESHELL_WITH_LOCALPTY
     if (_shellProcess) {
         // setWindowSize(lines, cols)
         _shellProcess->setWindowSize(size.height(), size.width());
         _appliedTerminalSize = size;
     }
+#else
+    _appliedTerminalSize = size;
+#endif
 
     // 通知外部代理（如 SshBridge）同步新尺寸到远程 PTY
     // size = (columns, lines)  —  emit (columns, rows)

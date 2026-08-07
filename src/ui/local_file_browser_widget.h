@@ -10,6 +10,7 @@
 class QTreeWidget;
 class QTreeWidgetItem;
 class QLineEdit;
+class QLabel;
 
 namespace cubeshell {
 
@@ -21,6 +22,11 @@ public:
     // 切换显示的根目录（follow_folder 联动 / 双击进入子目录）。
     void setRootPath(const QString &path);
     QString rootPath() const { return m_rootPath; }
+
+    // 在路径栏左侧显示/隐藏分屏序号徽章（与 SftpBrowserWidget 同款）。
+    // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
+    // tabTitle: 用于 tooltip 的标签名，展示完整的“分屏 N · 标签名”。
+    void setPaneIndicator(int paneNumber, int totalPanes, const QString &tabTitle);
 
 signals:
     // “新建位于文件夹位置的终端窗口”：由外层（main_window）接线打开新本机终端。
@@ -40,13 +46,19 @@ private slots:
     void createDirHere();         // 对应Python: createDir
     void createFileHere();        // 对应Python: createFile
     void refresh();               // 对应Python: refresh → refreshDirs
+#ifdef CUBESHELL_WITH_LOCALPTY
     void openTerminalHere();      // 对应Python: open_local_terminal_in_selected_folder
+#endif
+#ifndef CUBESHELL_PLATFORM_OHOS
     void showInFileManager();     // 对应Python: show_file_in_explorer
+#endif
     void showPermissions();       // 对应Python: show_auth + Auth.ok_auth（os.chmod）
     void removeSelected();        // 对应Python: remove
     void renameSelected();        // 对应Python: rename（os.rename）
+#ifndef CUBESHELL_PLATFORM_OHOS
     void decompressSelected();    // 对应Python: unzip → DecompressThread（is_local）
     void compressSelected();      // 对应Python: zip → CompressThread（is_local）
+#endif
 
 private:
     void populate();
@@ -56,6 +68,7 @@ private:
 
     QTreeWidget *m_tree = nullptr;
     QLineEdit *m_pathEdit = nullptr;
+    QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章
     QString m_rootPath;
 };
 

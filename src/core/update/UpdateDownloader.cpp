@@ -139,6 +139,14 @@ void UpdateDownloader::onFinished()
 // 对应Python: installer.install_and_restart(简化为"调起",不做自替换脚本)
 bool UpdateDownloader::launchInstaller(const QString &filePath, QString *errorOut)
 {
+#if defined(CUBESHELL_PLATFORM_OHOS)
+    // 鸿蒙：版本更新走 AppGallery，应用内不下载安装包、沙箱也禁止 exec
+    // 安装器。此路径一期不可达（UpdateChecker 的调起方同样按平台摘除）。
+    Q_UNUSED(filePath);
+    if (errorOut)
+        *errorOut = QStringLiteral("HarmonyOS 版本请通过应用市场更新");
+    return false;
+#else
     if (filePath.isEmpty() || !QFile::exists(filePath)) {
         if (errorOut)
             *errorOut = QStringLiteral("安装包不存在:%1").arg(filePath);
@@ -176,6 +184,7 @@ bool UpdateDownloader::launchInstaller(const QString &filePath, QString *errorOu
 #else
     return QDesktopServices::openUrl(QUrl::fromLocalFile(filePath));
 #endif
+#endif // CUBESHELL_PLATFORM_OHOS
 }
 
 } // namespace cubeshell

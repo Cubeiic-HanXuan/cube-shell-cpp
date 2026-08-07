@@ -5,7 +5,9 @@
 #include "AiChatPanel.h"
 
 #include "AiPreferences.h"
+#ifdef CUBESHELL_WITH_VOICE
 #include "VoiceInput.h"
+#endif
 
 #include <QApplication>
 #include <QClipboard>
@@ -254,7 +256,9 @@ AiChatPanel::AiChatPanel(QWidget *parent)
 
     buildUi();
 
+#ifdef CUBESHELL_WITH_VOICE
     // 语音输入管理器。对应Python: VoiceInputManager 的信号连接
+    // 鸿蒙：QtMultimedia 支持不完整，CUBESHELL_WITH_VOICE=OFF 时整体摘除。
     m_voiceInput = new VoiceInput(this);
     connect(m_voiceInput, &VoiceInput::recordingStarted, this, [this]() {
         m_micBtn->setChecked(true);
@@ -295,6 +299,7 @@ AiChatPanel::AiChatPanel(QWidget *parent)
         m_inputEdit->setPlaceholderText(QStringLiteral("输入运维需求提示词"));
         appendAiMessage(QStringLiteral("🎤 %1").arg(msg));
     });
+#endif // CUBESHELL_WITH_VOICE
 }
 
 // 对应Python: AIChatPanel._build_ui
@@ -374,6 +379,7 @@ void AiChatPanel::buildUi()
 
     toolbarLayout->addStretch();
 
+#ifdef CUBESHELL_WITH_VOICE
     // 麦克风按钮
     m_micBtn = new QPushButton(QStringLiteral("🎤"), inputFrame);
     m_micBtn->setFixedSize(32, 32);
@@ -387,6 +393,7 @@ void AiChatPanel::buildUi()
     connect(m_micBtn, &QPushButton::clicked,
             this, &AiChatPanel::onMicClicked);
     toolbarLayout->addWidget(m_micBtn);
+#endif // CUBESHELL_WITH_VOICE
 
     // 发送按钮（绿色 ↑ 样式）
     m_sendBtn = new QPushButton(QStringLiteral("↑"), inputFrame);
@@ -762,7 +769,11 @@ bool AiChatPanel::eventFilter(QObject *obj, QEvent *event)
 // 对应Python: AIChatPanel._on_mic_clicked
 void AiChatPanel::onMicClicked()
 {
-    m_voiceInput->toggleRecording();
+#ifdef CUBESHELL_WITH_VOICE
+    if (m_voiceInput)
+        m_voiceInput->toggleRecording();
+#endif
+    // CUBESHELL_WITH_VOICE=OFF：麦克风按钮未创建，本函数不会被触发。
 }
 
 // 对应Python: AIChatPanel._on_stop

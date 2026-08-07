@@ -8,9 +8,13 @@
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
+#ifndef CUBESHELL_PLATFORM_OHOS
 #include <QFileOpenEvent>
+#endif
 #include <QIcon>
+#ifndef CUBESHELL_PLATFORM_OHOS
 #include <QLockFile>
+#endif
 #include <QMessageBox>
 #include <QStandardPaths>
 
@@ -26,8 +30,10 @@
 
 namespace {
 
+#ifndef CUBESHELL_PLATFORM_OHOS
 // macOS URL Scheme 事件（jms:// 由系统经 QFileOpenEvent 投递给运行中的应用）。
 // 对应Python: cube-shell.py::UrlSchemeApplication.event(QFileOpenEvent)
+// 鸿蒙：无 QFileOpenEvent 机制（系统交互走 Want/Uri），不编译。
 class UrlOpenFilter : public QObject {
 public:
     explicit UrlOpenFilter(cubeshell::MainWindow *window, QObject *parent = nullptr)
@@ -55,6 +61,7 @@ protected:
 private:
     cubeshell::MainWindow *m_window;
 };
+#endif // CUBESHELL_PLATFORM_OHOS
 
 // theme.json 查找：用户配置目录优先，其次工程 conf/（与 Python 侧共用一份）。
 // 对应Python: function/util.py 里 THEME 的加载路径
@@ -133,8 +140,11 @@ int main(int argc, char *argv[])
     lang.initialize(&app);
     lang.loadFromConfig(state.language());
 
+#ifndef CUBESHELL_PLATFORM_OHOS
     // 4. 单实例检查（QLockFile）。
     // 对应Python: cube-shell.py 的单实例保护
+    // 鸿蒙：HAP 由系统保证单实例（同包名不可多开），且沙箱下跨应用共享
+    // TmpLocation 语义不同，QLockFile 不适用。
     QLockFile lock(QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
                        .filePath(QStringLiteral("cube-shell.lock")));
     lock.setStaleLockTime(30 * 1000);
@@ -143,6 +153,7 @@ int main(int argc, char *argv[])
                              QObject::tr("CubeShell is already running."));
         return 0;
     }
+#endif
 
     // 5. 命令行 URL 参数（jms:// 直连）。
     const QString startupUrl = urlFromArguments(QCoreApplication::arguments());
@@ -152,8 +163,11 @@ int main(int argc, char *argv[])
     window.show();
 
     // 7. macOS QFileOpenEvent（应用已运行时系统投递的 URL Scheme 事件）。
+    // 鸿蒙：系统交互走 Want/Uri，无此事件，过滤器不安装。
+#ifndef CUBESHELL_PLATFORM_OHOS
     auto *urlFilter = new UrlOpenFilter(&window, &app);
     app.installEventFilter(urlFilter);
+#endif
 
     // 8. 启动参数里带 URL → 主窗口就绪后处理（BastionClient 解析并自动连接）。
     if (!startupUrl.isEmpty())

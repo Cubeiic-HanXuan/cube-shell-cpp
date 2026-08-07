@@ -8,7 +8,11 @@ cmake-build-*/
 /bin/
 /lib/
 /install/
+# 鸿蒙交叉编译的第三方依赖产物（*.a/*.so + 头文件），由 scripts/build-ohos-deps.sh
+# 和 scripts/build-ohos-qt-deps.sh 生成，可随时重建，不入库。
+/third_party/
 _deps/
+.hvigor/
 # 注意：vcpkg-ports/ 与 vcpkg-triplets/ 是仓库自带的 overlay（修 OpenSSL ARM64
 # Release 误编译，见 BUILD-Windows-ARM64.md），CI 构建 Windows ARM64 依赖它们，
 # 必须纳入版本管理，不要在这里忽略。

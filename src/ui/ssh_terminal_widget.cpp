@@ -118,12 +118,14 @@ void SshTerminalWidget::connectToHost()
         // execute back-to-back.  Without this, the event-loop delay causes the
         // initial prompt to be buffered and read SEPARATELY from the hook echo,
         // resulting in two visible prompts.
-        static const char hookCmd[] =
-            " __cs_osc7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$(hostname)\" \"$(pwd)\"; };"
-            "if [ -n \"$ZSH_VERSION\" ];then precmd(){ __cs_osc7; };"
-            "elif [ -n \"$BASH_VERSION\" ];then "
-            "PROMPT_COMMAND=\"${PROMPT_COMMAND:+$PROMPT_COMMAND;} __cs_osc7\";fi\n";
-        client->writeChannel(QByteArray(hookCmd));
+        //
+        // hook 由 SshBridge::shellHookCommand() 统一生成：执行后会把自己从
+        // 远端 shell 历史里删掉（HISTCONTROL=ignorespace 不可依赖——CentOS 默认
+        // 只有 ignoredups，没有 ignorespace）。hook 进了历史，按上下键就会翻出
+        // 含 __cs_osc7 的那一行，readline 重绘（\r + 提示符 + 历史 + \e[K，
+        // 不带换行）显示层无法在不破坏重绘的前提下过滤——这正是上/下键显示
+        // 异常的根因，必须让它根本不进历史。
+        client->writeChannel(SshBridge::shellHookCommand());
 
         QMetaObject::invokeMethod(this, [this, client]() {
             m_client = client;   // take ownership (unique_ptr from shared copy)

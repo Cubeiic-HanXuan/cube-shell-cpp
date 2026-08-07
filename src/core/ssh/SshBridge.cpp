@@ -77,7 +77,95 @@ QByteArray SshBridge::stripOsc7(const QByteArray &in, QList<QByteArray> &paths)
     return out;
 }
 
-// 丢弃包含任一标记的整行。行以 \r 分隔（shell 回显用 \r\n）。
+const QList<QByteArray> &SshBridge::markerList()
+{
+    static const QList<QByteArray> kMarkers = {
+        QByteArrayLiteral("__cs_osc7"),
+        QByteArrayLiteral("__cube_end"),
+        QByteArrayLiteral("PAGER=cat"),
+        QByteArrayLiteral("__CUBE_AI_END__")
+    };
+    return kMarkers;
+}
+
+// 折叠 readline 软换行：把 「空格+\r」「\r\n」「\r」「\n」从 buf 中去掉，
+// 返回折叠后的字节，并在 pos 里记录每个保留字节在 buf 中的原始下标。
+// 注入发生在 bash readline 激活后，回显是按 80 列折行的编辑重绘，软换行
+// 处插入「空格+\r」，内容本身逐字节不变——折叠后即可与 hook 文本精确匹配。
+static QByteArray foldSoftBreaks(const QByteArray &buf, QList<int> &pos)
+{
+    QByteArray fold;
+    fold.reserve(buf.size());
+    pos.clear();
+    pos.reserve(buf.size());
+    int i = 0;
+    while (i < buf.size()) {
+        const char c = buf.at(i);
+        if (c == '\r') {
+            // 软换行填充的空格一并去掉
+            if (!fold.isEmpty() && fold.at(fold.size() - 1) == ' ') {
+                fold.chop(1);
+                pos.removeLast();
+            }
+            i += (i + 1 < buf.size() && buf.at(i + 1) == '\n') ? 2 : 1;
+        } else if (c == '\n') {
+            ++i;
+        } else {
+            fold.append(c);
+            pos.append(i);
+            ++i;
+        }
+    }
+    return fold;
+}
+
+// hook 回显是否已完整到达（折叠软换行后能匹配到完整 hook 文本）。
+bool SshBridge::containsHookEcho(const QByteArray &buf)
+{
+    QList<int> pos;
+    const QByteArray fold = foldSoftBreaks(buf, pos);
+    const QByteArray hook = shellHookCommand().trimmed().prepend(' ');
+    // trimmed() 去掉结尾 \n；prepend 补回前导空格（trimmed 也会去掉它）。
+    return fold.contains(hook);
+}
+
+// 折叠匹配删掉启动期缓冲里的每一处完整 hook 回显（可能两次：tty 驱动层
+// 一次、readline 折行重绘一次），保住同行的 banner 和提示符。
+QByteArray SshBridge::stripHookEcho(const QByteArray &buf)
+{
+    const QByteArray hook = shellHookCommand().trimmed().prepend(' ');
+    QList<int> pos;
+    const QByteArray fold = foldSoftBreaks(buf, pos);
+    if (pos.isEmpty())
+        return buf;
+
+    QByteArray out;
+    out.reserve(buf.size());
+    int src = 0;                       // fold 里的扫描起点
+    while (true) {
+        const int f = fold.indexOf(hook, src);
+        if (f < 0)
+            break;
+        const int rawEnd = pos.at(f + hook.size() - 1);   // hook 末字节原始下标
+        // 吞掉结尾的 \r\n / \r / \n
+        int e = rawEnd + 1;
+        if (e < buf.size() && buf.at(e) == '\r') ++e;
+        if (e < buf.size() && buf.at(e) == '\n') ++e;
+        out.append(buf.mid(pos.at(src), pos.at(f) - pos.at(src)));
+        // 推进 src 到 fold 中第一个原始下标 >= e 的位置
+        while (src < pos.size() && pos.at(src) < e)
+            ++src;
+    }
+    out.append(buf.mid(pos.at(src)));
+    return out;
+}
+
+// 丢弃包含任一标记的整行（按 \r 切分，回显以 \r\n 结束）。
+// 出现在流里的标记行只有两类，且都带换行，因此直接整行丢弃：
+//  1) 连接时 hook 命令的回显——由启动期缓冲攒成完整行后送进来；
+//  2) AI 执行器命令的回显——整行回显，带 \r\n。
+// readline 翻历史产生的行内重绘（\r + 提示符 + 历史 + \e[K，不带换行）
+// 里不会含标记：hook 已被 shellHookCommand() 从历史中删除，翻不出它。
 QByteArray SshBridge::dropMarkerLines(const QByteArray &in,
                                       const QList<QByteArray> &markers)
 {
@@ -257,8 +345,21 @@ void SshBridge::readLoop()
         QByteArray data = m_client->readChannel(4096, &wouldBlock);
         if (wouldBlock) {
             m_client->waitReadable(100); // brief poll; avoids a busy spin
+            // 启动期缓冲的兜底：如果远端 pty 没开回显（hook 回显永远不会来），
+            // 静默若干轮后把已攒的内容放行，避免终端看起来被冻结。
+            if (!m_bootstrapDone && !m_bootstrapBuf.isEmpty()) {
+                if (++m_idlePolls >= 3) {
+                    m_bootstrapDone = true;
+                    QByteArray clean = dropMarkerLines(m_bootstrapBuf, markerList());
+                    m_bootstrapBuf.clear();
+                    clean = stripCubeIdPrefix(clean);
+                    if (!clean.isEmpty())
+                        emit dataReceived(clean);
+                }
+            }
             continue;
         }
+        m_idlePolls = 0;
         if (data.isEmpty())
             break; // EOF / closed
 
@@ -291,13 +392,29 @@ void SshBridge::readLoop()
         for (const QByteArray &path : std::as_const(cwdPaths))
             emit cwdChanged(QString::fromUtf8(path));
 
-        static const QList<QByteArray> kMarkers = {
-            QByteArrayLiteral("__cs_osc7"),
-            QByteArrayLiteral("__cube_end"),
-            QByteArrayLiteral("PAGER=cat"),
-            QByteArrayLiteral("__CUBE_AI_END__")
-        };
-        clean = dropMarkerLines(clean, kMarkers);
+        // 启动期缓冲：hook 回显会被包边界切碎、且注入发生在 bash readline
+        // 激活之后——回显是 readline 按 80 列把 349 字节折成多段、段间插
+        // 「空格+\r」的编辑重绘，结尾是 \r 而非 \n。因此不能按行/按 \n 判断，
+        // 必须折叠软换行后逐字节匹配完整 hook 文本再整段删。
+        // 真实字节验证见 /tmp/cubeshell_boot.bin 的分析。
+        if (!m_bootstrapDone) {
+            m_bootstrapBuf += clean;
+            const bool arrived = containsHookEcho(m_bootstrapBuf);
+            if (arrived) {
+                clean = stripHookEcho(m_bootstrapBuf);
+                m_bootstrapBuf.clear();
+                m_bootstrapDone = true;
+            } else if (m_bootstrapBuf.size() >= 8192) {
+                // 异常长度：远端没按预期回显，放弃缓冲以免吞掉正常输出。
+                m_bootstrapDone = true;
+                clean = m_bootstrapBuf;
+                m_bootstrapBuf.clear();
+            } else {
+                continue;
+            }
+        }
+
+        clean = dropMarkerLines(clean, markerList());
 
         // _CUBE_ID=N;<空白> 前缀剥除（保留其后的真实命令）。
         clean = stripCubeIdPrefix(clean);
@@ -325,18 +442,32 @@ void SshBridge::resize(int columns, int rows)
     m_client->resizePty(columns, rows);
 }
 
+QByteArray SshBridge::shellHookCommand()
+{
+    // 前导空格：配置了 HISTCONTROL=ignorespace 的环境会直接跳过本行进历史。
+    // 但不能依赖它（CentOS 默认只有 ignoredups），所以 bash 分支末尾还会主动
+    // 删除本行历史。hook 若进了历史，按上下键会翻出含 __cs_osc7 的那行，
+    // readline 行内重绘（\r + 提示符 + 历史 + \e[K）无法被显示层安全过滤
+    // （整段丢会吞掉提示符和 \e[K，抹白会把本行变成一串空格）——必须不进历史。
+    //
+    // bash 删除自身：history 1 取最后一条；仅当它就是 hook 行（含 __cs_osc7）
+    // 时才 history -d，若 ignorespace 已生效（最后一条是用户旧命令）则不动。
+    // zsh 无对应机制，用 histignorespace 只影响后续行，hook 行本会话内仍在，
+    // 属可接受折中。
+    static const char hookCmd[] =
+        " __cs_osc7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$(hostname)\" \"$(pwd)\"; };"
+        "if [ -n \"$ZSH_VERSION\" ];then setopt histignorespace;precmd(){ __cs_osc7; };"
+        "elif [ -n \"$BASH_VERSION\" ];then HISTCONTROL=ignoreboth;"
+        "PROMPT_COMMAND=\"${PROMPT_COMMAND:+$PROMPT_COMMAND;} __cs_osc7\";"
+        "case \"$(history 1)\" in *__cs_osc7*)history -d $(history 1|awk '{print $1}');;esac;fi\n";
+    return QByteArray(hookCmd);
+}
+
 void SshBridge::injectShellIntegration()
 {
     if (!m_running || !m_client || !m_client->isChannelOpen())
         return;
-    // Leading space: bash skips commands starting with a space in history
-    // (HISTCONTROL=ignorespace). Emits OSC 7 + ST before each prompt.
-    static const char hookCmd[] =
-        " __cs_osc7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$(hostname)\" \"$(pwd)\"; };"
-        "if [ -n \"$ZSH_VERSION\" ];then precmd(){ __cs_osc7; };"
-        "elif [ -n \"$BASH_VERSION\" ];then "
-        "PROMPT_COMMAND=\"${PROMPT_COMMAND:+$PROMPT_COMMAND;} __cs_osc7\";fi\n";
-    m_client->writeChannel(QByteArray(hookCmd));
+    m_client->writeChannel(shellHookCommand());
 }
 
 void SshBridge::stop()

@@ -40,6 +40,14 @@ public:
     // Inject the OSC7 cwd-reporting shell hook (bash/zsh).
     void injectShellIntegration();
 
+    // 生成 shell-integration hook 命令（OSC 7 cwd 上报，bash/zsh）。
+    // 执行后会把自身从远端 shell 历史删除，保证按上下键翻不出 hook 行。
+    // 供 ssh_terminal_widget 在 openShell 之后立刻调用。
+    static QByteArray shellHookCommand();
+
+    // 每行回显的固定结尾（不含 \n），readLoop 用它判断 hook 回显已到齐。
+    static const char *hookEchoTail() { return "esac;fi"; }
+
 signals:
     void channelClosed();
     void dataReceived(const QByteArray &data);           // queued to Session::onReceiveBlock
@@ -58,6 +66,13 @@ private:
     static QByteArray stripOsc7(const QByteArray &in, QList<QByteArray> &paths);
     // 剥除 _CUBE_ID=<数字>;<空白> 前缀，保留其后的真实命令（字节级）。
     static QByteArray stripCubeIdPrefix(const QByteArray &in);
+    // 字节流里的内部标记集合（shell hook、AI 执行器哨兵），均为 ASCII。
+    static const QList<QByteArray> &markerList();
+    // hook 回显是否已完整到达（折叠 readline 软换行后能匹配完整 hook 文本）。
+    static bool containsHookEcho(const QByteArray &buf);
+    // 折叠匹配删掉启动期缓冲里的每一处完整 hook 回显（tty 驱动层 + readline
+    // 折行重绘可能各一次），保住同行的 banner 和提示符。
+    static QByteArray stripHookEcho(const QByteArray &buf);
     // 丢弃含任一标记的整行（按 \r 切分）。标记均为 ASCII，字节级比较安全。
     static QByteArray dropMarkerLines(const QByteArray &in,
                                       const QList<QByteArray> &markers);
@@ -79,6 +94,17 @@ private:
     // 破坏且长度改变，提示符里的 ANSI 序列随之断裂 —— 表现为按上下键翻历史
     // 时提示符被冲掉、readline 重绘错位。仅读线程访问，无需加锁。
     QByteArray m_residual;
+
+    // 连接启动期的输出缓冲。
+    // hook 回显会被 SSH 包边界切成多块，分块过滤时残片（不含完整标记的部分）
+    // 会泄漏上屏（`}`、`";fi` 之类），分块也可能把标记本身切断而漏判。
+    // 因此会话开头先攒着不显示，直到：a) 收到 hook 回显的固定结尾（esac;fi）
+    // 后的换行（整行到齐，交 dropMarkerLines 整行丢弃）；b) 缓冲超过上限
+    // （远端没回显，放弃等待）；c) 通道静默多轮（兜底，防止终端冻结）。
+    // 仅读线程访问，无需加锁。
+    QByteArray m_bootstrapBuf;
+    int m_idlePolls = 0;
+    bool m_bootstrapDone = false;
 };
 
 } // namespace cubeshell

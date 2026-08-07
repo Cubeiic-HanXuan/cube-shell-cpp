@@ -152,11 +152,23 @@ void SftpClient::close()
 {
     if (!m_sftp)
         return;
+    if (m_abandoned) {
+        // socket 已被关闭（标签页/应用退出）：不能再做任何 libssh2 网络调用，
+        // 否则 libssh2_sftp_shutdown 往死 socket 写会崩溃。只清本地指针。
+        m_sftp = nullptr;
+        return;
+    }
     if (m_client) {
         QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
         sftpRetryInt(m_client, [&] { return libssh2_sftp_shutdown(m_sftp); });
     }
     m_sftp = nullptr;
+}
+
+void SftpClient::abandon()
+{
+    // 标记后由 close()/析构走「只清指针」路径，避免在死 socket 上做网络往返。
+    m_abandoned = true;
 }
 
 // Convert libssh2 attributes to our info struct.

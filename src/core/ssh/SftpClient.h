@@ -86,6 +86,11 @@ public:
     bool open(SshError &error);
     bool isOpen() const { return m_sftp != nullptr; }
     void close();
+    // 放弃 SFTP 句柄：不做 libssh2_sftp_shutdown 网络往返，仅清本地指针。
+    // 用于底层 socket 已被 shutdownSocket() 关闭之后（标签页/应用退出路径）：
+    // 此时再 shutdown 会往死 socket 写 → libssh2 内部崩溃（EXC_BAD_ACCESS）。
+    // 句柄资源随 SshClient 析构时 libssh2_session_free 一并回收，不会泄漏。
+    void abandon();
 
     // --- synchronous metadata / directory operations (caller serializes via
     // the UI or a worker thread; the libssh2 lock is taken internally) ---
@@ -150,6 +155,8 @@ private:
 
     SshClient *m_client;         // not owned
     _LIBSSH2_SFTP *m_sftp = nullptr;
+    // socket 已关（abandon() 置位）后，close() 只清指针、不做网络往返。
+    bool m_abandoned = false;
     // Set from the UI thread, read on workers — checked by the transfer chunk
     // loops AND the EAGAIN retry loops of the synchronous operations, so
     // cancelTransfer() also aborts a listdir/read/write stuck on retries.

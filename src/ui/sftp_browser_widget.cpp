@@ -169,9 +169,16 @@ SftpBrowserWidget::~SftpBrowserWidget()
         }
     }
     m_workers.clear();
+    // 放弃 SFTP：到这一步底层 socket 已被 SshSessionTab 析构时 shutdownSocket()
+    // 关闭（本 widget 是 tab 的子对象，析构晚于 tab 的 shutdownSocket）。此后
+    // m_sftp 的 close() 不能再做 libssh2_sftp_shutdown 网络往返——往死 socket
+    // 写会导致 libssh2 内部 EXC_BAD_ACCESS 崩溃。标记后 close() 只清本地指针，
+    // 句柄资源随 SshClient 析构的 libssh2_session_free 回收。
+    if (m_sftp)
+        m_sftp->abandon();
     // 超时兑底：线程仍在用 m_sftp，而析构返回后 ~QObject 会删除子对象。
     // 把 m_sftp 脱离父子关系有意泄漏，病态场景宁可漏少量内存也不 UAF 崩溃。
-    //（m_client 非本 widget 所有，不受 ~QObject 影响，无需处理。）
+    //（m_client 经 shared_ptr 共享持有，不受 ~QObject 影响，无需处理。）
     if (joinTimedOut && m_sftp)
         m_sftp->setParent(nullptr);
 }
@@ -186,13 +193,14 @@ void SftpBrowserWidget::startWorker(QThread *worker)
     worker->start();
 }
 
-void SftpBrowserWidget::setClient(SshClient *client)
+void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
 {
-    m_client = client;
+    m_client = std::move(client);
     if (!m_client)
         return;
+    SshClient *raw = m_client.get();
     if (!m_sftp) {
-        m_sftp = new SftpClient(m_client, this);
+        m_sftp = new SftpClient(raw, this);
         connect(m_sftp, &SftpClient::transferProgress, this, [this](const QString &, qint64 cur, qint64 total) {
             m_progress->setVisible(true);
             m_progress->setMaximum(total > 0 ? int(total / 1024) : 0);
@@ -212,7 +220,7 @@ void SftpBrowserWidget::setClient(SshClient *client)
     if (!m_uploader) {
         // 分片上传核心（进度信号已在内部回投到本线程，按工程约定仍显式 QueuedConnection）。
         // 对应Python: core/uploader/sftp_uploader_core.py 的进度信号接线
-        m_uploader = new SftpUploaderCore(m_client, this);
+        m_uploader = new SftpUploaderCore(raw, this);
         connect(m_uploader, &SftpUploaderCore::progressUpdated, this,
                 [this](const QString &, int progress, const QString &filename) {
                     m_progress->setVisible(true);
@@ -232,7 +240,7 @@ void SftpBrowserWidget::setClient(SshClient *client)
                     m_status->setText(tr("上传失败：%1（%2）").arg(filename, error));
                 }, Qt::QueuedConnection);
     } else {
-        m_uploader->setSshClient(m_client);
+        m_uploader->setSshClient(raw);
     }
     loadPath(m_cwd);
 }
@@ -640,7 +648,7 @@ void SftpBrowserWidget::decompressSelected()
     }
 
     m_status->setText(tr("正在解压..."));
-    SshClient *client = m_client;
+    SshClient *client = m_client.get();
     // 关停标志以共享指针捕获：析构置位后 runCommand 在下一轮读循环退出，
     // 且超时泄漏的线程读到的标志仍有效。
     auto shuttingDown = m_shuttingDown;
@@ -752,7 +760,7 @@ void SftpBrowserWidget::compressSelected()
                   .arg(joinPath(dir, dlg.fileName()), dir, baseName);
 
     m_status->setText(tr("正在压缩 %1 …").arg(baseName));
-    SshClient *client = m_client;
+    SshClient *client = m_client.get();
     // 阻塞执行（无信号，线程安全的静态入口）；关停标志接线同 decompressSelected。
     auto shuttingDown = m_shuttingDown;
     QThread *worker = QThread::create([this, client, cmd, shuttingDown]() {

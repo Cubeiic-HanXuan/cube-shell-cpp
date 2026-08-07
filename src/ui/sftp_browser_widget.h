@@ -37,7 +37,10 @@ public:
     ~SftpBrowserWidget() override;
 
     // Attach to a connected client and load the home/root directory.
-    void setClient(SshClient *client);
+    // 以 shared_ptr 持有，保证应用关闭时 SshClient（及其底层 LIBSSH2_SESSION）
+    // 比子对象 SftpClient 活得久——否则 terminal 先析构会 libssh2_session_free，
+    // SftpClient::close() 再用悬空的 m_sftp 调 libssh2_sftp_shutdown → UAF 崩溃。
+    void setClient(std::shared_ptr<SshClient> client);
 
     // 切换当前目录（follow_folder 联动 / OSC7 初始 home 目录）。
     // 客户端尚未挂接时仅记录路径，setClient 时再加载。
@@ -84,7 +87,7 @@ private:
     QStringList selectedRemotePaths() const;
     static QString joinPath(const QString &dir, const QString &name);
 
-    SshClient *m_client = nullptr;   // not owned
+    std::shared_ptr<SshClient> m_client; // shared：保证比 m_sftp 后析构（见 setClient）
     SftpClient *m_sftp = nullptr;    // child
     SftpUploaderCore *m_uploader = nullptr; // child，分片上传
 

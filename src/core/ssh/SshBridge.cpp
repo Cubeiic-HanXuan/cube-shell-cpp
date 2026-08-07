@@ -131,6 +131,11 @@ bool SshBridge::containsHookEcho(const QByteArray &buf)
 
 // 折叠匹配删掉启动期缓冲里的每一处完整 hook 回显（可能两次：tty 驱动层
 // 一次、readline 折行重绘一次），保住同行的 banner 和提示符。
+//
+// 同时删掉回显所在行的行首残余：bash 启动后会先打印一个提示符，然后才读到
+// 注入命令（readline 折行回显），执行完又打印一个提示符。若只删 hook 文本，
+// 那个「早产的提示符」会留下来，导致连接后出现两个提示符。把回显前面的同行
+// 内容（提示符 + 标题转义序列）一并删掉，让后面的提示符顶替。
 QByteArray SshBridge::stripHookEcho(const QByteArray &buf)
 {
     const QByteArray hook = shellHookCommand().trimmed().prepend(' ');
@@ -141,22 +146,31 @@ QByteArray SshBridge::stripHookEcho(const QByteArray &buf)
 
     QByteArray out;
     out.reserve(buf.size());
-    int src = 0;                       // fold 里的扫描起点
+    int src = 0;    // fold 里的扫描起点
+    int keep = 0;   // buf 里保留内容的起点（上一段删除的结尾之后）
     while (true) {
         const int f = fold.indexOf(hook, src);
         if (f < 0)
             break;
+        const int rawStart = pos.at(f);
+        // 回显所在行的行首：向前扫到 \r/\n，但不超过上一段删除的结尾。
+        // 行首的早产提示符连同回显一起删，避免双提示符。
+        int lineStart = rawStart;
+        while (lineStart > keep
+               && buf.at(lineStart - 1) != '\r'
+               && buf.at(lineStart - 1) != '\n')
+            --lineStart;
+
         const int rawEnd = pos.at(f + hook.size() - 1);   // hook 末字节原始下标
         // 吞掉结尾的 \r\n / \r / \n
         int e = rawEnd + 1;
         if (e < buf.size() && buf.at(e) == '\r') ++e;
         if (e < buf.size() && buf.at(e) == '\n') ++e;
-        out.append(buf.mid(pos.at(src), pos.at(f) - pos.at(src)));
-        // 推进 src 到 fold 中第一个原始下标 >= e 的位置
-        while (src < pos.size() && pos.at(src) < e)
-            ++src;
+        out.append(buf.mid(keep, lineStart - keep));
+        keep = e;
+        src = f + 1;
     }
-    out.append(buf.mid(pos.at(src)));
+    out.append(buf.mid(keep));
     return out;
 }
 

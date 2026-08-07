@@ -166,8 +166,14 @@ void TerminalExecutor::setupEnvironment()
         return;
 
     static const QString initCmd = QStringLiteral(
+        // 前缀 _CUBE_ID=0：让本行命中 HISTIGNORE 规则；末尾 _CUBE_ID= 清空，
+        // 避免 __cube_end 误发哨兵（0 非空会触发 echo）。
+        "_CUBE_ID=0; "
         "export PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat MANPAGER=cat "
         "DEBIAN_FRONTEND=noninteractive LESS=FRX > /dev/null 2>&1; "
+        // 后续 AI 命令（_CUBE_ID=N; ...）不进历史：HISTIGNORE 模式排除，
+        // 追加而非覆盖以保留用户已有设置。
+        "HISTIGNORE=\"${HISTIGNORE:+$HISTIGNORE:}*_CUBE_ID=*\"; export HISTIGNORE; "
         "__cube_end(){ local rc=$?; [ -n \"$_CUBE_ID\" ] || return; "
         "echo \"__CUBE_AI_END__:$_CUBE_ID:$rc\"; _CUBE_ID=\"\"; "
         "printf '\\033[A\\033[2K\\r'; }; "
@@ -175,6 +181,11 @@ void TerminalExecutor::setupEnvironment()
         "if [ -z \"$_CUBE_HOOK\" ]; then _CUBE_HOOK=1; "
         "if [ -n \"$ZSH_VERSION\" ]; then precmd_functions+=(__cube_end); "
         "else PROMPT_COMMAND=\"__cube_end${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; fi; "
+        "_CUBE_ID=; "
+        // 删掉本 init 行自身的历史：HISTIGNORE 在行尾才生效、救不了当前行，
+        // 只能事后删。仅当最后一条历史确实是本行（含 _CUBE_ID=0 前缀）时才删，
+        // 避免误删用户的命令。
+        "case \"$(history 1)\" in *_CUBE_ID=0*PAGER=cat*)history -d $(history 1|awk '{print $1}');;esac; "
         "printf '\\033[A\\033[2K\\r'\n");
 
     m_terminal->sendText(initCmd);

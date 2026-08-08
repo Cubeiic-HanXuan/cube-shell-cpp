@@ -123,6 +123,42 @@ target_link_libraries(uploader_test PRIVATE
     cube_core
 )
 
+# 上传进行中销毁上传器的卡死回归测试（需要 sshd；连不上则直接通过跳过）。
+qt_add_executable(upload_teardown_test
+    upload_teardown_test.cpp
+)
+target_include_directories(upload_teardown_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(upload_teardown_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
+# 并行上传吞吐对比工具（手动运行，需要活的 sshd；不注册进 ctest）。
+qt_add_executable(parallel_bench
+    parallel_bench.cpp
+)
+target_include_directories(parallel_bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(parallel_bench PRIVATE
+    Qt6::Core
+    cube_core
+)
+
+# SftpTransferPool / 并行分片规划的纯逻辑测试（无网络：验证降级与水位语义）。
+qt_add_executable(transfer_pool_test
+    transfer_pool_test.cpp
+)
+target_include_directories(transfer_pool_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(transfer_pool_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # UrlHandler / BastionClient unit test (pure logic, no network).
 qt_add_executable(url_dispatch_test
     url_dispatch_test.cpp
@@ -313,8 +349,10 @@ add_test(NAME ssh_integration_test COMMAND ssh_integration_test)
 add_test(NAME sftp_integration_test COMMAND sftp_integration_test)
 add_test(NAME command_executor_test COMMAND command_executor_test)
 add_test(NAME uploader_test COMMAND uploader_test)
+add_test(NAME upload_teardown_test COMMAND upload_teardown_test)
+add_test(NAME transfer_pool_test COMMAND transfer_pool_test)
 set_tests_properties(ssh_integration_test sftp_integration_test
-    command_executor_test uploader_test PROPERTIES
+    command_executor_test uploader_test upload_teardown_test PROPERTIES
     SKIP_RETURN_CODE 2
 )
 

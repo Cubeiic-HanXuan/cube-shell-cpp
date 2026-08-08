@@ -199,8 +199,10 @@ bool SshClient::authPassword(SshError &error)
 {
     const QByteArray user = m_username.toUtf8();
     const QByteArray pass = m_password.toUtf8();
-    if (libssh2_userauth_password(m_session, user.constData(), pass.constData()) == 0)
+    if (libssh2_userauth_password(m_session, user.constData(), pass.constData()) == 0) {
+        m_authReplayable = true; // 密码可重放 -> 允许克隆并行传输连接
         return true;
+    }
     fillSessionError(m_session, error, QStringLiteral("Password authentication failed"));
     error.authFailed = true;
     return false;
@@ -218,8 +220,10 @@ bool SshClient::authPublicKey(SshError &error)
         /*publickey*/ nullptr,
         keyFile.constData(),
         passphrase.isEmpty() ? nullptr : passphrase.constData());
-    if (rc == 0)
+    if (rc == 0) {
+        m_authReplayable = true; // 密钥文件可重复使用 -> 允许克隆并行传输连接
         return true;
+    }
     fillSessionError(m_session, error, QStringLiteral("Public key authentication failed"));
     error.authFailed = true;
     return false;
@@ -262,8 +266,11 @@ bool SshClient::authKeyboardInteractive(SshPromptCallback cb, SshError &error)
     int rc = libssh2_userauth_keyboard_interactive(m_session, user.constData(),
                                                    &kbdintCallback);
     s_kbdintClient = nullptr;
-    if (rc == 0)
+    if (rc == 0) {
+        // OTP 一次一密，无法静默重放 -> 传输连接池不得克隆本连接。
+        m_authReplayable = false;
         return true;
+    }
     fillSessionError(m_session, error, QStringLiteral("Keyboard-interactive authentication failed"));
     error.authFailed = true;
     return false;

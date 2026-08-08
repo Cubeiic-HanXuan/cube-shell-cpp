@@ -37,15 +37,19 @@
 #include <QtGlobal>
 
 #include <atomic>
+#include <functional>
+#include <memory>
 
 struct _LIBSSH2_SFTP;
 struct _LIBSSH2_SFTP_HANDLE;
 
 class QThread;
+class QRecursiveMutex;
 
 namespace cubeshell {
 
 class SshClient;
+class SftpTransferPool;
 struct SshError;
 
 // One directory entry, mirroring paramiko's SFTPAttributes (the subset the UI
@@ -144,6 +148,9 @@ signals:
     void transferFinished(const QString &path, bool success, const QString &message);
 
 private:
+    // 一次并行传输的共享状态（工作窃取式分片分配）。定义在 .cpp 里。
+    struct TransferState;
+
     bool ensureOpen(SshError &error);
     // 登记并启动 download/upload 的自建 worker 线程（finished→deleteLater，
     // QPointer 随删除自动置空），供析构函数 cancelTransfer 后统一
@@ -153,8 +160,21 @@ private:
     void doUpload(const QString &localPath, const QString &remotePath);
     void fail(const QString &op, const QString &path, SshError &error);
 
+    // --- 并行传输（见 .cpp 顶部的分片/流数常量） ---
+    // 按文件大小和连接池实际能给的连接数决定开几条流。
+    int planStreamCount(qint64 size) const;
+    // 跑 streams 条流并等全部结束（当前线程也算一条）。
+    void runStreams(int streams, const std::function<void()> &body);
+    void downloadStream(TransferState &state, const QString &remotePath,
+                        const QString &localPath);
+    void uploadStream(TransferState &state, const QString &localPath,
+                      const QString &remotePath);
+
     SshClient *m_client;         // not owned
     _LIBSSH2_SFTP *m_sftp = nullptr;
+    // 并行传输连接池：为 download/upload 另开独立 SSH 连接，避免与交互 shell
+    // 抢主 session（旧实现下载大文件时会把终端卡到传完）。见 SftpTransferPool.h。
+    std::unique_ptr<SftpTransferPool> m_transferPool;
     // socket 已关（abandon() 置位）后，close() 只清指针、不做网络往返。
     bool m_abandoned = false;
     // Set from the UI thread, read on workers — checked by the transfer chunk

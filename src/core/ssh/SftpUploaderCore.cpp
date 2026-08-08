@@ -2,6 +2,7 @@
 // 并发模型与元数据兼容性说明。
 
 #include "SftpUploaderCore.h"
+#include "SftpTransferPool.h"
 #include "SshClient.h"
 
 #include <QDateTime>
@@ -11,7 +12,9 @@
 #include <QJsonDocument>
 #include <QLoggingCategory>
 #include <QMutexLocker>
+#include <QSemaphore>
 #include <QThread>
+#include <QWaitCondition>
 
 #include <libssh2.h>
 #include <libssh2_sftp.h>
@@ -21,6 +24,12 @@
 #endif
 
 Q_LOGGING_CATEGORY(uploaderLog, "cubeshell.uploader")
+
+// 析构/换连接时等待上传工作线程退出的上限。取消标志置位 + socket 打断后，
+// 各流会在当前分片边界立刻退出，正常远小于此值；超时则放弃回收连接池
+// （见 ~SftpUploaderCore），绝不让 UI 线程无限等。与 SftpClient 的
+// kWorkerJoinTimeoutMs 同值同理。
+static constexpr int kWorkerJoinTimeoutMs = 5000;
 
 namespace cubeshell {
 
@@ -34,14 +43,22 @@ const QString kMetaUploadedSize = QStringLiteral("uploaded_size");
 const QString kMetaLastModified = QStringLiteral("last_modified");
 const QString kMetaTimestamp    = QStringLiteral("timestamp");
 
-// libssh2 SFTP 调用的 EAGAIN 重试（sessionLock 内调用）。
+// libssh2 SFTP 调用的 EAGAIN 重试（连接自己的锁内调用）。
+// 主连接是非阻塞 session（openShell 里 set_blocking(0)）会返回 EAGAIN；
+// 连接池克隆出的传输连接没调过 openShell，保持阻塞模式，走不到重试分支。
+//
+// cancel 非空且置位时立即放弃：关闭路径上如果不看取消标志，非阻塞的主连接
+// 会一直 EAGAIN → select → EAGAIN 地空转，工作线程永不退出，析构就卡住了。
 // 与 SftpClient.cpp 的同名帮助函数保持一致的行为。
 template <typename Fn>
-auto sftpRetryInt(SshClient *client, Fn &&fn) -> decltype(fn())
+auto sftpRetryInt(SshClient *client, Fn &&fn,
+                  const std::atomic<bool> *cancel = nullptr) -> decltype(fn())
 {
     for (;;) {
         auto rc = fn();
         if (rc == LIBSSH2_ERROR_EAGAIN) {
+            if (cancel && cancel->load())
+                return rc;
             client->waitReadable(5000);
             continue;
         }
@@ -50,17 +67,52 @@ auto sftpRetryInt(SshClient *client, Fn &&fn) -> decltype(fn())
 }
 
 template <typename Fn>
-auto sftpRetryPtr(SshClient *client, Fn &&fn) -> decltype(fn())
+auto sftpRetryPtr(SshClient *client, Fn &&fn,
+                  const std::atomic<bool> *cancel = nullptr) -> decltype(fn())
 {
     for (;;) {
         auto *h = fn();
         if (!h && libssh2_session_last_errno(client->rawSession()) == LIBSSH2_ERROR_EAGAIN) {
+            if (cancel && cancel->load())
+                return h;
             client->waitReadable(5000);
             continue;
         }
         return h;
     }
 }
+
+// 取消感知的加锁。降级到主连接时用的是 SshClient::sessionLock()，终端读循环
+// 会长时间持有它 —— 无限等锁的话取消标志根本没机会被检查，工作线程退不出，
+// 关闭标签页就只能靠"泄漏连接池"兜底。这里改成轮询式 tryLock，两者之间
+// 检查取消标志，让关闭路径总能及时收敛。
+// 独占的克隆连接上这把锁没人竞争，首次 tryLock 即成功，无额外开销。
+class CancelableLock {
+public:
+    CancelableLock(QRecursiveMutex *lock, const std::atomic<bool> *cancel)
+        : m_lock(lock)
+    {
+        for (;;) {
+            if (cancel && cancel->load()) {
+                m_lock = nullptr; // 已取消：不再争锁
+                return;
+            }
+            if (m_lock->tryLock(100))
+                return;
+        }
+    }
+    ~CancelableLock()
+    {
+        if (m_lock)
+            m_lock->unlock();
+    }
+    CancelableLock(const CancelableLock &) = delete;
+    CancelableLock &operator=(const CancelableLock &) = delete;
+    bool held() const { return m_lock != nullptr; }
+
+private:
+    QRecursiveMutex *m_lock;
+};
 
 // 远程路径的父目录（远端固定为 POSIX 路径语义）。
 // 对应Python: os.path.dirname(remote_path)
@@ -81,42 +133,194 @@ QString baseName(const QString &path)
 
 } // namespace
 
+// 单个文件并行上传的共享状态。多条流并发访问，全部字段由 lock 保护
+// （progressDone 除外，它是 atomic，供进度信号无锁读取）。
+//
+// 分片分配用"工作窃取"而不是静态均分：各条连接的实际速度可能差好几倍
+// （服务端调度、丢包重传），静态均分会被最慢的一条拖到底。游标式领取
+// 让快的流多干活，整体收敛到最慢流只多干一个分片的时间。
+struct SftpUploaderCore::FileTransferState {
+    QMutex lock;
+    QVector<QPair<qint64, qint64>> chunks; // planChunks 的结果（有序）
+    int nextChunk = 0;                     // 工作窃取游标
+    QVector<bool> done;                    // 各分片是否完成（下标同 chunks）
+    int completedCount = 0;
+    qint64 baseOffset = 0;                 // 断点续传起点（此前的字节视为已传）
+    qint64 watermark = 0;                  // 连续前缀水位，写进元数据的值
+    qint64 totalSize = 0;
+    bool failed = false;
+    QString error;
+    std::atomic<qint64> progressDone{0};   // 已传字节数（含乱序完成的）
+    std::atomic<bool> *cancel = nullptr;
+
+    // 领取下一个待传分片；返回 false 表示没有了（或已失败/已取消）。
+    bool takeNext(int &indexOut, qint64 &offsetOut, qint64 &sizeOut)
+    {
+        QMutexLocker locker(&lock);
+        if (failed || (cancel && cancel->load()))
+            return false;
+        if (nextChunk >= chunks.size())
+            return false;
+        indexOut = nextChunk++;
+        offsetOut = chunks[indexOut].first;
+        sizeOut = chunks[indexOut].second;
+        return true;
+    }
+
+    // 标记分片完成，并把连续前缀水位往前推。返回推进后的水位。
+    // 乱序完成的分片不会抬高水位——水位只表示"这之前全部落盘了"，
+    // 这正是 Python 侧 uploaded_size 标量字段的语义。
+    qint64 markDone(int index, qint64 chunkSize)
+    {
+        QMutexLocker locker(&lock);
+        if (index >= 0 && index < done.size() && !done[index]) {
+            done[index] = true;
+            ++completedCount;
+        }
+        int i = 0;
+        while (i < done.size() && done[i])
+            ++i;
+        // 前 i 个分片连续完成 -> 水位 = 起点 + 这些分片的总长。
+        watermark = baseOffset;
+        for (int k = 0; k < i; ++k)
+            watermark += chunks[k].second;
+        progressDone.fetch_add(chunkSize);
+        return watermark;
+    }
+
+    void setFailed(const QString &message)
+    {
+        QMutexLocker locker(&lock);
+        if (!failed) {
+            failed = true;
+            error = message;
+        }
+    }
+
+    bool hasFailed()
+    {
+        QMutexLocker locker(&lock);
+        return failed;
+    }
+};
+
 SftpUploaderCore::SftpUploaderCore(SshClient *client, QObject *parent)
     : QObject(parent)
     , m_client(client)
+    , m_transferPool(std::make_shared<SftpTransferPool>(client))
+    , m_pool(std::make_unique<QThreadPool>())
+    , m_ctx(std::make_shared<WorkerContext>())
 {
     // 对应Python: __init__ 的 metadata_dir = ~/.sftp_uploader + makedirs
     m_metadataDir = QDir::home().filePath(QStringLiteral(".sftp_uploader"));
     QDir().mkpath(m_metadataDir);
-    m_pool.setMaxThreadCount(2);
+    m_ctx->owner = this;
+    m_ctx->pool = m_transferPool;
+    m_ctx->metadataDir = m_metadataDir;
+    // 每个任务租一条独立连接，线程数与连接数上限对齐才有意义。
+    m_pool->setMaxThreadCount(SftpTransferPool::kDefaultMaxConnections);
 }
 
 SftpUploaderCore::~SftpUploaderCore()
 {
+    // 先与工作线程断开联系：置空 owner 之后它们不再向本对象投递任何东西，
+    // 也不再读本对象的任何成员（它们要的都在 ctx 里）。必须在等线程之前做，
+    // 因为下面可能等不到就走人。
     {
-        QMutexLocker locker(&m_stateLock);
-        for (auto &flag : m_cancelFlags)
+        QMutexLocker locker(&m_ctx->lock);
+        m_ctx->owner = nullptr;
+        for (auto &flag : m_ctx->cancelFlags)
             flag->store(true);
     }
-    m_pool.waitForDone();
-    if (m_sftp && m_client && m_client->rawSession()) {
-        QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
-        sftpRetryInt(m_client, [&] { return libssh2_sftp_shutdown(m_sftp); });
-        m_sftp = nullptr;
+    // 取消标志只在分片边界被检查；正卡在 libssh2_sftp_write 里的流（克隆连接
+    // 是阻塞模式 session）看不到它，会一直挂到 TCP 超时。先打断 socket，
+    // waitForDone 才能及时返回，否则析构会长时间卡住 UI 线程。
+    m_transferPool->shutdownTransferSockets();
+    if (!m_pool->waitForDone(kWorkerJoinTimeoutMs)) {
+        // 兜底：宁可泄漏也不要冻住 UI 线程。析构跑在 UI 线程上（关闭标签页 /
+        // 退出程序），此处若无限等，窗口就再也不响应了。
+        //
+        // 线程池必须 release() 而不是留给成员析构：~QThreadPool 会无条件
+        // waitForDone()，那等于白设超时，UI 一样被钉死。
+        //
+        // 连接池也再泄漏一份持有，让它永不析构。不交给最后退出的工作线程去
+        // 析构，是因为那时 SshClient 可能已经没了（标签页的析构顺序是先释放
+        // client 的 shared_ptr，再由 ~QObject 删本对象），关闭往返会往死
+        // session 上写而崩。泄漏的 fd 随进程退出由内核回收 —— 这条路径本身
+        // 就是异常兜底，不是常态。
+        //
+        // 工作线程此后只用 ctx（取消标志 / 连接池 / 元数据目录），不碰本对象，
+        // 所以它们跑完为止都是安全的。
+        qCWarning(uploaderLog) << "upload workers did not finish within"
+                               << kWorkerJoinTimeoutMs
+                               << "ms; detaching thread pool and transfer pool"
+                                  " to avoid freezing the UI";
+        (void)m_pool.release();
+        (void)new std::shared_ptr<SftpTransferPool>(m_transferPool);
+        return;
     }
+    // 正常路径：线程都退干净了，在本线程（UI 线程）关闭所有传输连接。
+    m_ctx->pool.reset();
+    m_transferPool.reset();
 }
 
 void SftpUploaderCore::setSshClient(SshClient *client)
 {
+    // 换连接前必须让在途任务全部退出：它们持有旧连接的租约，
+    // setPrimary 会把那些连接关掉、释放掉。
+    {
+        QMutexLocker locker(&m_ctx->lock);
+        for (auto &flag : m_ctx->cancelFlags)
+            flag->store(true);
+    }
+    m_transferPool->shutdownTransferSockets();
+    const bool drained = m_pool->waitForDone(kWorkerJoinTimeoutMs);
+
     QMutexLocker locker(&m_stateLock);
     m_client = client;
-    m_sftp = nullptr; // 换连接后需重开 SFTP 通道
+    if (!drained) {
+        // 还有流在用旧连接，不能 setPrimary（会把它们脚下的连接关掉）。
+        // 弃掉旧池另起一个：旧池由还在跑的工作线程经 ctx 持有，等它们退完
+        // 自然释放；新任务用新池。
+        qCWarning(uploaderLog) << "upload workers still running while switching client; "
+                                  "abandoning old transfer pool";
+        m_transferPool = std::make_shared<SftpTransferPool>(client);
+        // 注意不换 ctx：在途任务还要靠它读自己的取消标志。它们各自的租约
+        // 指向旧池，旧池的持有留在它们的栈上，不受这里替换的影响。
+        QMutexLocker ctxLock(&m_ctx->lock);
+        m_ctx->pool = m_transferPool;
+        return;
+    }
+    m_transferPool->setPrimary(client); // 旧的传输连接全部作废，按新凭据重建
+}
+
+void SftpUploaderCore::setMaxTransferConnections(int n)
+{
+    m_transferPool->setMaxConnections(n);
+    m_pool->setMaxThreadCount(qMax(1, n));
+}
+
+int SftpUploaderCore::activeTransferConnections() const
+{
+    return m_transferPool->activeConnections();
+}
+
+bool SftpUploaderCore::canParallelize() const
+{
+    return m_transferPool->canParallelize();
+}
+
+void SftpUploaderCore::prewarmConnections()
+{
+    m_transferPool->prewarm();
 }
 
 void SftpUploaderCore::setMetadataDir(const QString &dir)
 {
     m_metadataDir = dir;
     QDir().mkpath(m_metadataDir);
+    QMutexLocker locker(&m_ctx->lock);
+    m_ctx->metadataDir = m_metadataDir; // 工作线程读的是这一份
 }
 
 QString SftpUploaderCore::metadataDir() const
@@ -172,15 +376,25 @@ double SftpUploaderCore::pythonMtime(const QString &path)
 // 断点续传元数据（与 Python 侧互认）
 // ---------------------------------------------------------------------------
 
+// 元数据读写的实现体都是静态的：工作线程要在本对象可能已析构的情况下调用
+// 它们（见 WorkerContext），只能靠传进来的目录，不能读成员。
+// 公开的同名成员函数是它们在 m_metadataDir 上的薄包装，签名保持不变。
+
 // 对应Python: _get_metadata_path
+QString SftpUploaderCore::metadataPathIn(const QString &dir, const QString &fileId)
+{
+    return QDir(dir).filePath(fileId + QStringLiteral(".json"));
+}
+
 QString SftpUploaderCore::metadataPath(const QString &fileId) const
 {
-    return QDir(m_metadataDir).filePath(fileId + QStringLiteral(".json"));
+    return metadataPathIn(m_metadataDir, fileId);
 }
 
 // 对应Python: _save_metadata
-bool SftpUploaderCore::saveMetadata(const QString &fileId, const QString &localPath,
-                                    const QString &remotePath, qint64 uploadedSize) const
+bool SftpUploaderCore::saveMetadataIn(const QString &dir, const QString &fileId,
+                                      const QString &localPath, const QString &remotePath,
+                                      qint64 uploadedSize)
 {
     QJsonObject metadata;
     metadata.insert(kMetaFileId, fileId);
@@ -190,7 +404,7 @@ bool SftpUploaderCore::saveMetadata(const QString &fileId, const QString &localP
     metadata.insert(kMetaLastModified, pythonMtime(localPath));
     metadata.insert(kMetaTimestamp, double(QDateTime::currentMSecsSinceEpoch()) / 1000.0);
 
-    QFile f(metadataPath(fileId));
+    QFile f(metadataPathIn(dir, fileId));
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
     // Compact JSON —— Python json.load 可读；字段名/类型与 json.dump 一致。
@@ -198,10 +412,16 @@ bool SftpUploaderCore::saveMetadata(const QString &fileId, const QString &localP
     return true;
 }
 
-// 对应Python: _load_metadata
-bool SftpUploaderCore::loadMetadata(const QString &fileId, QJsonObject &out) const
+bool SftpUploaderCore::saveMetadata(const QString &fileId, const QString &localPath,
+                                    const QString &remotePath, qint64 uploadedSize) const
 {
-    QFile f(metadataPath(fileId));
+    return saveMetadataIn(m_metadataDir, fileId, localPath, remotePath, uploadedSize);
+}
+
+// 对应Python: _load_metadata
+bool SftpUploaderCore::loadMetadataIn(const QString &dir, const QString &fileId, QJsonObject &out)
+{
+    QFile f(metadataPathIn(dir, fileId));
     if (!f.exists() || !f.open(QIODevice::ReadOnly))
         return false;
     QJsonParseError parseErr{};
@@ -221,22 +441,25 @@ bool SftpUploaderCore::loadMetadata(const QString &fileId, QJsonObject &out) con
     return true;
 }
 
+bool SftpUploaderCore::loadMetadata(const QString &fileId, QJsonObject &out) const
+{
+    return loadMetadataIn(m_metadataDir, fileId, out);
+}
+
 // 对应Python: _delete_metadata
+void SftpUploaderCore::deleteMetadataIn(const QString &metadataDir, const QString &fileId)
+{
+    QFile::remove(metadataPathIn(metadataDir, fileId));
+}
+
 void SftpUploaderCore::deleteMetadata(const QString &fileId) const
 {
-    QFile::remove(metadataPath(fileId));
+    deleteMetadataIn(m_metadataDir, fileId);
 }
 
 // ---------------------------------------------------------------------------
 // 上传 API
 // ---------------------------------------------------------------------------
-
-template <typename Fn>
-void SftpUploaderCore::postToSelf(Fn &&fn)
-{
-    // 工作线程 -> 本对象线程；显式 QueuedConnection，信号最终在本线程发射。
-    QMetaObject::invokeMethod(this, std::forward<Fn>(fn), Qt::QueuedConnection);
-}
 
 // 对应Python: upload_file
 void SftpUploaderCore::uploadFile(const QString &fileId, const QString &localPath,
@@ -244,12 +467,15 @@ void SftpUploaderCore::uploadFile(const QString &fileId, const QString &localPat
 {
     CancelFlag cancel = std::make_shared<std::atomic<bool>>(false);
     {
-        QMutexLocker locker(&m_stateLock);
-        m_cancelFlags.insert(fileId, cancel);
+        QMutexLocker locker(&m_ctx->lock);
+        m_ctx->cancelFlags.insert(fileId, cancel);
     }
     // QThreadPool 任务队列替代 Python 的每文件 threading.Thread。
-    m_pool.start([this, fileId, localPath, remotePath, cancel]() {
-        workerUpload(fileId, localPath, remotePath, cancel);
+    // 按值捕获 ctx（shared_ptr）而不是 this：本对象可能在任务跑完前就析构，
+    // 任务全程只用 ctx。
+    WorkerContextPtr ctx = m_ctx;
+    m_pool->start([ctx, fileId, localPath, remotePath, cancel]() {
+        workerUpload(ctx, fileId, localPath, remotePath, cancel);
     });
 }
 
@@ -263,180 +489,275 @@ void SftpUploaderCore::batchUpload(const QHash<QString, QPair<QString, QString>>
 // 对应Python: cancel_upload
 void SftpUploaderCore::cancelUpload(const QString &fileId)
 {
-    QMutexLocker locker(&m_stateLock);
-    auto it = m_cancelFlags.find(fileId);
-    if (it != m_cancelFlags.end())
+    QMutexLocker locker(&m_ctx->lock);
+    auto it = m_ctx->cancelFlags.find(fileId);
+    if (it != m_ctx->cancelFlags.end())
         it.value()->store(true);
 }
 
 bool SftpUploaderCore::isCancelRequested(const QString &fileId) const
 {
-    QMutexLocker locker(&m_stateLock);
-    auto it = m_cancelFlags.constFind(fileId);
-    return it != m_cancelFlags.constEnd() && it.value()->load();
+    QMutexLocker locker(&m_ctx->lock);
+    auto it = m_ctx->cancelFlags.constFind(fileId);
+    return it != m_ctx->cancelFlags.constEnd() && it.value()->load();
 }
 
 bool SftpUploaderCore::waitForFinished(int msecs)
 {
-    return m_pool.waitForDone(msecs);
+    return m_pool->waitForDone(msecs);
 }
 
 // ---------------------------------------------------------------------------
 // 工作线程
+//
+// 以下函数全部是 static：本对象随时可能在它们跑到一半时析构，凡是它们要用的
+// 东西都经 ctx 取（见 WorkerContext）。编译器替我们保证这里没有 this 可碰。
 // ---------------------------------------------------------------------------
 
-bool SftpUploaderCore::ensureSftp(QString &errorOut)
+// 把 fn 投回宿主对象线程执行，并把宿主指针交给它（信号得由宿主发）。
+// 宿主已析构（owner 为空）就整个丢弃 —— 关闭标签页后本来也没人再关心进度。
+//
+// 两层保护缺一不可：
+//  - 取 owner 时持 ctx->lock，而 ~SftpUploaderCore 置空 owner 也要拿同一把锁，
+//    所以拿到的 owner 在 invokeMethod 那一刻必然还活着。
+//  - 投递之后宿主若被析构，~QObject 会清掉发给它的待处理事件，排队的调用
+//    不会再执行。
+template <typename Fn>
+void SftpUploaderCore::postToOwner(const WorkerContextPtr &ctx, Fn &&fn)
 {
-    QMutexLocker locker(&m_stateLock);
-    if (m_sftp)
-        return true;
-    if (!m_client || !m_client->rawSession()) {
-        errorOut = QStringLiteral("SFTP客户端未设置"); // 与 Python 错误文案一致
-        return false;
-    }
-    QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
-    m_sftp = sftpRetryPtr(m_client, [&] { return libssh2_sftp_init(m_client->rawSession()); });
-    if (!m_sftp) {
-        errorOut = QStringLiteral("libssh2_sftp_init failed");
-        return false;
-    }
-    return true;
+    QMutexLocker locker(&ctx->lock);
+    SftpUploaderCore *owner = ctx->owner;
+    if (!owner)
+        return;
+    // 显式 QueuedConnection，信号最终在宿主线程发射。
+    QMetaObject::invokeMethod(
+        owner, [owner, fn = std::forward<Fn>(fn)]() { fn(owner); }, Qt::QueuedConnection);
 }
 
-bool SftpUploaderCore::remoteExists(const QString &remotePath)
+// 远端路径是否存在。从连接池租一条连接做（元数据操作很轻，随便哪条都行）。
+bool SftpUploaderCore::remoteExists(const WorkerContextPtr &ctx, const QString &remotePath)
 {
-    QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
+    auto lease = ctx->pool->lease();
+    if (!lease.isValid())
+        return false;
+    QMutexLocker<QRecursiveMutex> lock(lease.lock());
     LIBSSH2_SFTP_ATTRIBUTES attrs{};
     const QByteArray p = remotePath.toUtf8();
-    const int rc = sftpRetryInt(m_client, [&] {
-        return libssh2_sftp_stat_ex(m_sftp, p.constData(), quint32(p.size()),
+    const int rc = sftpRetryInt(lease.client(), [&] {
+        return libssh2_sftp_stat_ex(lease.sftp(), p.constData(), quint32(p.size()),
                                     LIBSSH2_SFTP_STAT, &attrs);
     });
     return rc == 0;
 }
 
 // 对应Python: _mkdir_p
-bool SftpUploaderCore::remoteMkdirP(const QString &remotePath)
+bool SftpUploaderCore::remoteMkdirP(const WorkerContextPtr &ctx, const QString &remotePath)
 {
     if (remotePath.isEmpty() || remotePath == QStringLiteral("/"))
         return true;
-    if (remoteExists(remotePath))
+    if (remoteExists(ctx, remotePath))
         return true;
     const QString parent = remoteDirname(remotePath);
     if (!parent.isEmpty() && parent != remotePath) {
-        if (!remoteMkdirP(parent))
+        if (!remoteMkdirP(ctx, parent))
             return false;
     }
-    QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
-    const QByteArray p = remotePath.toUtf8();
-    const int rc = sftpRetryInt(m_client, [&] {
-        return libssh2_sftp_mkdir_ex(m_sftp, p.constData(), quint32(p.size()), 0755);
-    });
-    return rc == 0 || remoteExists(remotePath); // 并发下目录可能已被建出
+    auto lease = ctx->pool->lease();
+    if (!lease.isValid())
+        return false;
+    int rc = -1;
+    {
+        QMutexLocker<QRecursiveMutex> lock(lease.lock());
+        const QByteArray p = remotePath.toUtf8();
+        rc = sftpRetryInt(lease.client(), [&] {
+            return libssh2_sftp_mkdir_ex(lease.sftp(), p.constData(), quint32(p.size()), 0755);
+        });
+    }
+    return rc == 0 || remoteExists(ctx, remotePath); // 并发下目录可能已被别的流建出
 }
 
-// 对应Python: _upload_chunk（顺序上传模式 + 3 次重试）
-// Python 对不存在的文件用 'wb' 创建并补零、已存在的用 'rb+' 定位写；
-// libssh2 用 CREAT|WRITE（不带 TRUNC）+ seek64 一步覆盖两种情形：
-// 越过 EOF 的写由 SFTP 服务端补零/稀疏化，语义一致。
-bool SftpUploaderCore::uploadChunk(const QString &fileId, const QString &localPath,
-                                   const QString &remotePath, qint64 offset,
-                                   qint64 chunkSize, qint64 totalSize, QString &errorOut)
+// 建立远端空文件（totalSize == 0）。
+bool SftpUploaderCore::createEmptyRemoteFile(const WorkerContextPtr &ctx,
+                                             const QString &remotePath, QString &errorOut)
+{
+    auto lease = ctx->pool->lease(&errorOut);
+    if (!lease.isValid())
+        return false;
+    QMutexLocker<QRecursiveMutex> lock(lease.lock());
+    const QByteArray p = remotePath.toUtf8();
+    LIBSSH2_SFTP_HANDLE *handle = sftpRetryPtr(lease.client(), [&] {
+        return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
+                                    LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
+                                    0644, LIBSSH2_SFTP_OPENFILE);
+    });
+    if (!handle) {
+        errorOut = QStringLiteral("创建远程文件失败: %1").arg(remotePath);
+        return false;
+    }
+    sftpRetryInt(lease.client(), [&] { return libssh2_sftp_close_handle(handle); });
+    return true;
+}
+
+// 在已开好的 handle 上写一个分片（含 kMaxRetries 次重试）。
+// 每次重试都重新 seek —— 上一次可能已经写进去一部分，位置是脏的。
+bool SftpUploaderCore::writeChunk(LIBSSH2_SFTP_HANDLE *handle, QRecursiveMutex *lock,
+                                  SshClient *client, const QByteArray &data,
+                                  qint64 offset, QString &errorOut,
+                                  const std::atomic<bool> *cancel)
 {
     for (int retry = 0; retry < kMaxRetries; ++retry) {
         QString err;
-
-        // 读取本地分片。
-        QFile local(localPath);
-        QByteArray chunkData;
-        if (local.open(QIODevice::ReadOnly) && local.seek(offset))
-            chunkData = local.read(chunkSize);
-        if (chunkData.isEmpty()) {
-            err = QStringLiteral("read local chunk failed at offset %1").arg(offset);
-        } else {
-            // 写远端（sessionLock 串行，粒度与 Python 的 op_lock 相同：整个分片）。
-            QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
-            const QByteArray p = remotePath.toUtf8();
-            LIBSSH2_SFTP_HANDLE *handle = sftpRetryPtr(m_client, [&] {
-                return libssh2_sftp_open_ex(m_sftp, p.constData(), quint32(p.size()),
-                                            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
-                                            0644, LIBSSH2_SFTP_OPENFILE);
-            });
-            if (!handle) {
-                // 父目录可能不存在（Python 在此路径下也会补建目录）。
-                lock.unlock();
-                remoteMkdirP(remoteDirname(remotePath));
-                lock.relock();
-                handle = sftpRetryPtr(m_client, [&] {
-                    return libssh2_sftp_open_ex(m_sftp, p.constData(), quint32(p.size()),
-                                                LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
-                                                0644, LIBSSH2_SFTP_OPENFILE);
-                });
+        {
+            CancelableLock guard(lock, cancel);
+            if (!guard.held()) {
+                errorOut = QStringLiteral("上传已取消");
+                return false;
             }
-            if (!handle) {
-                err = QStringLiteral("open remote file failed: %1").arg(remotePath);
-            } else {
-                libssh2_sftp_seek64(handle, quint64(offset));
-                qint64 written = 0;
-                while (written < chunkData.size()) {
-                    const ssize_t n = sftpRetryInt(m_client, [&] {
-                        return libssh2_sftp_write(handle,
-                                                  chunkData.constData() + written,
-                                                  size_t(chunkData.size() - written));
-                    });
-                    if (n < 0) {
-                        err = QStringLiteral("sftp write failed (rc=%1)").arg(qint64(n));
-                        break;
-                    }
-                    written += n;
+            libssh2_sftp_seek64(handle, quint64(offset));
+            qint64 written = 0;
+            while (written < data.size()) {
+                const ssize_t n = sftpRetryInt(client, [&] {
+                    return libssh2_sftp_write(handle, data.constData() + written,
+                                              size_t(data.size() - written));
+                }, cancel);
+                if (n < 0) {
+                    err = QStringLiteral("sftp write failed (rc=%1) at offset %2")
+                              .arg(qint64(n)).arg(offset);
+                    break;
                 }
-                sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(handle); });
+                written += n;
             }
         }
-
-        if (err.isEmpty()) {
-            const qint64 done = offset + chunkData.size();
-            // 更新元数据（对应Python: _save_metadata(offset + len(chunk_data))）。
-            saveMetadata(fileId, localPath, remotePath, done);
-
-            // 更新进度（百分比与字节级双信号，经 QueuedConnection 回本线程）。
-            const int progress = int(qMin<qint64>(100, done * 100 / qMax<qint64>(1, totalSize)));
-            const QString filename = baseName(localPath);
-            postToSelf([this, fileId, progress, filename, done, totalSize]() {
-                emit progressUpdated(fileId, progress, filename);
-                emit progressChanged(fileId, done, totalSize);
-            });
-
-            // 判断是否完成。
-            if (done >= totalSize) {
-                deleteMetadata(fileId);
-                postToSelf([this, fileId, filename]() {
-                    emit uploadCompleted(fileId, filename);
-                });
-            }
+        if (err.isEmpty())
             return true;
-        }
-
-        if (retry < kMaxRetries - 1) {
-            QThread::sleep(1); // 对应Python: time.sleep(1) 后重试
-        } else {
-            errorOut = QStringLiteral("上传失败(重试%1次): %2").arg(kMaxRetries).arg(err);
+        // 已取消（关闭标签页/退出程序）就不再重试，更不能睡 1 秒：每条流都
+        // 白等一遍会让析构多卡好几秒。
+        if (cancel && cancel->load()) {
+            errorOut = QStringLiteral("上传已取消");
             return false;
         }
+        if (retry < kMaxRetries - 1)
+            QThread::sleep(1); // 对应Python: time.sleep(1) 后重试
+        else
+            errorOut = QStringLiteral("上传失败(重试%1次): %2").arg(kMaxRetries).arg(err);
     }
     return false;
 }
 
-// 对应Python: _upload_file_worker
-void SftpUploaderCore::workerUpload(const QString &fileId, const QString &localPath,
-                                    const QString &remotePath, CancelFlag cancel)
+// 一条并行上传流：租一条独立连接，开一次远端 handle，然后循环领分片。
+// 关键点（相对旧实现的提速来源）：
+//  - handle 只开一次，不再每个 4MB 分片都 open/close 一轮（1GB 文件省掉 256
+//    次多余的协议往返）。
+//  - 独占连接上没有别的流竞争这把锁，多条流的 write 真正同时在网络上飞。
+//  - 元数据只在连续前缀水位推进时才落盘，不是每片一次 JSON 写。
+void SftpUploaderCore::runUploadStream(const WorkerContextPtr &ctx, FileTransferState &state,
+                                       const QString &fileId, const QString &localPath,
+                                       const QString &remotePath)
+{
+    QString leaseErr;
+    auto lease = ctx->pool->lease(&leaseErr);
+    if (!lease.isValid()) {
+        state.setFailed(leaseErr.isEmpty() ? QStringLiteral("SFTP客户端未设置") : leaseErr);
+        return;
+    }
+
+    // 本地文件每条流各开一个只读句柄（QFile 非线程安全，不能共享）。
+    QFile local(localPath);
+    if (!local.open(QIODevice::ReadOnly)) {
+        state.setFailed(QStringLiteral("本地文件无法读取: %1").arg(localPath));
+        return;
+    }
+
+    // 打开远端文件：CREAT|WRITE 不带 TRUNC，各流 seek 到自己的分片位置写。
+    // 越过 EOF 的写由 SFTP 服务端补零/稀疏化，与 Python 'rb+' 定位写语义一致。
+    const QByteArray p = remotePath.toUtf8();
+    const std::atomic<bool> *cancel = state.cancel;
+    LIBSSH2_SFTP_HANDLE *handle = nullptr;
+    {
+        CancelableLock guard(lease.lock(), cancel);
+        if (guard.held()) {
+            handle = sftpRetryPtr(lease.client(), [&] {
+                return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
+                                            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
+                                            0644, LIBSSH2_SFTP_OPENFILE);
+            }, cancel);
+        }
+    }
+    if (!handle && !(cancel && cancel->load())) {
+        // 父目录可能不存在（Python 在此路径下也会补建目录）。
+        remoteMkdirP(ctx, remoteDirname(remotePath));
+        CancelableLock guard(lease.lock(), cancel);
+        if (guard.held()) {
+            handle = sftpRetryPtr(lease.client(), [&] {
+                return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
+                                            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
+                                            0644, LIBSSH2_SFTP_OPENFILE);
+            }, cancel);
+        }
+    }
+    if (!handle) {
+        // 取消导致的打开失败不算错误：由 workerUpload 走取消分支保留续传元数据。
+        if (!(cancel && cancel->load()))
+            state.setFailed(QStringLiteral("open remote file failed: %1").arg(remotePath));
+        return;
+    }
+
+    const QString filename = baseName(localPath);
+    int index = 0;
+    qint64 offset = 0, size = 0;
+    while (state.takeNext(index, offset, size)) {
+        if (!local.seek(offset)) {
+            state.setFailed(QStringLiteral("read local chunk failed at offset %1").arg(offset));
+            break;
+        }
+        const QByteArray data = local.read(size);
+        if (data.size() != size) {
+            state.setFailed(QStringLiteral("read local chunk failed at offset %1").arg(offset));
+            break;
+        }
+
+        QString chunkErr;
+        if (!writeChunk(handle, lease.lock(), lease.client(), data, offset, chunkErr, cancel)) {
+            state.setFailed(chunkErr);
+            break;
+        }
+
+        // 分片完成：推进水位并落一次元数据（水位没动就不写盘）。
+        const qint64 before = state.watermark;
+        const qint64 watermark = state.markDone(index, data.size());
+        if (watermark > before)
+            saveMetadataIn(ctx->metadataDir, fileId, localPath, remotePath, watermark);
+
+        // 进度按实际已传字节算（含乱序完成的分片），不是水位。
+        const qint64 done = state.progressDone.load();
+        const qint64 total = state.totalSize;
+        const int progress = int(qMin<qint64>(100, done * 100 / qMax<qint64>(1, total)));
+        postToOwner(ctx, [fileId, progress, filename, done, total](SftpUploaderCore *self) {
+            emit self->progressUpdated(fileId, progress, filename);
+            emit self->progressChanged(fileId, done, total);
+        });
+    }
+
+    // 收尾关句柄：取消时抢不到锁就放弃优雅关闭，句柄随连接关闭一并回收。
+    CancelableLock guard(lease.lock(), cancel);
+    if (guard.held())
+        sftpRetryInt(lease.client(), [&] { return libssh2_sftp_close_handle(handle); }, cancel);
+}
+
+// 对应Python: _upload_file_worker（Python 侧单线程串行；这里并行拆流）
+void SftpUploaderCore::workerUpload(const WorkerContextPtr &ctx, const QString &fileId,
+                                    const QString &localPath, const QString &remotePath,
+                                    CancelFlag cancel)
 {
     const QString filename = baseName(localPath);
-    QString err;
+    const QString metaDir = [&ctx] {
+        QMutexLocker locker(&ctx->lock);
+        return ctx->metadataDir;
+    }();
 
-    auto emitFailed = [this, fileId, filename](const QString &message) {
-        postToSelf([this, fileId, filename, message]() {
-            emit uploadFailed(fileId, filename, message);
+    auto emitFailed = [&ctx, fileId, filename](const QString &message) {
+        postToOwner(ctx, [fileId, filename, message](SftpUploaderCore *self) {
+            emit self->uploadFailed(fileId, filename, message);
         });
     };
 
@@ -444,10 +765,6 @@ void SftpUploaderCore::workerUpload(const QString &fileId, const QString &localP
         if (cancel->load())
             break; // 入队后未开始就被取消
 
-        if (!ensureSftp(err)) {
-            emitFailed(err);
-            break;
-        }
         if (!QFile::exists(localPath)) {
             emitFailed(QStringLiteral("本地文件不存在: %1").arg(localPath));
             break;
@@ -455,8 +772,8 @@ void SftpUploaderCore::workerUpload(const QString &fileId, const QString &localP
 
         // 确保远程目录存在。
         const QString remoteDir = remoteDirname(remotePath);
-        if (!remoteDir.isEmpty() && !remoteExists(remoteDir)) {
-            if (!remoteMkdirP(remoteDir)) {
+        if (!remoteDir.isEmpty() && !remoteExists(ctx, remoteDir)) {
+            if (!remoteMkdirP(ctx, remoteDir)) {
                 emitFailed(QStringLiteral("创建远程目录失败: %1").arg(remoteDir));
                 break;
             }
@@ -464,55 +781,92 @@ void SftpUploaderCore::workerUpload(const QString &fileId, const QString &localP
 
         const qint64 totalSize = QFileInfo(localPath).size();
 
-        // 断点续传：元数据有效且 local/remote 一致时从 uploaded_size 续传。
-        qint64 offset = 0;
-        QJsonObject metadata;
-        if (loadMetadata(fileId, metadata)
-            && metadata.value(QStringLiteral("local_path")).toString() == localPath
-            && metadata.value(QStringLiteral("remote_path")).toString() == remotePath
-            && metadata.contains(QStringLiteral("uploaded_size"))) {
-            offset = qint64(metadata.value(QStringLiteral("uploaded_size")).toDouble());
-        }
-
-        postToSelf([this, fileId, filename, totalSize]() {
-            emit uploadStarted(fileId, filename, totalSize);
+        postToOwner(ctx, [fileId, filename, totalSize](SftpUploaderCore *self) {
+            emit self->uploadStarted(fileId, filename, totalSize);
         });
 
-        // 上传文件分片。
-        const auto chunks = planChunks(totalSize, offset);
-        for (const auto &chunk : chunks) {
+        // 空文件：无分片可传，直接创建远端空文件并报完成。
+        if (totalSize == 0) {
             if (cancel->load())
-                break; // 对应Python: stop_events[file_id].is_set()
-            QString chunkErr;
-            if (!uploadChunk(fileId, localPath, remotePath,
-                             chunk.first, chunk.second, totalSize, chunkErr)) {
-                emitFailed(chunkErr);
                 break;
+            QString err;
+            if (!createEmptyRemoteFile(ctx, remotePath, err)) {
+                emitFailed(err);
+                break;
+            }
+            deleteMetadataIn(metaDir, fileId);
+            postToOwner(ctx, [fileId, filename](SftpUploaderCore *self) {
+                emit self->uploadCompleted(fileId, filename);
+            });
+            break;
+        }
+
+        // 断点续传：元数据有效且 local/remote 一致时从 uploaded_size 续传。
+        qint64 startOffset = 0;
+        QJsonObject metadata;
+        if (loadMetadataIn(metaDir, fileId, metadata)
+            && metadata.value(kMetaLocalPath).toString() == localPath
+            && metadata.value(kMetaRemotePath).toString() == remotePath
+            && metadata.contains(kMetaUploadedSize)) {
+            startOffset = qint64(metadata.value(kMetaUploadedSize).toDouble());
+        }
+
+        FileTransferState state;
+        state.chunks = planChunks(totalSize, startOffset);
+        state.done.fill(false, state.chunks.size());
+        state.baseOffset = startOffset;
+        state.watermark = startOffset;
+        state.totalSize = totalSize;
+        state.progressDone.store(startOffset);
+        state.cancel = cancel.get();
+
+        // 并行度：分片数、单文件流上限、连接池实际能给的连接数，取最小。
+        // 小文件（< kMinSizeForMultiStream）不拆流——握手成本盖过收益。
+        int streams = 1;
+        if (totalSize >= kMinSizeForMultiStream && ctx->pool->canParallelize()) {
+            streams = qMin(kMaxStreamsPerFile, int(state.chunks.size()));
+            streams = qMax(1, qMin(streams, ctx->pool->maxConnections()));
+        }
+
+        if (streams <= 1) {
+            runUploadStream(ctx, state, fileId, localPath, remotePath);
+        } else {
+            // 额外流放到独立线程；当前线程也干活（少开一个线程）。
+            QVector<QThread *> helpers;
+            helpers.reserve(streams - 1);
+            for (int i = 1; i < streams; ++i) {
+                QThread *t = QThread::create([&ctx, &state, fileId, localPath, remotePath] {
+                    runUploadStream(ctx, state, fileId, localPath, remotePath);
+                });
+                helpers.append(t);
+                t->start();
+            }
+            runUploadStream(ctx, state, fileId, localPath, remotePath);
+            // state 是栈对象，必须等所有流退出后才能离开作用域。
+            for (QThread *t : helpers) {
+                t->wait();
+                delete t;
             }
         }
 
-        // 空文件：无分片可传，直接创建远端空文件并报完成。
-        if (totalSize == 0 && !cancel->load()) {
-            QString chunkErr;
-            QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
-            const QByteArray p = remotePath.toUtf8();
-            LIBSSH2_SFTP_HANDLE *handle = sftpRetryPtr(m_client, [&] {
-                return libssh2_sftp_open_ex(m_sftp, p.constData(), quint32(p.size()),
-                                            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
-                                            0644, LIBSSH2_SFTP_OPENFILE);
-            });
-            if (handle)
-                sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(handle); });
-            Q_UNUSED(chunkErr);
-            postToSelf([this, fileId, filename]() {
-                emit uploadCompleted(fileId, filename);
-            });
+        if (cancel->load())
+            break; // 取消：保留元数据供下次续传
+
+        if (state.hasFailed()) {
+            emitFailed(state.error);
+            break;
         }
+
+        deleteMetadataIn(metaDir, fileId);
+        postToOwner(ctx, [fileId, filename](SftpUploaderCore *self) {
+            emit self->uploadCompleted(fileId, filename);
+        });
     } while (false);
 
     // 清理线程资源。对应Python: finally 中删除 upload_threads/stop_events。
-    QMutexLocker locker(&m_stateLock);
-    m_cancelFlags.remove(fileId);
+    // 注意这里动的是 ctx 而不是本对象的成员：本对象可能早就析构了。
+    QMutexLocker locker(&ctx->lock);
+    ctx->cancelFlags.remove(fileId);
 }
 
 } // namespace cubeshell

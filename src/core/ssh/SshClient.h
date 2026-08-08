@@ -79,6 +79,20 @@ public:
     QString username() const { return m_username; }
     QString password() const { return m_password; }
 
+    // 完整凭据只读访问（ADDITIVE —— 供 SftpTransferPool 克隆出并行传输专用的
+    // 兄弟连接：libssh2 单个 LIBSSH2_SESSION 上的 SFTP 调用必须全程串行，
+    // 要真并行就得每条流各占一个 session，即各开一条 SSH 连接）。
+    QString host() const { return m_host; }
+    quint16 port() const { return m_port; }
+    QString keyType() const { return m_keyType; }
+    QString keyFile() const { return m_keyFile; }
+    QString passphrase() const { return m_passphrase; }
+
+    // 本连接的认证方式是否可在无人交互的前提下重放（password / publickey 可以，
+    // keyboard-interactive 的 OTP 一次一密不可以）。连接池据此决定能否克隆：
+    // 返回 false 时退回单连接串行传输，不去骚扰用户再输一次动态码。
+    bool isAuthReplayable() const { return m_authReplayable; }
+
     // --- channel I/O (called from the bridge's threads) ---
     // Returns bytes read, or empty on EOF/closed. Sets *wouldBlock if the read
     // would block (caller should wait on the socket).
@@ -185,6 +199,10 @@ private:
     QString m_keyFile;
     QString m_passphrase;
     SshPromptCallback m_promptCallback;
+
+    // authenticate() 成功走的是 password/publickey（可重放）还是
+    // keyboard-interactive（不可重放）。见 isAuthReplayable()。
+    bool m_authReplayable = false;
 
     qintptr m_sock = -1;
     _LIBSSH2_SESSION *m_session = nullptr;

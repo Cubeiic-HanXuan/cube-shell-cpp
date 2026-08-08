@@ -9,6 +9,7 @@
 // menu. Listing runs on a worker thread so the UI stays responsive (the
 // SftpClient serializes libssh2 internally).
 
+#include <QHash>
 #include <QPointer>
 #include <QVector>
 #include <QWidget>
@@ -90,6 +91,16 @@ private:
     std::shared_ptr<SshClient> m_client; // shared：保证比 m_sftp 后析构（见 setClient）
     SftpClient *m_sftp = nullptr;    // child
     SftpUploaderCore *m_uploader = nullptr; // child，分片上传
+
+    // 并行上传的进度聚合：多个文件同时传时，各自的 progressChanged 会争抢同
+    // 一个进度条，单看最后一个信号会让进度条来回跳。这里按 fileId 记账，
+    // 进度条显示所有在传文件的字节总和。
+    struct UploadProgress {
+        qint64 done = 0;
+        qint64 total = 0;
+    };
+    QHash<QString, UploadProgress> m_activeUploads;
+    void refreshUploadProgress(); // 重算聚合进度并刷新进度条/状态栏
 
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章

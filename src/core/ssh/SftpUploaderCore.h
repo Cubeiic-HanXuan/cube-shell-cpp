@@ -18,25 +18,35 @@
 //  - 取消标志：Python 的 threading.Event -> 每文件一个 std::atomic<bool>。
 //  - 进度信号从工作线程经 Qt::QueuedConnection 回投到本对象线程后发射。
 //
-// 并发模型（为什么是"队列串行写"而不是每 worker 独立 SFTP 会话）：
-// libssh2 的 SFTP handle 与其底层 LIBSSH2_SESSION 都非线程安全；本工程的
-// SshClient 一个实例只承载一条 SSH 连接（一个 LIBSSH2_SESSION），SftpClient
-// 也复用同一个 session。要做真正并行的多会话上传就必须为每个 worker 各建一条
-// SSH 连接（需要凭据、握手成本高），而 Python 原实现本来就是 op_lock 全局
-// 串行。因此这里选择：QThreadPool 提供任务级并发（多个文件排队、进度独立、
-// 可单独取消），而对同一 SshClient 的每次 SFTP 调用都在
-// SshClient::sessionLock()（递归锁）内完成 —— 传输吞吐与 Python 持平，
-// 且与共存的 shell 通道/转发通道安全共享会话。
+// 并发模型（多连接真并行）：
+// libssh2 的 SFTP handle 与其底层 LIBSSH2_SESSION 都非线程安全，同一个
+// session 上的所有调用必须经 SshClient::sessionLock() 串行 —— 只用主连接的话
+// 无论开多少线程，同一时刻都只有一个分片在飞。而 SFTP 是请求/应答协议，
+// 单流吞吐 ≈ chunk / RTT，与带宽无关：跨洋链路上加线程不加连接毫无收益。
 //
-// 注意：本类只调用 SshClient 的公开接口（rawSession()/sessionLock()/
-// waitReadable()），自己 libssh2_sftp_init 一个独立 SFTP 子系统通道，
-// 不触碰 SftpClient（其 LIBSSH2_SFTP 句柄是私有的）。
+// 因此传输走 SftpTransferPool：它按主连接的凭据另开若干条独立 SSH 连接
+// （各自一个 LIBSSH2_SESSION + 一个 SFTP 通道），每条传输流独占一条，彼此
+// 无锁竞争。并行发生在两个维度上：
+//   - 多文件：QThreadPool 每文件一个任务，各任务租用不同连接同时传。
+//   - 单个大文件：切成 4MB 分片后由 kMaxStreamsPerFile 条流按"工作窃取"
+//     并行抢传（每条流各开一个远端 handle，seek 到自己的分片位置写）。
+// 主连接不参与并行传输（除降级情形），终端 shell 不再被大文件传输拖住。
+//
+// 降级：主连接用 OTP/keyboard-interactive 登录、或服务端 MaxSessions 打满时，
+// SftpTransferPool 拿不到克隆连接，自动退回"主连接 + sessionLock 串行"，
+// 语义与旧实现一致，只是不加速。详见 SftpTransferPool.h。
+//
+// 断点续传与并行的关系：元数据只有 uploaded_size 一个标量（Python 侧要按
+// 字段互认，不能加字段），标量天然只能表达"前缀已完成"。因此乱序完成的分片
+// 不直接进 uploaded_size，而是只把**连续前缀**的水位写进去 —— 中断后重传会
+// 把水位之后已传的分片再传一遍（保守但绝不出错），Python 侧读到的仍是合法值。
 
 #include <QHash>
 #include <QJsonObject>
 #include <QMutex>
 #include <QObject>
 #include <QPair>
+#include <QRecursiveMutex>
 #include <QString>
 #include <QThreadPool>
 #include <QVector>
@@ -45,10 +55,12 @@
 #include <memory>
 
 struct _LIBSSH2_SFTP;
+struct _LIBSSH2_SFTP_HANDLE;
 
 namespace cubeshell {
 
 class SshClient;
+class SftpTransferPool;
 struct SshError;
 
 // 对应Python: class SFTPUploaderCore(QObject)
@@ -59,6 +71,11 @@ public:
     static constexpr qint64 kChunkSize = 4 * 1024 * 1024;
     // 最大重试次数。对应Python: SFTPUploaderCore.MAX_RETRIES
     static constexpr int kMaxRetries = 3;
+    // 单个文件最多用几条并行流。再多的话 SFTP 服务端的磁盘写入通常先成为
+    // 瓶颈，且每条流都占一条 SSH 连接（撞 sshd MaxSessions 默认 10）。
+    static constexpr int kMaxStreamsPerFile = 4;
+    // 小于此大小的文件不拆流并行（多开连接的握手成本超过收益）。
+    static constexpr qint64 kMinSizeForMultiStream = 8 * 1024 * 1024;
 
     // client: 已连接的 SshClient（外部系统创建和管理，不拥有；可为空，
     // 之后用 setSshClient 注入 —— 对应 Python 的 sftp_client 参数语义）。
@@ -73,9 +90,21 @@ public:
     void setMetadataDir(const QString &dir);
     QString metadataDir() const;
 
-    // 并发任务数（QThreadPool 工作线程数；默认 2 —— 传输本身经 sessionLock
-    // 串行，更多线程只增加排队并发度）。
-    void setMaxConcurrentUploads(int n) { m_pool.setMaxThreadCount(qMax(1, n)); }
+    // 同时上传的文件数（QThreadPool 工作线程数）。每个任务会从连接池租一条
+    // 独立连接，所以这里的并发是真并发。
+    void setMaxConcurrentUploads(int n) { m_pool->setMaxThreadCount(qMax(1, n)); }
+
+    // 并行传输连接数上限（含降级用的主连接）。1 = 完全串行。
+    void setMaxTransferConnections(int n);
+    // 实际可用的并行度（已建成的传输连接数）。传输开始后才有意义。
+    int activeTransferConnections() const;
+    // 当前连接是否支持并行（OTP 登录 / 服务端限流时为 false）。
+    bool canParallelize() const;
+
+    // 后台预建传输连接。挂接连接后尽早调用：每条连接要走完整 SSH 握手
+    // （25ms RTT 链路上约 300ms），不预热的话这笔成本会落在首次上传上，
+    // 反而比串行更慢。详见 SftpTransferPool::prewarm。
+    void prewarmConnections();
 
     // --- 上传 API ---
     // 对应Python: upload_file(file_id, local_path, remote_path)
@@ -126,28 +155,76 @@ signals:
 private:
     using CancelFlag = std::shared_ptr<std::atomic<bool>>;
 
-    // 工作线程主体。对应Python: _upload_file_worker
-    void workerUpload(const QString &fileId, const QString &localPath,
-                      const QString &remotePath, CancelFlag cancel);
-    // 单分片上传（含 3 次重试）。对应Python: _upload_chunk
-    bool uploadChunk(const QString &fileId, const QString &localPath,
-                     const QString &remotePath, qint64 offset, qint64 chunkSize,
-                     qint64 totalSize, QString &errorOut);
-    // 递归创建远程目录。对应Python: _mkdir_p
-    bool remoteMkdirP(const QString &remotePath);
-    bool remoteExists(const QString &remotePath);
-    // 懒初始化本类专用的 LIBSSH2_SFTP 子系统通道（sessionLock 内）。
-    bool ensureSftp(QString &errorOut);
+    // 一个文件的并行上传共享状态：分片游标（工作窃取）、完成集合、
+    // 连续前缀水位、错误短路。多条流并发访问，全部由 mutex 保护。
+    struct FileTransferState;
 
-    // 把信号发射回本对象线程（工作线程中调用）。
-    template <typename Fn> void postToSelf(Fn &&fn);
+    // 工作线程与本对象之间的共享状态，生命周期独立于 SftpUploaderCore。
+    //
+    // 为什么必须独立：析构跑在 UI 线程上（关闭标签页 / 退出程序），等不到
+    // 工作线程时必须放手走人，否则窗口就冻死了（见 ~SftpUploaderCore）。
+    // 那一刻工作线程还在跑，如果它经由 this 去取取消标志、连接池或元数据
+    // 目录，就是 use-after-free —— 成员按声明逆序销毁，m_cancelFlags 甚至
+    // 早于 m_pool 就没了，工作线程收尾时必崩（实测 SIGSEGV in QHash）。
+    // 所以工作线程用到的一切都放在这个由 shared_ptr 共同持有的块里，
+    // 全程不解引用 this。
+    struct WorkerContext {
+        QMutex lock;                            // 保护 owner / cancelFlags
+        // 宿主对象；置空表示已析构，此后不得再向它投递任何东西。
+        SftpUploaderCore *owner = nullptr;
+        QHash<QString, CancelFlag> cancelFlags; // 对应Python: stop_events
+        std::shared_ptr<SftpTransferPool> pool; // 并行传输连接池
+        QString metadataDir;                    // 快照，工作线程只读
+    };
+    using WorkerContextPtr = std::shared_ptr<WorkerContext>;
+
+    // 以下工作线程侧函数一律以 ctx 取状态，不碰 this（原因见 WorkerContext）。
+    // 声明为 static 是硬约束：编译器保证它们没有 this 可用。
+
+    // 工作线程主体。对应Python: _upload_file_worker
+    static void workerUpload(const WorkerContextPtr &ctx, const QString &fileId,
+                             const QString &localPath, const QString &remotePath,
+                             CancelFlag cancel);
+    // 一条并行流：租一条连接，开一次远端 handle，循环领取分片直到取完。
+    // 对应Python: _upload_chunk 的循环体（Python 侧是单线程串行）
+    static void runUploadStream(const WorkerContextPtr &ctx, FileTransferState &state,
+                                const QString &fileId, const QString &localPath,
+                                const QString &remotePath);
+    // 单分片写入（含 kMaxRetries 次重试），在已开好的 handle 上做。
+    // cancel: 取消标志（可为空）。置位时立即放弃重试与 EAGAIN 等待，
+    // 让关闭路径上的工作线程尽快退出。
+    static bool writeChunk(struct _LIBSSH2_SFTP_HANDLE *handle, QRecursiveMutex *lock,
+                           SshClient *client, const QByteArray &data, qint64 offset,
+                           QString &errorOut, const std::atomic<bool> *cancel);
+    // 递归创建远程目录。对应Python: _mkdir_p
+    static bool remoteMkdirP(const WorkerContextPtr &ctx, const QString &remotePath);
+    static bool remoteExists(const WorkerContextPtr &ctx, const QString &remotePath);
+    // 建立空文件（totalSize == 0 的情形）。
+    static bool createEmptyRemoteFile(const WorkerContextPtr &ctx, const QString &remotePath,
+                                      QString &errorOut);
+
+    // 元数据读写的实现体：不依赖成员，供工作线程用 ctx->metadataDir 调用；
+    // 同名的公开成员函数是它们在 m_metadataDir 上的薄包装。
+    static QString metadataPathIn(const QString &dir, const QString &fileId);
+    static bool saveMetadataIn(const QString &dir, const QString &fileId,
+                               const QString &localPath, const QString &remotePath,
+                               qint64 uploadedSize);
+    static bool loadMetadataIn(const QString &dir, const QString &fileId, QJsonObject &out);
+    static void deleteMetadataIn(const QString &dir, const QString &fileId);
+
+    // 把信号发射回宿主对象线程（工作线程中调用）。宿主已析构则整个丢弃。
+    template <typename Fn> static void postToOwner(const WorkerContextPtr &ctx, Fn &&fn);
 
     SshClient *m_client = nullptr;      // 不拥有
-    _LIBSSH2_SFTP *m_sftp = nullptr;    // 本类自己的 SFTP 通道
+    // 连接池的另一份持有在 m_ctx->pool 上：析构等不到工作线程时，本对象先走，
+    // 池由最后一个退出的工作线程释放，不再需要"故意泄漏"。
+    std::shared_ptr<SftpTransferPool> m_transferPool;
     QString m_metadataDir;
-    QThreadPool m_pool;
-    QHash<QString, CancelFlag> m_cancelFlags; // 对应Python: stop_events
-    mutable QMutex m_stateLock;               // 保护 m_cancelFlags / m_sftp 指针
+    // 指针持有：析构超时时要能把它整个丢下（release），否则 ~QThreadPool 会
+    // 无条件 waitForDone()，UI 线程照样被钉死 —— 那正是逃生口要避免的事。
+    std::unique_ptr<QThreadPool> m_pool;
+    WorkerContextPtr m_ctx;             // 与工作线程共享，见 WorkerContext
+    mutable QMutex m_stateLock;         // 保护 m_client
 };
 
 } // namespace cubeshell

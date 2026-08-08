@@ -7,6 +7,7 @@ set(CORE_SOURCES
     ssh/SshBridge.cpp           # port of core/paramiko_bridge.py
     ssh/ShellMfaWatcher.cpp     # port of core/shell_mfa_watcher.py
     ssh/SftpClient.cpp          # port of SFTP operations (function/ssh_func.py)
+    ssh/SftpTransferPool.cpp    # 并行传输连接池（每流一条独立 SSH 连接）
     ssh/PortForwarder.cpp       # port of core/forwarder.py (local/remote/dynamic)
     ssh/ForwarderManager.cpp    # port of core/forwarder.py (manager)
     ssh/CommandExecutor.cpp     # port of core/automation.py command execution

@@ -221,27 +221,41 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
         // 分片上传核心（进度信号已在内部回投到本线程，按工程约定仍显式 QueuedConnection）。
         // 对应Python: core/uploader/sftp_uploader_core.py 的进度信号接线
         m_uploader = new SftpUploaderCore(raw, this);
-        connect(m_uploader, &SftpUploaderCore::progressUpdated, this,
-                [this](const QString &, int progress, const QString &filename) {
-                    m_progress->setVisible(true);
-                    m_progress->setMaximum(100);
-                    m_progress->setValue(progress);
-                    m_status->setText(tr("正在上传 %1 … %2%").arg(filename).arg(progress));
+        // 字节级进度：多文件并行上传时按 fileId 记账后聚合显示，
+        // 否则各文件的信号会把同一个进度条来回拉扯。
+        connect(m_uploader, &SftpUploaderCore::progressChanged, this,
+                [this](const QString &fileId, qint64 done, qint64 total) {
+                    auto &entry = m_activeUploads[fileId];
+                    entry.done = done;
+                    entry.total = total;
+                    refreshUploadProgress();
                 }, Qt::QueuedConnection);
         connect(m_uploader, &SftpUploaderCore::uploadCompleted, this,
-                [this](const QString &, const QString &filename) {
-                    m_progress->setVisible(false);
-                    m_status->setText(tr("上传完成：%1").arg(filename));
+                [this](const QString &fileId, const QString &filename) {
+                    m_activeUploads.remove(fileId);
+                    if (m_activeUploads.isEmpty()) {
+                        m_progress->setVisible(false);
+                        m_status->setText(tr("上传完成：%1").arg(filename));
+                    } else {
+                        refreshUploadProgress();
+                    }
                     refresh();
                 }, Qt::QueuedConnection);
         connect(m_uploader, &SftpUploaderCore::uploadFailed, this,
-                [this](const QString &, const QString &filename, const QString &error) {
-                    m_progress->setVisible(false);
+                [this](const QString &fileId, const QString &filename, const QString &error) {
+                    m_activeUploads.remove(fileId);
+                    if (m_activeUploads.isEmpty())
+                        m_progress->setVisible(false);
+                    else
+                        refreshUploadProgress();
                     m_status->setText(tr("上传失败：%1（%2）").arg(filename, error));
                 }, Qt::QueuedConnection);
     } else {
         m_uploader->setSshClient(raw);
     }
+    // 后台预建并行传输连接：每条要走完整 SSH 握手，等用户点上传时再建
+    // 会把握手成本压在首次传输上（高延迟链路上足以让并行反而更慢）。
+    m_uploader->prewarmConnections();
     loadPath(m_cwd);
 }
 
@@ -484,6 +498,36 @@ void SftpBrowserWidget::removeSelected()
     startWorker(worker);
 }
 
+// 聚合所有在传文件的字节数刷新进度条。并行上传下单个文件的百分比没有参考
+// 意义（几个文件同时推进），这里统一按总字节算，状态栏显示文件数和并行度。
+void SftpBrowserWidget::refreshUploadProgress()
+{
+    if (m_activeUploads.isEmpty()) {
+        m_progress->setVisible(false);
+        return;
+    }
+    qint64 done = 0, total = 0;
+    for (const UploadProgress &p : std::as_const(m_activeUploads)) {
+        done += p.done;
+        total += p.total;
+    }
+    m_progress->setVisible(true);
+    m_progress->setMaximum(100);
+    const int percent = total > 0 ? int(qMin<qint64>(100, done * 100 / total)) : 0;
+    m_progress->setValue(percent);
+
+    const int fileCount = m_activeUploads.size();
+    const int streams = m_uploader ? m_uploader->activeTransferConnections() : 1;
+    if (fileCount > 1) {
+        m_status->setText(tr("正在上传 %1 个文件 … %2%（%3 条并行连接）")
+                              .arg(fileCount).arg(percent).arg(streams));
+    } else {
+        m_status->setText(tr("正在上传 %1 … %2%（%3 条并行连接）")
+                              .arg(QFileInfo(m_activeUploads.constBegin().key()).fileName())
+                              .arg(percent).arg(streams));
+    }
+}
+
 void SftpBrowserWidget::uploadFiles()
 {
     if (!m_uploader)
@@ -492,10 +536,13 @@ void SftpBrowserWidget::uploadFiles()
     for (const QString &local : files) {
         const QString remote = joinPath(m_cwd, QFileInfo(local).fileName());
         // 分片上传（断点续传）；fileId 用远端路径。
+        // 多文件会被 SftpUploaderCore 的线程池并行分发到不同的传输连接上，
+        // 单个大文件还会再拆成多条流并行 —— 见 SftpTransferPool.h。
         // 对应Python: sftp_uploader_core.py::upload_file
-        m_progress->setVisible(true);
+        m_activeUploads.insert(remote, UploadProgress{0, QFileInfo(local).size()});
         m_uploader->uploadFile(remote, local, remote);
     }
+    refreshUploadProgress();
 }
 
 void SftpBrowserWidget::downloadSelected()

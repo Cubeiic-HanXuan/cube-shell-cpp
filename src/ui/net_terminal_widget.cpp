@@ -107,6 +107,8 @@ NetTerminalWidget::NetTerminalWidget(const QString &mode, QWidget *parent)
     connect(m_term, &QTermWidget::fontSizeChanged, this,
             [](int size) { GlobalState::instance().setFontSize(size); });
     m_term->setColorScheme(GlobalState::instance().terminalTheme());
+    // 回滚缓冲行数（同时决定“查找”能检索到多久以前的输出）。
+    m_term->setHistorySize(GlobalState::instance().scrollbackLines());
     m_term->setScrollBarPosition(ScrollBarRight);
 
     // 不挂 TerminalCommandSuggest：命令提示是 shell 语义，对面可能是交换机

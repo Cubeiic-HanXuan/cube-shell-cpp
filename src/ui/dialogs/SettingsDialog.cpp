@@ -30,6 +30,7 @@ static const char kFontFamily[] = "settings/font_family";
 static const char kFontSize[]   = "settings/font_size";
 static const char kSshTimeout[] = "settings/ssh_timeout";
 static const char kEncoding[]   = "settings/terminal_encoding";
+static const char kScrollback[] = "settings/scrollback_lines";
 } // namespace settings_keys
 
 // 对应Python: function/theme.py::MainWindow.__init__（设置窗布局）
@@ -131,6 +132,16 @@ QWidget *SettingsDialog::createGeneralTab()
     m_encoding->addItems({QStringLiteral("UTF-8"), QStringLiteral("GBK"),
                           QStringLiteral("GB2312")});
     form->addRow(tr("默认终端编码："), m_encoding);
+
+    // 回滚行数：决定能往回翻多少输出，也决定「查找」能检索到多大范围。
+    m_scrollback = new QSpinBox(page);
+    m_scrollback->setRange(0, 1000000);
+    m_scrollback->setSingleStep(1000);
+    m_scrollback->setSuffix(tr(" 行"));
+    m_scrollback->setSpecialValueText(tr("不保留"));   // 0
+    m_scrollback->setToolTip(tr("终端保留的历史输出行数，也是“查找”能检索的范围。\n"
+                                "行数越大越占内存，排查线上日志建议 10000 以上。"));
+    form->addRow(tr("终端回滚行数："), m_scrollback);
     return page;
 }
 
@@ -171,6 +182,9 @@ void SettingsDialog::loadCurrentSettings()
         qs.value(settings_keys::kEncoding, QStringLiteral("UTF-8")).toString());
     if (encIdx >= 0)
         m_encoding->setCurrentIndex(encIdx);
+
+    m_scrollback->setValue(
+        qs.value(settings_keys::kScrollback, state.scrollbackLines()).toInt());
 }
 
 int SettingsDialog::sshTimeoutSeconds() const
@@ -206,6 +220,10 @@ void SettingsDialog::accept()
     theme[QLatin1String(kSshTimeoutKey)] = m_sshTimeout->value();
     state.setTheme(theme);
 
+    const int scrollback = m_scrollback->value();
+    const bool scrollbackDirty = scrollback != state.scrollbackLines();
+    state.setScrollbackLines(scrollback);
+
     // QSettings 持久化（本对话框全部设置项）。
     qs.setValue(settings_keys::kTheme, appearance);
     qs.setValue(settings_keys::kLanguage, m_language->currentData().toString());
@@ -213,6 +231,7 @@ void SettingsDialog::accept()
     qs.setValue(settings_keys::kFontSize, size);
     qs.setValue(settings_keys::kSshTimeout, m_sshTimeout->value());
     qs.setValue(settings_keys::kEncoding, m_encoding->currentText());
+    qs.setValue(settings_keys::kScrollback, scrollback);
 
     // theme.json 同步写回（与 Python 版共享配置）。
     QString err;
@@ -223,6 +242,8 @@ void SettingsDialog::accept()
         emit appearanceChanged(appearance);
     if (fontDirty)
         emit fontChanged(family, size);
+    if (scrollbackDirty)
+        emit scrollbackLinesChanged(scrollback);
 
     // 语言切换（LanguageManager 内部会写回 GlobalState 并持久化）。
     const QString langCode = m_language->currentData().toString();

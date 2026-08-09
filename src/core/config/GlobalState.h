@@ -118,6 +118,12 @@ public:
     QString terminalTheme() const;
     void setTerminalTheme(const QString &name);
 
+    // 终端回滚行数 (theme.json 的 "scrollback_lines")，默认 10000。
+    // 查日志/搜索历史都吃这个缓冲：太小则 tail 几屏后就翻不回去，也搜不到。
+    // 0 表示不保留历史，负数表示无限（落磁盘临时文件，见 setHistorySize）。
+    int scrollbackLines() const;
+    void setScrollbackLines(int lines);
+
 private:
     GlobalState() = default;
 

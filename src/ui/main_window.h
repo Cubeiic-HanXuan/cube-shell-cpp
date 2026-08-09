@@ -146,6 +146,8 @@ private:
     static void equalizeSplitter(QSplitter *splitter);
     // 焦点/激活 pane 管理：activeTabWidget 返回最后获得焦点的 pane。
     QTabWidget *activeTabWidget() const;
+    // 当前活动 pane 的当前标签页里的终端；不是终端标签（首页/编辑器等）时返回 nullptr。
+    QTermWidget *currentTerminal() const;
     void setActivePane(TerminalTabWidget *pane);
     // 焦点在分屏之间循环切换（Ctrl+Alt+方向 / 菜单）。
     void focusNextPane(int delta);

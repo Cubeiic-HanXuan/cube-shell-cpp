@@ -485,6 +485,47 @@ void MainWindow::setupMenus()
             term->pasteClipboard();
     });
 
+    editMenu->addSeparator();
+
+    // --- 查找（终端内容检索：排查线上问题时按关键字定位日志）---
+    QAction *find = editMenu->addAction(tr("查找"));
+#ifdef Q_OS_MACOS
+    find->setShortcut(QKeySequence::Find);                              // Cmd+F
+#else
+    // 非 macOS 不能用 Ctrl+F：readline(emacs 模式) 的 forward-char、vim 的翻页
+    // 都占着它，抢过来会把终端里的常用操作弄坏。跟复制/粘贴一样加 Shift。
+    find->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+#endif
+    connect(find, &QAction::triggered, this, [this]() {
+        if (QTermWidget *term = currentTerminal()) {
+            // 有选中内容就直接拿来当关键字。
+            if (term->selectedText(false).trimmed().isEmpty())
+                term->showSearchBar();
+            else
+                term->searchSelectedText();
+        }
+    });
+
+    QAction *findNext = editMenu->addAction(tr("查找下一个"));
+    QAction *findPrev = editMenu->addAction(tr("查找上一个"));
+#ifdef Q_OS_MACOS
+    // macOS 上 Cmd 组合键不会下发给终端，可以安全占用。
+    findNext->setShortcut(QKeySequence::FindNext);                      // Cmd+G
+    findPrev->setShortcut(QKeySequence::FindPrevious);                  // Cmd+Shift+G
+#else
+    // 其他平台 Qt 的 FindNext/FindPrevious 默认是 F3/Shift+F3，而 F3 被 mc 之类
+    // 的终端程序占用，全局抢走会影响正常使用。这里只留菜单项；搜索栏内部仍支持
+    // Enter / Shift+Enter / F3 导航（不影响终端，因为焦点在输入框上）。
+#endif
+    connect(findNext, &QAction::triggered, this, [this]() {
+        if (QTermWidget *term = currentTerminal())
+            term->findNextMatch();
+    });
+    connect(findPrev, &QAction::triggered, this, [this]() {
+        if (QTermWidget *term = currentTerminal())
+            term->findPreviousMatch();
+    });
+
     // --- 视图 ---
     QMenu *viewMenu = menuBar()->addMenu(tr("视图"));
     QAction *toggleDevices = viewMenu->addAction(tr("设备列表"));
@@ -1791,6 +1832,18 @@ QTabWidget *MainWindow::activeTabWidget() const
     return m_panes.isEmpty() ? nullptr : m_panes.first();
 }
 
+QTermWidget *MainWindow::currentTerminal() const
+{
+    QTabWidget *tabs = activeTabWidget();
+    QWidget *w = tabs ? tabs->currentWidget() : nullptr;
+    if (!w)
+        return nullptr;
+    // 会话标签页可能是 QTermWidget 本身，也可能是包了一层容器的（SSH/串口）。
+    if (auto *term = qobject_cast<QTermWidget *>(w))
+        return term;
+    return w->findChild<QTermWidget *>();
+}
+
 void MainWindow::setActivePane(TerminalTabWidget *pane)
 {
     if (m_activePane == pane)
@@ -2136,6 +2189,8 @@ QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
     term->setTerminalFont(font);
     // 从 theme.json 读取终端配色方案(对应 Python current_theme_name)
     term->setColorScheme(GlobalState::instance().terminalTheme());
+    // 回滚缓冲行数（同时决定“查找”能检索到多久以前的输出）。
+    term->setHistorySize(GlobalState::instance().scrollbackLines());
     // 右键菜单"AI" → 切换 AI 助手面板。
     // 对应Python: ai_action → self.window()._toggle_ai_panel()
     connect(term, &QTermWidget::aiRequested, this, &MainWindow::toggleAiPanel);
@@ -2537,6 +2592,13 @@ void MainWindow::showSettings()
     connect(&dlg, &SettingsDialog::appearanceChanged, this, [this](const QString &) {
         for (TerminalTabWidget *tabs : std::as_const(m_panes))
             tabs->setStyleSheet(windowsTerminalTabStyle());
+    });
+    // 回滚行数即时应用到所有打开的终端。注意：Session 换 HistoryType 会丢弃
+    // 已有的回滚内容（History.cpp 不做迁移），所以只在用户确实改了值时才下发。
+    connect(&dlg, &SettingsDialog::scrollbackLinesChanged, this, [this](int lines) {
+        const QList<QTermWidget *> terms = findChildren<QTermWidget *>();
+        for (QTermWidget *t : terms)
+            t->setHistorySize(lines);
     });
     dlg.exec();
 }

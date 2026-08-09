@@ -70,6 +70,17 @@ inline constexpr int QTERMWIDGET_STEP_ZOOM = 1;
 // 对应C++: struct TermWidgetImpl
 struct TermWidgetImpl;
 
+// 搜索命中定位的纯逻辑，独立于 Session/PTY，便于单元测试。
+namespace cubeshell_search {
+
+// 字符串偏移 → 行内序号。linePositions 为各行起始偏移（升序）。
+int lineIndexForOffset(const QList<int> &linePositions, int offset);
+
+// (line, column) 是否位于 (refLine, refColumn) 之处或之前。
+bool isAtOrBefore(int line, int column, int refLine, int refColumn);
+
+} // namespace cubeshell_search
+
 /**
  * QTermWidget - 主终端部件类
  *
@@ -306,6 +317,14 @@ public Q_SLOTS:
     void clear();
     // 对应C++: void toggleShowSearchBar()
     void toggleShowSearchBar();
+    // 打开搜索栏并聚焦输入框（已打开则只聚焦，不会误关）。
+    void showSearchBar();
+    // 打开搜索栏并用当前选中内容做关键字（右键“查找选中内容”）。
+    // 无选中内容时等同 showSearchBar()。
+    void searchSelectedText();
+    // 跳到下一个/上一个匹配（菜单项用）。搜索栏未打开时先打开。
+    void findNextMatch();
+    void findPreviousMatch();
     // 对应C++: void saveHistory(QIODevice* device)
     void saveHistory(QIODevice *device);
 
@@ -386,10 +405,24 @@ private:
     void setupDefaultFont();
     void connectSessionEvents();
 
+    // 按搜索栏当前选项（正则/大小写）构造搜索用正则；关键字为空时返回无效正则。
+    QRegularExpression searchRegExp() const;
+    // 依据「高亮所有匹配」选项，往过滤器链装/卸搜索高亮过滤器。
+    void updateSearchHighlight();
+    // 扫全部回滚缓冲，统计命中总数与当前命中的序号，刷新搜索栏计数。
+    void updateMatchCount();
+
     std::unique_ptr<TermWidgetImpl> m_impl;
     QVBoxLayout *m_layout = nullptr;
     Konsole::SearchBar *m_searchBar = nullptr;
     QTranslator *m_translator = nullptr;
+
+    // 搜索高亮过滤器。链的 removeFilter() 不负责 delete，本类自行管理生命周期。
+    Konsole::HighlightFilter *m_searchHighlightFilter = nullptr;
+    // 上一次命中的位置，用于识别搜索回绕（跳转方向与预期相反即为回绕）。
+    int m_lastMatchLine = -1;
+    int m_lastMatchColumn = -1;
+    bool m_hasLastMatch = false;
 };
 
 // 对应C++: void* createTermWidget(int startnow = 1, void* parent = nullptr)

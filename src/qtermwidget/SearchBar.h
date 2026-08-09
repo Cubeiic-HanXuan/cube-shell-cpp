@@ -25,7 +25,10 @@
 // search criteria; connects (in TerminalDisplay) to ScreenWindow findText.
 // Ported from the Python version (converted from upstream Konsole SearchBar).
 
+#include <QColor>
 #include <QWidget>
+
+#include <QPalette>
 
 class QHBoxLayout;
 class QToolButton;
@@ -63,6 +66,12 @@ public:
     // 对应C++: bool highlightAllMatches();
     bool highlightAllMatches();
 
+    // 把关键字预填进输入框（右键“查找选中内容”用）。
+    void setSearchText(const QString &text);
+
+    // 跟随终端配色：搜索栏紧贴终端下沿，用应用主题色会突兀。
+    void applyTerminalPalette(const QColor &background, const QColor &foreground);
+
 public Q_SLOTS:
     // 对应C++: void show();
     void show();
@@ -70,6 +79,13 @@ public Q_SLOTS:
     void hide();
     // 对应C++: void noMatchFound();
     void noMatchFound();
+
+    // 命中计数：显示“第 index 个 / 共 total 个”。index 从 1 起，0 表示未定位。
+    void setMatchCount(int index, int total);
+    // 清空计数（搜索词为空时）。
+    void clearMatchCount();
+    // 本次跳转发生了回绕，提示一次“已回到开头/末尾继续查找”。
+    void notifyWrapped(bool forwards);
 
 Q_SIGNALS:
     // 搜索条件改变
@@ -80,10 +96,15 @@ Q_SIGNALS:
     void findNext();
     // 查找上一个
     void findPrevious();
+    // 搜索栏关闭（终端据此清掉高亮过滤器）。
+    void closed();
 
 protected:
     // 对应C++: void keyReleaseEvent(QKeyEvent *keyEvent) override;
     void keyReleaseEvent(QKeyEvent *keyEvent) override;
+    // Enter / Shift+Enter / Esc / F3 必须在 QLineEdit 处理之前拦下来：靠事件
+    // 冒泡到父窗口不可靠（QLineEdit 对部分按键会 accept），所以装事件过滤器。
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private Q_SLOTS:
     // 对应C++: void clearBackgroundColor();
@@ -98,6 +119,7 @@ private:
     QToolButton *m_closeButton = nullptr;
     QLabel *m_findLabel = nullptr;
     QLineEdit *m_searchTextEdit = nullptr;
+    QLabel *m_matchCountLabel = nullptr;
     QToolButton *m_findPreviousButton = nullptr;
     QToolButton *m_findNextButton = nullptr;
     QToolButton *m_optionsButton = nullptr;
@@ -105,6 +127,10 @@ private:
     QAction *m_matchCaseMenuEntry = nullptr;
     QAction *m_useRegularExpressionMenuEntry = nullptr;
     QAction *m_highlightMatchesMenuEntry = nullptr;
+
+    // 输入框的正常配色（跟随终端主题）。“无匹配”时临时染红，
+    // 条件变化后由 clearBackgroundColor() 还原成这一份。
+    QPalette m_editPalette;
 };
 
 } // namespace Konsole

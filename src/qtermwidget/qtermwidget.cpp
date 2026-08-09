@@ -21,6 +21,8 @@
 #include <QMessageBox>
 #include <QResizeEvent>
 #include <QRegularExpression>
+#include <QRegularExpressionMatch>
+#include <QRegularExpressionMatchIterator>
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QTextStream>
@@ -42,6 +44,30 @@
 #include "Vt102Emulation.h"            // Konsole::Vt102Emulation (isAppScreenMode)
 
 using namespace Konsole;
+
+// 新建会话的默认回滚行数。上层可通过 setHistorySize() 按用户配置覆盖。
+static constexpr int kDefaultScrollbackLines = 10000;
+
+namespace cubeshell_search {
+
+// 把 PlainTextDecoder 解出的字符串偏移换算回 (行内序号, 列)。
+// linePositions[i] 是第 i 行在字符串中的起始偏移（decoder 保证升序）。
+// 单独抽出来是为了能脱离 Session/PTY 做单元测试（见 tests/terminal_search_test.cpp）。
+int lineIndexForOffset(const QList<int> &linePositions, int offset)
+{
+    int line = 0;
+    while (line + 1 < linePositions.count() && linePositions[line + 1] <= offset)
+        ++line;
+    return line;
+}
+
+// 命中位置是否在「当前命中」之处或之前——用来把命中序号数出来。
+bool isAtOrBefore(int line, int column, int refLine, int refColumn)
+{
+    return line < refLine || (line == refLine && column <= refColumn);
+}
+
+} // namespace cubeshell_search
 
 // ---------------------------------------------------------------------------
 // 内部实现类
@@ -92,7 +118,9 @@ struct TermWidgetImpl {
         session->setAutoClose(true);
 
         session->setFlowControlEnabled(true);
-        session->setHistoryType(HistoryTypeBuffer(1000));
+        // 回滚缓冲默认 1 万行：查日志时 1000 行只够 tail 几屏，翻不回去也搜不到。
+        // 上层（GlobalState::scrollbackLines）可用 setHistorySize 覆盖。
+        session->setHistoryType(HistoryTypeBuffer(kDefaultScrollbackLines));
 
         session->setDarkBackground(true);
         session->setKeyBindings(QString());
@@ -323,6 +351,19 @@ void QTermWidget::setupSearchBar()
     connect(m_searchBar, &SearchBar::searchCriteriaChanged, this, &QTermWidget::find);
     connect(m_searchBar, &SearchBar::findNext, this, &QTermWidget::findNext);
     connect(m_searchBar, &SearchBar::findPrevious, this, &QTermWidget::findPrevious);
+    // 上游漏接了这条：勾选「高亮所有匹配」原本没有任何效果。
+    connect(m_searchBar, &SearchBar::highlightMatchesChanged, this,
+            [this](bool) { updateSearchHighlight(); });
+    // 关闭搜索栏时清掉高亮和选中，终端恢复原样。
+    connect(m_searchBar, &SearchBar::closed, this, [this] {
+        updateSearchHighlight();
+        m_hasLastMatch = false;
+        if (ScreenWindow *sw = m_impl->m_terminalDisplay->screenWindow()) {
+            sw->clearSelection();
+            // 关闭搜索后重新跟随输出，否则终端会停在搜索停下的位置不再滚动。
+            sw->setTrackOutput(true);
+        }
+    });
 
     m_layout->addWidget(m_searchBar);
     m_searchBar->hide();
@@ -573,6 +614,12 @@ void QTermWidget::setColorScheme(const QString &origName)
     cs->getColorTable(colorTable);
     m_impl->m_terminalDisplay->setColorTable(colorTable);
     m_impl->m_session->setDarkBackground(cs->hasDarkBackground());
+
+    // 搜索栏贴在终端下沿，配色跟着终端走，否则深色主题下会突出一条亮条。
+    if (m_searchBar) {
+        m_searchBar->applyTerminalPalette(colorTable[DEFAULT_BACK_COLOR].color,
+                                          colorTable[DEFAULT_FORE_COLOR].color);
+    }
 }
 
 QStringList QTermWidget::getAvailableColorSchemes() const
@@ -992,10 +1039,52 @@ void QTermWidget::clear()
 void QTermWidget::toggleShowSearchBar()
 {
     if (m_searchBar->isHidden()) {
-        m_searchBar->show();
+        showSearchBar();
     } else {
         m_searchBar->hide();
     }
+}
+
+void QTermWidget::showSearchBar()
+{
+    // 与 toggle 区分开：菜单/快捷键重复触发时不应把已打开的搜索栏关掉，
+    // 只把焦点送回输入框并全选，方便直接改关键字。
+    m_searchBar->show();
+    // 重新打开时输入框里还留着上次的关键字，但高亮在 closed 时已被清掉，
+    // 这里补回来（updateSearchHighlight 会跳过空关键字）。
+    updateSearchHighlight();
+}
+
+void QTermWidget::searchSelectedText()
+{
+    const QString selection = selectedText(false).trimmed();
+    if (!selection.isEmpty()) {
+        // 选中内容当字面量搜：日志里选的多半是路径/异常名，含 . / [ 等正则元字符。
+        // 正则模式下需转义，否则搜出来的东西对不上。
+        m_searchBar->setSearchText(m_searchBar->useRegularExpression()
+                                       ? QRegularExpression::escape(selection)
+                                       : selection);
+    }
+    m_searchBar->show();
+    // setSearchText 已触发 searchCriteriaChanged -> find()，此处无需重复搜索。
+}
+
+void QTermWidget::findNextMatch()
+{
+    if (m_searchBar->isHidden()) {
+        showSearchBar();
+        return;   // 还没有关键字，先让用户输入
+    }
+    findNext();
+}
+
+void QTermWidget::findPreviousMatch()
+{
+    if (m_searchBar->isHidden()) {
+        showSearchBar();
+        return;
+    }
+    findPrevious();
 }
 
 void QTermWidget::saveHistory(QIODevice *device)
@@ -1070,11 +1159,121 @@ void QTermWidget::matchFound(int startColumn, int startLine, int endColumn, int 
     sw->notifyOutputChanged();
     sw->setSelectionStart(startColumn, startLine - sw->currentLine(), false);
     sw->setSelectionEnd(endColumn, endLine - sw->currentLine());
+
+    m_lastMatchLine = startLine;
+    m_lastMatchColumn = startColumn;
+    m_hasLastMatch = true;
+
+    updateMatchCount();
 }
 
 void QTermWidget::noMatchFound()
 {
     m_impl->m_terminalDisplay->screenWindow()->clearSelection();
+    m_hasLastMatch = false;
+    // 关键字非空却零命中时显示“无匹配”；关键字为空时 SearchBar 自己清空计数。
+    if (!m_searchBar->searchText().isEmpty())
+        m_searchBar->setMatchCount(0, 0);
+}
+
+// 按搜索栏当前选项构造正则。关键字为空或正则非法时返回无效正则，
+// 调用方据此跳过搜索/高亮（避免把非法正则塞进过滤器链导致整行不渲染）。
+QRegularExpression QTermWidget::searchRegExp() const
+{
+    const QString text = m_searchBar->searchText();
+    if (text.isEmpty())
+        return QRegularExpression();
+
+    QRegularExpression re(m_searchBar->useRegularExpression()
+                              ? text
+                              : QRegularExpression::escape(text));
+    re.setPatternOptions(m_searchBar->matchCase()
+                             ? QRegularExpression::NoPatternOption
+                             : QRegularExpression::CaseInsensitiveOption);
+    if (!re.isValid())
+        return QRegularExpression();
+    return re;
+}
+
+void QTermWidget::updateSearchHighlight()
+{
+    FilterChain *chain = m_impl->m_terminalDisplay->filterChain();
+
+    // 先摘掉旧的。FilterChain::removeFilter() 只从链上摘除、不 delete，
+    // 所以这里必须自己释放，否则每改一个字符就漏一个过滤器。
+    if (m_searchHighlightFilter) {
+        chain->removeFilter(m_searchHighlightFilter);
+        delete m_searchHighlightFilter;
+        m_searchHighlightFilter = nullptr;
+    }
+
+    const QRegularExpression re = searchRegExp();
+    if (!m_searchBar->isHidden() && m_searchBar->highlightAllMatches()
+        && !re.pattern().isEmpty()) {
+        // HighlightFilter 只按前景色着色（背景色在 _computeHighlightMap 里被忽略），
+        // 用醒目的琥珀色区别于既有的语法高亮配色。装在链尾 → 覆盖前面的着色。
+        m_searchHighlightFilter = new HighlightFilter(re.pattern(), QColor("#ffb300"));
+        m_searchHighlightFilter->setRegExp(re);   // 带上大小写选项
+        chain->addFilter(m_searchHighlightFilter);
+    }
+
+    m_impl->m_terminalDisplay->processFilters();
+    m_impl->m_terminalDisplay->update();
+}
+
+// 统计整个回滚缓冲里的命中总数，以及当前命中是第几个。
+// 与 HistorySearch 一样分块解码，避免一次性把几万行历史拼成一个大字符串。
+void QTermWidget::updateMatchCount()
+{
+    Emulation *emulation = m_impl->m_session ? m_impl->m_session->emulation() : nullptr;
+    const QRegularExpression re = searchRegExp();
+    if (!emulation || re.pattern().isEmpty()) {
+        m_searchBar->clearMatchCount();
+        return;
+    }
+
+    const int totalLines = emulation->lineCount();
+    int total = 0;
+    int currentIndex = 0;
+
+    constexpr int kBlockLines = 5000;
+    for (int blockStart = 0; blockStart < totalLines; blockStart += kBlockLines) {
+        const int blockEnd = qMin(blockStart + kBlockLines, totalLines) - 1;
+
+        QString text;
+        QTextStream stream(&text);
+        PlainTextDecoder decoder;
+        decoder.begin(&stream);
+        decoder.setRecordLinePositions(true);
+        emulation->writeToStream(&decoder, blockStart, blockEnd);
+        stream.flush();
+
+        const QList<int> linePositions = decoder.linePositions();
+
+        QRegularExpressionMatchIterator it = re.globalMatch(text);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            // 空匹配（如正则 "a*"）会让 globalMatch 在每个位置都命中一次，
+            // 计数没有意义且拖慢扫描，直接跳过。
+            if (m.capturedLength() == 0)
+                continue;
+            ++total;
+
+            if (!m_hasLastMatch)
+                continue;
+
+            // 把字符串偏移换回 (行, 列)，与当前命中位置比较得出序号。
+            const int lineInBlock =
+                cubeshell_search::lineIndexForOffset(linePositions, m.capturedStart());
+            const int line = blockStart + lineInBlock;
+            const int column = m.capturedStart() - linePositions.value(lineInBlock, 0);
+
+            if (cubeshell_search::isAtOrBefore(line, column, m_lastMatchLine, m_lastMatchColumn))
+                currentIndex = total;
+        }
+    }
+
+    m_searchBar->setMatchCount(currentIndex, total);
 }
 
 void QTermWidget::cursorChanged(KeyboardCursorShape cursorShape, bool blinkingCursorEnabled)
@@ -1099,6 +1298,22 @@ void QTermWidget::showContextMenu(const QPoint &pos)
     pasteAction->setIconVisibleInMenu(true);
     pasteAction->setEnabled(!QApplication::clipboard()->text().isEmpty());
     connect(pasteAction, &QAction::triggered, this, &QTermWidget::pasteClipboard);
+
+    menu.addSeparator();
+
+    // 查找 — 有选中内容时直接拿它当关键字，省一次复制粘贴。
+    const QString selection = selectedText(false).trimmed();
+    if (!selection.isEmpty()) {
+        // 关键字可能很长（比如一整行日志），菜单里截断显示。
+        QString shown = selection.left(24);
+        if (shown.length() < selection.length())
+            shown += QStringLiteral("…");
+        QAction *findSelAction = menu.addAction(QStringLiteral("查找 “%1”").arg(shown));
+        connect(findSelAction, &QAction::triggered, this, &QTermWidget::searchSelectedText);
+    }
+    QAction *findAction = menu.addAction(QStringLiteral("查找…"));
+    findAction->setShortcut(QKeySequence::Find);
+    connect(findAction, &QAction::triggered, this, &QTermWidget::showSearchBar);
 
     menu.addSeparator();
 
@@ -1151,16 +1366,22 @@ void QTermWidget::search(bool forwards, bool next)
         m_impl->m_terminalDisplay->screenWindow()->screen()->getSelectionStart(startColumn, startLine);
     }
 
-    QRegularExpression regExp;
-    if (m_searchBar->useRegularExpression()) {
-        regExp.setPattern(m_searchBar->searchText());
-    } else {
-        regExp.setPattern(QRegularExpression::escape(m_searchBar->searchText()));
+    // 高亮跟着关键字/选项走：每次搜索前重建过滤器。
+    updateSearchHighlight();
+
+    const QRegularExpression regExp = searchRegExp();
+    if (regExp.pattern().isEmpty()) {
+        // 关键字为空 → 清掉上次的选中与计数，但不要把输入框标红。
+        m_impl->m_terminalDisplay->screenWindow()->clearSelection();
+        m_hasLastMatch = false;
+        m_searchBar->clearMatchCount();
+        return;
     }
 
-    regExp.setPatternOptions(m_searchBar->matchCase()
-        ? QRegularExpression::NoPatternOption
-        : QRegularExpression::CaseInsensitiveOption);
+    // 回绕判定用：记下这次搜索前停在哪。
+    const bool hadMatch = m_hasLastMatch;
+    const int prevLine = m_lastMatchLine;
+    const int prevColumn = m_lastMatchColumn;
 
     auto *historySearch = new HistorySearch(m_impl->m_session->emulation(), regExp,
                                             forwards, startColumn, startLine, this);
@@ -1168,8 +1389,18 @@ void QTermWidget::search(bool forwards, bool next)
     connect(historySearch, &HistorySearch::noMatchFound, this, &QTermWidget::noMatchFound);
     connect(historySearch, &HistorySearch::noMatchFound, m_searchBar, &SearchBar::noMatchFound);
 
+    // HistorySearch::search() 同步发信号，返回时 m_lastMatch* 已是本次结果。
     historySearch->search();
     historySearch->deleteLater();
+
+    // 找不到就从另一头接着扫（HistorySearch 内建行为），命中位置会朝反方向跳。
+    // 不提示的话看起来像搜索乱跳，这里在计数标签的 tooltip 上说明一次。
+    if (hadMatch && m_hasLastMatch) {
+        const bool movedBack = (m_lastMatchLine < prevLine)
+                               || (m_lastMatchLine == prevLine && m_lastMatchColumn < prevColumn);
+        if (forwards == movedBack)
+            m_searchBar->notifyWrapped(forwards);
+    }
 }
 
 void QTermWidget::setZoom(int step)

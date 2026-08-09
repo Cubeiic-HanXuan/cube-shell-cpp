@@ -213,4 +213,15 @@ void GlobalState::setTerminalTheme(const QString &name)
     m_theme.insert(QStringLiteral("terminal_theme"), name);
 }
 
+// C++ 侧新增键；Python 版读不到该键时按自己的默认走，互不影响。
+int GlobalState::scrollbackLines() const
+{
+    return m_theme.value(QStringLiteral("scrollback_lines")).toInt(10000);
+}
+
+void GlobalState::setScrollbackLines(int lines)
+{
+    m_theme.insert(QStringLiteral("scrollback_lines"), lines);
+}
+
 } // namespace cubeshell

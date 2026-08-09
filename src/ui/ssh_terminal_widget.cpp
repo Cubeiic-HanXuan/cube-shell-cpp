@@ -38,6 +38,8 @@ SshTerminalWidget::SshTerminalWidget(const DeviceEntry &device, QWidget *parent)
             [](int size) { GlobalState::instance().setFontSize(size); });
     // 从 theme.json 读取终端配色方案(对应 Python current_theme_name)
     m_term->setColorScheme(GlobalState::instance().terminalTheme());
+    // 回滚缓冲行数（同时决定“查找”能检索到多久以前的输出）。
+    m_term->setHistorySize(GlobalState::instance().scrollbackLines());
     m_term->setScrollBarPosition(ScrollBarRight);
 
     // 终端命令智能提示（候选弹窗 + 历史记录），历史按配置名分组。

@@ -36,6 +36,8 @@ signals:
     void appearanceChanged(const QString &appearance);
     // 字体设置已修改（family, pointSize），终端可即时应用。
     void fontChanged(const QString &family, int pointSize);
+    // 回滚行数已修改，已打开的终端可即时应用（setHistorySize）。
+    void scrollbackLinesChanged(int lines);
 
 private:
     QWidget *createThemeTab();
@@ -50,6 +52,7 @@ private:
     QSpinBox *m_fontSize = nullptr;
     QSpinBox *m_sshTimeout = nullptr;     // 秒
     QComboBox *m_encoding = nullptr;      // UTF-8 / GBK / GB2312
+    QSpinBox *m_scrollback = nullptr;     // 终端回滚行数（搜索可检索的范围）
     QString m_originalAppearance;         // Cancel 时还原实时预览
 };
 

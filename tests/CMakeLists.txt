@@ -298,6 +298,20 @@ target_link_libraries(screen_reflow_test PRIVATE
     qtermwidget
 )
 
+# 终端内容搜索：命中定位换算 + 序号判定 + 正则构造规则（纯逻辑，无 PTY）。
+qt_add_executable(terminal_search_test
+    terminal_search_test.cpp
+)
+target_include_directories(terminal_search_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget
+)
+target_link_libraries(terminal_search_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    qtermwidget
+)
+
 # 串口模块：换行转换纯函数 + SerialSettings 默认值 + 端口枚举 +
 # 下拉框取值解析（含手输回归用例）+ DeviceEntry 串口字段 JSON 往返
 # （无硬件也能全部跑过）。
@@ -380,6 +394,7 @@ if(CUBESHELL_WITH_LOCALPROC)
 endif()
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
+add_test(NAME terminal_search_test COMMAND terminal_search_test)
 if(CUBESHELL_WITH_SERIAL)
     add_test(NAME serial_test COMMAND serial_test)
 endif()

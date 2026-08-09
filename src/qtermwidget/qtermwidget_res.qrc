@@ -1,0 +1,27 @@
+<RCC>
+    <!--
+      终端配色方案资源：把 src/qtermwidget/color-schemes/ 编进二进制。
+      鸿蒙（OHOS）HAP 里没有「可执行文件旁的 resources/」也没有可探测的 bundle
+      目录（问题2「终端主题没加载」的根因），因此不再依赖文件系统探测，改走
+      Qt 资源系统。alias 让资源路径严格等于 ":/color-schemes/<Name>.colorscheme"，
+      与 src/qtermwidget/tools.cpp 的 qrc 探测前缀对应。
+      注：kb-layouts/default.keytab 仍走原有文件系统逻辑（见 tools.cpp），
+      键盘布局加载在鸿蒙上不受影响，此处不打包。
+    -->
+    <qresource prefix="/color-schemes">
+        <file alias="BlackOnLightYellow.colorscheme">color-schemes/BlackOnLightYellow.colorscheme</file>
+        <file alias="BlackOnRandomLight.colorscheme">color-schemes/BlackOnRandomLight.colorscheme</file>
+        <file alias="BlackOnWhite.colorscheme">color-schemes/BlackOnWhite.colorscheme</file>
+        <file alias="BreezeModified.colorscheme">color-schemes/BreezeModified.colorscheme</file>
+        <file alias="DarkPastels.colorscheme">color-schemes/DarkPastels.colorscheme</file>
+        <file alias="Falcon.colorscheme">color-schemes/Falcon.colorscheme</file>
+        <file alias="GreenOnBlack.colorscheme">color-schemes/GreenOnBlack.colorscheme</file>
+        <file alias="Linux.colorscheme">color-schemes/Linux.colorscheme</file>
+        <file alias="MobaXterm.colorscheme">color-schemes/MobaXterm.colorscheme</file>
+        <file alias="Solarized.colorscheme">color-schemes/Solarized.colorscheme</file>
+        <file alias="SolarizedLight.colorscheme">color-schemes/SolarizedLight.colorscheme</file>
+        <file alias="Tango.colorscheme">color-schemes/Tango.colorscheme</file>
+        <file alias="Ubuntu.colorscheme">color-schemes/Ubuntu.colorscheme</file>
+        <file alias="WhiteOnBlack.colorscheme">color-schemes/WhiteOnBlack.colorscheme</file>
+    </qresource>
+</RCC>

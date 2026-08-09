@@ -47,6 +47,9 @@ struct RdpSettings;
 #ifdef CUBESHELL_WITH_SERIAL
 struct SerialSettings;
 #endif
+// TCP/Telnet 无条件可用（Qt6::Network 是顶层必需组件）。
+struct TcpSettings;
+class NetTerminalWidget;
 
 // Main application window.
 //
@@ -75,6 +78,12 @@ public:
     // portName 为空时创建空白面板等待用户在工具栏选端口；非空则立即建连。
     void openSerialTab(const SerialSettings &settings);
 #endif
+
+    // 打开 TCP/Telnet 标签页（“新建 Telnet/TCP 连接”菜单 / 设备列表中
+    // protocol=="telnet"|"tcp" / telnet:// URL 共用入口）。
+    // host 为空时创建空白面板等待用户在工具栏填写；非空则立即建连。
+    // 无 #ifdef：TCP/Telnet 不依赖任何可选组件。
+    void openNetTab(const TcpSettings &settings);
 
 private:
     void setupUi();

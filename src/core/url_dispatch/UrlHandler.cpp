@@ -25,6 +25,8 @@
 #include <QStringList>
 #include <QUrl>
 
+#include "config/DeviceConfigStore.h"   // defaultPortFor
+
 namespace cubeshell {
 
 namespace {
@@ -298,6 +300,37 @@ UrlConnectionInfo parseSshUrl(const QString &url)
     return out;
 }
 
+// telnet:// URL 解析（Python 侧无对应实现，为 C++ 侧新增）。
+// telnet 是 IANA 在案的标准 scheme，形态与 ssh:// 完全一致，只有默认端口不同。
+UrlConnectionInfo parseTelnetUrl(const QString &url)
+{
+    UrlConnectionInfo out;
+    out.scheme = QStringLiteral("telnet");
+    if (!url.startsWith(QLatin1String("telnet://"))) {
+        out.error = QStringLiteral("not a telnet:// URL");
+        return out;
+    }
+
+    const QUrl parsed(url, QUrl::TolerantMode);
+    if (!parsed.isValid()) {
+        out.error = QStringLiteral("failed to parse Telnet URL: ") + parsed.errorString();
+        return out;
+    }
+    const QString host = parsed.host();   // IPv6 方括号由 QUrl 剥除
+    if (host.isEmpty()) {
+        out.error = QStringLiteral("No host found in Telnet URL");
+        return out;
+    }
+
+    out.host = host;
+    out.port = parsed.port(defaultPortFor(QStringLiteral("telnet")));
+    out.user = parsed.userName(QUrl::FullyDecoded);
+    out.password = parsed.password(QUrl::FullyDecoded);
+    out.protocol = QStringLiteral("telnet");
+    out.valid = true;
+    return out;
+}
+
 // 对应Python: core/url_dispatch/url_handler.py::parse_cubeshell_url
 UrlConnectionInfo parseCubeshellUrl(const QString &url)
 {
@@ -371,7 +404,7 @@ UrlConnectionInfo parseRdpUrl(const QString &url)
     }
 
     out.host = host;
-    out.port = parsed.port(3389);   // RDP 默认端口
+    out.port = parsed.port(defaultPortFor(QStringLiteral("rdp")));
     QString user = parsed.userName(QUrl::FullyDecoded);
     // DOMAIN\user → 拆出域（对应 build_rdp_url 的 f"{domain}\\{username}"）
     const int backslash = user.indexOf(QLatin1Char('\\'));
@@ -396,6 +429,8 @@ UrlConnectionInfo parseUrl(const QString &url)
         return parseSshUrl(url);
     if (url.startsWith(QLatin1String("cubeshell://")))
         return parseCubeshellUrl(url);
+    if (url.startsWith(QLatin1String("telnet://")))
+        return parseTelnetUrl(url);
 #ifdef CUBESHELL_WITH_RDP
     if (url.startsWith(QLatin1String("rdp://")) || url.startsWith(QLatin1String("rdp+")))
         return parseRdpUrl(url);

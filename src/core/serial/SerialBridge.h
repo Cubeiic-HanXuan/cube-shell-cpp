@@ -47,6 +47,9 @@ public:
 
     // 终端产生的 \r 按 mode 转换成实际要写入串口的字节序列。
     // 静态纯函数，便于单测（见 tests/serial_test.cpp）。
+    //
+    // 实现已抽到 core/net/LineEndings（TcpBridge 共用），这两个静态成员保留为
+    // 转发壳子：串口的 NewlineMode 是自己的 enum，映射在此完成，调用点不必改。
     static QByteArray applyNewlineMode(const QByteArray &input,
                                        SerialSettings::NewlineMode mode);
 

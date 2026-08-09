@@ -13,6 +13,9 @@ set(UI_SOURCES
     add_device_dialog.cpp
     status_box_item.cpp
     LanguageManager.cpp
+    # --- TCP/Telnet UI（无条件编译，理由同 src/core/CMakeLists.txt 的 net/ 段） ---
+    net_terminal_widget.cpp         # 工具栏 + QTermWidget + 状态栏
+    dialogs/NetConnectDialog.cpp    # “新建 Telnet/TCP 连接”对话框 + netcombo 助手
     # --- 终端命令智能提示 (对应Python: cube-shell.py::_SuggestionPopup/SSHQTermWidget 提示逻辑) ---
     suggestion_popup.cpp
     terminal_command_suggest.cpp

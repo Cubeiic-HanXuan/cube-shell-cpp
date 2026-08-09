@@ -319,6 +319,47 @@ if(CUBESHELL_WITH_SERIAL)
     )
 endif()
 
+# TCP/Telnet 模块：IAC 状态机（含分块边界）、协商应答字节、自动登录提示词匹配、
+# defaultPortFor、netcombo 下拉框助手、telnet:// URL 解析、DeviceEntry 的
+# tcp/telnet 字段 JSON 往返（无对端也能全部跑过）。
+# 不带 if() 包裹——TCP/Telnet 无条件编译（Qt6::Network 是顶层必需组件）。
+qt_add_executable(telnet_test
+    telnet_test.cpp
+)
+target_include_directories(telnet_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui          # netcombo 助手 + netSettingsFromDevice
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget   # TcpBridge.h 间接引用 Session
+)
+target_link_libraries(telnet_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::Network
+    cube_core
+    cube_ui
+)
+
+# Telnet 端到端集成测试（需要一个可达的 telnetd；见文件头的 socat 一行命令）。
+# 目标不可达时 exit(2) → CTest 记为 SKIPPED。
+qt_add_executable(telnet_integration_test
+    telnet_integration_test.cpp
+)
+target_include_directories(telnet_integration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget
+)
+target_link_libraries(telnet_integration_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::Network
+    qtermwidget
+    cube_core
+    cube_ui
+)
+
 # ---------------------------------------------------------------------------
 # CTest registration
 # ---------------------------------------------------------------------------
@@ -342,6 +383,7 @@ add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
 if(CUBESHELL_WITH_SERIAL)
     add_test(NAME serial_test COMMAND serial_test)
 endif()
+add_test(NAME telnet_test COMMAND telnet_test)
 
 # Integration tests need a reachable sshd; they exit(2) when the target host
 # is unavailable, which CTest records as SKIPPED instead of FAILED.
@@ -351,8 +393,10 @@ add_test(NAME command_executor_test COMMAND command_executor_test)
 add_test(NAME uploader_test COMMAND uploader_test)
 add_test(NAME upload_teardown_test COMMAND upload_teardown_test)
 add_test(NAME transfer_pool_test COMMAND transfer_pool_test)
+add_test(NAME telnet_integration_test COMMAND telnet_integration_test)
 set_tests_properties(ssh_integration_test sftp_integration_test
-    command_executor_test uploader_test upload_teardown_test PROPERTIES
+    command_executor_test uploader_test upload_teardown_test
+    telnet_integration_test PROPERTIES
     SKIP_RETURN_CODE 2
 )
 

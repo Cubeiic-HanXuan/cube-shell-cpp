@@ -25,7 +25,7 @@ struct UrlConnectionInfo {
     bool valid = false;
     QString error;
 
-    // Which scheme produced this result: "jms" | "ssh" | "cubeshell".
+    // Which scheme produced this result: "jms" | "ssh" | "telnet" | "cubeshell".
     // (Python: dict 里仅 cubeshell 有 'scheme' 键; 这里统一填充便于分发。)
     QString scheme;
 
@@ -79,6 +79,12 @@ UrlConnectionInfo parseSshUrl(const QString &url);
 // Parses cubeshell://<action>?path=<dir>[&command=<cmd>]. Fails when the
 // 'path' parameter is missing, does not exist, or is not a directory.
 UrlConnectionInfo parseCubeshellUrl(const QString &url);
+
+// telnet:// URL 解析（Python 侧无对应实现，为 C++ 侧新增）。
+// 解析 telnet://[user[:password]@]host[:port]；形态与 parseSshUrl 一致，
+// 只是默认端口 23、protocol 填 "telnet"。无 host 时失败（valid == false）。
+// 不做条件编译：TCP/Telnet 无额外依赖，所有平台（含鸿蒙）都可用。
+UrlConnectionInfo parseTelnetUrl(const QString &url);
 
 #ifdef CUBESHELL_WITH_RDP
 // rdp:// URL 解析（Python 侧无对应 parse 函数——URL 由 core/rdp/rdp_client.py::

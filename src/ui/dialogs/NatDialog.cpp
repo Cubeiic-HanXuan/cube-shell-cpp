@@ -148,9 +148,14 @@ void NatDialog::populateDevices()
                     QIcon::On);
     for (const DeviceEntry &e : m_store->devices()) {
         // 对应Python: if device_protocol(dic.get(k)) == "rdp": continue
-        // C++ 侧 RDP 条目（config.dat 里的 dict 值）经 PickleReader 后没有 host
-        // 字段，以此等价判定并跳过。
-        if (e.host.isEmpty())
+        //
+        // frp 内网穿透在这里只支持 SSH 设备（要用它的凭据登录去部署 frpc），
+        // 故显式按协议过滤，非 SSH 一律跳过。
+        //
+        // 早先这里用 e.host.isEmpty() 当"是不是 RDP"的替身判定（RDP 条目经
+        // PickleReader 后确实没有 host）。TCP/Telnet 条目**有** host，会被
+        // 误当成 SSH 设备列进来；串口条目则是碰巧被这个判据滤掉的。
+        if (!e.isSsh())
             continue;
         m_device->addItem(iconSsh, e.name);
     }

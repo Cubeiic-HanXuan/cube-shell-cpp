@@ -37,6 +37,8 @@ QString schemeDescription(const QString &scheme)
         return QStringLiteral("CubeShell Local Terminal");
     if (scheme == QLatin1String("ssh"))
         return QStringLiteral("CubeShell SSH Protocol");
+    if (scheme == QLatin1String("telnet"))
+        return QStringLiteral("CubeShell Telnet Protocol");
     return QStringLiteral("CubeShell %1 Protocol").arg(scheme);
 }
 #endif // !CUBESHELL_PLATFORM_OHOS
@@ -320,8 +322,11 @@ bool unregisterLinux(const QStringList &schemes)
 QStringList UrlSchemeRegistrar::defaultSchemes()
 {
     // 对应Python: ("jms", "cubeshell")；ssh 按 conf/macos_url_scheme.plist
-    // 的注释状态默认不启用，调用方可显式传入
-    return {QStringLiteral("jms"), QStringLiteral("cubeshell")};
+    // 的注释状态默认不启用，调用方可显式传入。
+    // telnet 默认启用：它是 IANA 在案的标准 scheme，网页/文档里的 telnet://
+    // 链接本来就期望被终端工具接管，与 ssh:// 的暧昧状态不同。
+    return {QStringLiteral("jms"), QStringLiteral("cubeshell"),
+            QStringLiteral("telnet")};
 }
 
 bool UrlSchemeRegistrar::isRegistered(const QStringList &schemes)

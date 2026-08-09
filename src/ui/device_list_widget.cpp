@@ -53,6 +53,34 @@ QFont deviceFont()
     return f;
 }
 
+// 设备节点的悬浮提示：按协议拼，各协议展示它自己有意义的字段。
+//
+// 早先这里无条件拼 "user@host:port"。串口条目本就没有 host/user，显示成
+// "@:22" 毫无信息量；Telnet 常常没有用户名（很多设备只问密码），裸 TCP
+// 更是没有登录概念，同样会拼出一个带 '@' 的假地址。
+QString deviceTooltip(const DeviceEntry &d)
+{
+    if (d.isSerial()) {
+        // 串口没有网络地址，有意义的是设备路径与帧格式。
+        return QStringLiteral("%1 @%2 %3%4%5")
+            .arg(d.portName.isEmpty() ? QObject::tr("(未指定串口)") : d.portName)
+            .arg(d.baudRate)
+            .arg(d.dataBits)
+            // 校验位取首字母大写（none→N / even→E / odd→O / mark→M / space→S），
+            // 与串口面板状态栏的 frameFormat() 同一记法。
+            .arg(d.parity.isEmpty() ? QStringLiteral("N")
+                                    : d.parity.left(1).toUpper())
+            .arg(d.stopBits.isEmpty() ? QStringLiteral("1") : d.stopBits);
+    }
+
+    const HostPort hp = d.hostPort();
+    const QString target = formatHostPort(hp.host, hp.port);
+    // 裸 TCP 没有用户名概念；其余协议只在真有用户名时才带 "user@"。
+    if (d.isTcp() || d.username.isEmpty())
+        return target;
+    return d.username + QLatin1Char('@') + target;
+}
+
 } // namespace
 
 DeviceListWidget::DeviceListWidget(QWidget *parent)
@@ -242,20 +270,23 @@ void DeviceListWidget::rebuildTree()
             const DeviceEntry *d = byName.value(deviceName);
             if (!d)
                 continue;
-            const HostPort hp = d->hostPort();
             auto *item = new QTreeWidgetItem(root);
             item->setText(0, d->name);
             item->setFont(0, deviceFont());
             // 对应Python: cube-shell.py:3966-3994 — RDP 设备用 Windows 图标，
             // Serial 设备用 icons8-serial-48.png，SSH 设备用 icons8-ssh-48.png
+            // Telnet/TCP 各有自己的图标；两者必须排在 SSH 兜底分支之前判断。
             if (d->isRdp())
                 item->setIcon(0, QIcon(QStringLiteral(":/icons8-windows-48.png")));
             else if (d->isSerial())
                 item->setIcon(0, QIcon(QStringLiteral(":/icons8-serial-48.png")));
+            else if (d->isTelnet())
+                item->setIcon(0, QIcon(QStringLiteral(":/icons8-telnet-48.png")));
+            else if (d->isTcp())
+                item->setIcon(0, QIcon(QStringLiteral(":/icons8-tcp-48.png")));
             else
                 item->setIcon(0, QIcon(QStringLiteral(":/icons8-ssh-48.png")));
-            item->setToolTip(0, d->username + QLatin1Char('@') + hp.host +
-                                QStringLiteral(":%1").arg(hp.port));
+            item->setToolTip(0, deviceTooltip(*d));
             item->setData(0, kNameRole, d->name);
             item->setData(0, kTypeRole, QString(kTypeDevice));
         }

@@ -37,7 +37,12 @@ static QString dumpScreen(QTermWidget *term)
     QString out;
     const int lines = screen->getLines();
     const int cols = screen->getColumns();
-    std::vector<Konsole::Character> buf{size_t(cols)};
+    // 元素个数先落到具名变量再传：写成 buf(size_t(cols)) 会被当成函数声明
+    //（most vexing parse），而花括号会走 initializer_list 构造，只建出 1 个
+    // 值为 Character(cols) 的元素——getImage 按 cols 列写入（契约见 Screen.cpp
+    // 的 Q_ASSERT(size >= mergedLines * columns)），从第 2 个元素起就越界了。
+    const size_t bufLen = size_t(cols);
+    std::vector<Konsole::Character> buf(bufLen);
     for (int y = 0; y < lines; ++y) {
         screen->getImage(buf.data(), cols, y, y);
         QString line;

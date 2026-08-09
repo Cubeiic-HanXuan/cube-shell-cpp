@@ -94,6 +94,19 @@
 - 常用容器功能
   ![](docs/images/11.png)
 
+**8.支持 Telnet 与裸 TCP 连接**
+
+交换机、路由器、串口服务器（Console Server）的默认远程口是 Telnet；裸 TCP 则相当于
+`nc host port`，用来调试自研 TCP 服务或明文协议。两者只依赖 `Qt6::Network`，无需任何
+第三方库，也不受 RDP / 串口构建开关影响。
+
+- Telnet 选项协商（NAWS 窗口尺寸、TERMINAL-TYPE、ECHO、SGA、BINARY）
+- Telnet 自动登录（默认关闭，需显式勾选）
+- 发送换行可选 CR / LF / CRLF，接收可选补 CR
+- 本地回显开关；服务端 `WILL ECHO` 时自动关闭
+- 会话原始流录制到日志文件
+- 可保存为设备配置，双击直连；支持 `telnet://user@host:port` URL 唤起
+
 
 ### 软件架构
 `cube-shell`主要使用`C++`语言开发，构建系统为 CMake，第三方依赖由 vcpkg 管理。

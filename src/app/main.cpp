@@ -93,6 +93,7 @@ QString urlFromArguments(const QStringList &args)
             return args.at(i + 1);
         if (arg.startsWith(QLatin1String("jms://"))
                 || arg.startsWith(QLatin1String("ssh://"))
+                || arg.startsWith(QLatin1String("telnet://"))
                 || arg.startsWith(QLatin1String("cubeshell://")))
             return arg;
 #ifdef CUBESHELL_WITH_RDP

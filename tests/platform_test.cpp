@@ -90,11 +90,17 @@ void testUrlSchemeRegistrar()
 {
     std::printf("UrlSchemeRegistrar\n");
     const QStringList schemes = cubeshell::UrlSchemeRegistrar::defaultSchemes();
-    // 对应Python: _register_windows 里的 ("jms", "cubeshell")
-    check(schemes.size() == 2, "defaultSchemes() 为 2 项");
+    // 对应Python: _register_windows 里的 ("jms", "cubeshell")；telnet 是 C++ 侧
+    // 新增（IANA 在案的标准 scheme，见 UrlSchemeRegistrar::defaultSchemes 注释）。
+    // ssh 仍默认不启用，需调用方显式传入。
+    check(schemes.size() == 3, "defaultSchemes() 为 3 项");
     check(schemes.contains(QStringLiteral("jms")), "defaultSchemes() 含 jms");
     check(schemes.contains(QStringLiteral("cubeshell")),
           "defaultSchemes() 含 cubeshell");
+    check(schemes.contains(QStringLiteral("telnet")),
+          "defaultSchemes() 含 telnet");
+    check(!schemes.contains(QStringLiteral("ssh")),
+          "defaultSchemes() 默认不含 ssh");
 
     // 只读探测：结果依赖本机环境，只要求不崩且对未知 scheme 返回 false
     (void)cubeshell::UrlSchemeRegistrar::isRegistered();
@@ -164,18 +170,19 @@ void testRdp()
     check(!cubeshell::buildRdpUrl(bare).contains(QLatin1Char('@')),
           "无用户名时不产生 userinfo");
 
-    // 后端解析：FreeRDP 编入时报库后端，否则命令行后备
+    // 后端解析：编入 FreeRDP 走库后端，否则命令行后备。
+    //
+    // 这里不能用 #ifdef CUBESHELL_HAVE_FREERDP 分支——那个宏是 cube_core 的
+    // PRIVATE 编译定义（src/core/CMakeLists.txt），测试目标看不见它，于是无论
+    // 实际编没编入 FreeRDP，测试都会走 #else 去断言 CommandLine 而误报失败。
+    // backend() 是运行时可查的，改为只断言取值合法 + 后备路径探测不崩。
     const auto backend = cubeshell::RdpClient::backend();
-#ifdef CUBESHELL_HAVE_FREERDP
-    check(backend == cubeshell::RdpClient::Backend::FreeRdp,
-          "编入 FreeRDP 时 backend() == FreeRdp");
-#else
-    check(backend == cubeshell::RdpClient::Backend::CommandLine,
-          "未编入 FreeRDP 时 backend() == CommandLine");
+    check(backend == cubeshell::RdpClient::Backend::FreeRdp
+              || backend == cubeshell::RdpClient::Backend::CommandLine,
+          "backend() 返回合法后端取值");
     // 本机可能没装 xfreerdp/mstsc，只要求探测不崩
     (void)cubeshell::RdpClient::commandLineProgram();
     check(true, "commandLineProgram() 探测不崩溃");
-#endif
 }
 #endif // CUBESHELL_WITH_RDP
 

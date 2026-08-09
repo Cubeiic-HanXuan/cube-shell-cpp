@@ -16,6 +16,13 @@ set(CORE_SOURCES
     ssh/TunnelPool.cpp          # port of tunnel pool management
     ssh/SftpUploaderCore.cpp    # port of core/uploader (chunked/resumable upload)
 
+    # --- net (TCP / Telnet)：无条件编译。Qt6::Network 是顶层必需组件，
+    #     且这是唯一在鸿蒙上也能跑的新协议（那里 Serial/RDP 被强制关闭）。 ---
+    net/LineEndings.cpp         # 协议无关的换行转换（原在 SerialBridge 里）
+    net/TcpClient.cpp           # QTcpSocket 封装（建连/收发/超时/日志）
+    net/TelnetProtocol.cpp      # RFC 854/855 IAC 选项协商状态机
+    net/TcpBridge.cpp           # TCP/Telnet 字节流 ↔ qtermwidget Session
+
     # --- config / persistence ---
     config/PickleReader.cpp     # minimal pickle reader for config.dat
     config/DeviceConfigStore.cpp # device config (read pickle / write JSON)

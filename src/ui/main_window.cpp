@@ -86,6 +86,9 @@
 #include "serial_terminal_widget.h"
 #include "dialogs/SerialConnectDialog.h"
 #endif
+// TCP/Telnet：无条件编译（Qt6::Network 是顶层必需组件，鸿蒙上同样可用）。
+#include "net_terminal_widget.h"
+#include "dialogs/NetConnectDialog.h"
 #ifdef Q_OS_MACOS
 #include "platform/FinderIntegration.h"
 #endif
@@ -564,6 +567,20 @@ void MainWindow::setupMenus()
         openSerialTab(dlg.settings());
     });
 #endif
+    // 新建 Telnet / TCP 连接：与串口同理，参数少且主机必填，先问一次
+    // 比开个空面板更顺手。不带 #ifdef——TCP/Telnet 在所有构建里都可用。
+    termMenu->addAction(tr("新建 Telnet 连接"), this, [this]() {
+        NetConnectDialog dlg(QStringLiteral("telnet"), this);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+        openNetTab(dlg.settings());
+    });
+    termMenu->addAction(tr("新建 TCP 连接"), this, [this]() {
+        NetConnectDialog dlg(QStringLiteral("tcp"), this);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+        openNetTab(dlg.settings());
+    });
     QAction *closeTab = termMenu->addAction(tr("关闭标签页"), this, &MainWindow::closeCurrentTab);
     closeTab->setShortcut(QKeySequence(QStringLiteral("Ctrl+W")));
     termMenu->addSeparator();
@@ -1319,6 +1336,27 @@ void MainWindow::handleUrl(const QString &url)
         return;
     }
 #endif
+    // telnet:// → 直接开 Telnet 标签（不走 BastionClient）。
+    // telnet 是 IANA 在案的标准 scheme，网页/文档里的链接本就期望被终端接管。
+    // 无 #ifdef：TCP/Telnet 不依赖任何可选组件。
+    if (url.startsWith(QLatin1String("telnet://"))) {
+        const UrlConnectionInfo info = parseTelnetUrl(url);
+        if (!info.valid) {
+            setStatus(tr("无效的 Telnet URL：%1").arg(info.error));
+            return;
+        }
+        TcpSettings settings;
+        settings.mode = QStringLiteral("telnet");
+        settings.host = info.host;
+        settings.port = quint16(info.port);
+        settings.username = info.user;
+        settings.password = info.password;
+        // URL 里显式写了用户名 = 意图明确，直接开自动登录（默认值是关的）。
+        // 只有用户名没密码也照开：状态机会自动送用户名，密码留给用户手输。
+        settings.autoLogin = !info.user.isEmpty();
+        openNetTab(settings);
+        return;
+    }
     if (m_bastion)
         m_bastion->handleUrl(url);
 }
@@ -1530,6 +1568,10 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
     if (auto *serial = qobject_cast<SerialTerminalWidget *>(w))
         serial->client()->close();
 #endif
+    // TCP/Telnet 标签关闭：先断 socket（顺带停日志文件），再销毁面板。
+    // 放在 #ifdef 之外——这两个协议无条件编译。
+    if (auto *net = qobject_cast<NetTerminalWidget *>(w))
+        net->client()->disconnectFromHost();
     tabs->removeTab(index);
     if (w)
         w->deleteLater();
@@ -2147,8 +2189,11 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
     const DeviceEntry *full = m_store.find(stub.name);
     const DeviceEntry device = full ? *full : stub;
 
-    // 串口设备分流：protocol == "serial" 时打开串口标签页。
-    // 串口无 host/凭据，DeviceEntry 里存的是端口名与帧格式参数。
+    // --- 协议分发 ---
+    // 五种协议，按 device.protocol 显式分流。方法名叫 openSshSession 是历史
+    // 遗留（它其实是所有协议的双击入口），SSH 留在末尾兜底。
+    //
+    // 串口：无 host/凭据，DeviceEntry 里存的是端口名与帧格式参数。
     if (device.isSerial()) {
 #ifdef CUBESHELL_WITH_SERIAL
         openSerialTab(serialSettingsFromDevice(device));
@@ -2159,9 +2204,8 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
         return;
     }
 
-    // RDP 设备分流：protocol == "rdp" 时打开 RDP 标签而非 SSH 会话。
-    // 对应Python: cube-shell.py::cd（行 3119-3206）中 device_protocol(conf)=="rdp"
-    // 走 open_rdp_tab 分支
+    // RDP：对应Python: cube-shell.py::cd（行 3119-3206）中
+    // device_protocol(conf)=="rdp" 走 open_rdp_tab 分支
     if (device.isRdp()) {
 #ifdef CUBESHELL_WITH_RDP
         RdpSettings settings;
@@ -2179,6 +2223,14 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
         return;
     }
 
+    // Telnet / 裸 TCP：共用一个面板，模式由 TcpSettings::mode 区分。
+    // 无 #ifdef 兜底分支——这两个协议在任何构建里都编进来了。
+    if (device.isTelnet() || device.isTcp()) {
+        openNetTab(netSettingsFromDevice(device));
+        return;
+    }
+
+    // 兜底：SSH。protocol 为空的旧配置也走这里（见 DeviceEntry::isSsh）。
     auto *tab = new SshSessionTab(device, this);
     // 右键菜单"AI" → 切换 AI 助手面板。
     // 对应Python: ai_action → self.window()._toggle_ai_panel()
@@ -2406,6 +2458,63 @@ void MainWindow::openSerialTab(const SerialSettings &settings)
 }
 
 #endif // CUBESHELL_WITH_SERIAL
+
+// 打开 TCP/Telnet 标签页。host 为空时只建空白面板（用户在工具栏填主机后点
+// “连接”），非空则立即建连。结构对照 openSerialTab。
+void MainWindow::openNetTab(const TcpSettings &settings)
+{
+    // 协议名是专有名词，标题里保持原样不翻译（与 "Serial: xxx" 一致）。
+    const QString label = settings.isTelnet() ? QStringLiteral("Telnet")
+                                              : QStringLiteral("TCP");
+    auto *panel = new NetTerminalWidget(settings.mode, this);
+    panel->setSettings(settings);
+
+    const QString title = settings.host.isEmpty()
+                              ? tr("%1 连接").arg(label)
+                              : QStringLiteral("%1: %2").arg(label, settings.host);
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(panel, title);
+    decorateSessionTab(pane, idx);
+    setTabConnected(panel, false);   // 连上之前先亮红点
+    pane->setCurrentIndex(idx);
+
+    connect(panel, &NetTerminalWidget::connected, this, [this, panel, label]() {
+        setTabConnected(panel, true);
+        const TcpSettings s = panel->client()->settings();
+        setStatus(tr("已连接：%1").arg(s.displayTarget()));
+        // 标题跟随实际连上的目标（空白面板手填 / 断开后改地址重连均在此复位）。
+        for (QTabWidget *tabs : allPanes()) {
+            const int i = tabs->indexOf(panel);
+            if (i >= 0) {
+                tabs->setTabText(i, QStringLiteral("%1: %2").arg(label, s.host));
+                break;
+            }
+        }
+    });
+    connect(panel, &NetTerminalWidget::disconnected, this, [this, panel]() {
+        setTabConnected(panel, false);
+        setStatus(tr("已断开：%1").arg(panel->client()->settings().displayTarget()));
+        // Tab 标题加“[断开]”前缀（面板内可重连，连上后由 connected 分支复位）。
+        const QString prefix = tr("[断开] ");
+        for (QTabWidget *tabs : allPanes()) {
+            const int i = tabs->indexOf(panel);
+            if (i >= 0) {
+                const QString text = tabs->tabText(i);
+                if (!text.startsWith(prefix))
+                    tabs->setTabText(i, prefix + text);
+                break;
+            }
+        }
+    });
+    connect(panel, &NetTerminalWidget::connectionFailed, this,
+            [this](const QString &message) { setStatus(message); });
+
+    if (!settings.host.isEmpty()) {
+        setStatus(tr("正在连接 %1…").arg(settings.displayTarget()));
+        panel->connectToHost();
+    }
+    panel->setFocus();
+}
 
 
 // ---------------------------------------------------------------------------

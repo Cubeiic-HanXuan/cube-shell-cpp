@@ -1,12 +1,16 @@
 #pragma once
 
-// AddDeviceDialog.h — add / edit a saved SSH / RDP / Serial device.
+// AddDeviceDialog.h — add / edit a saved SSH / RDP / Serial / Telnet / TCP device.
 //
 // C++ counterpart of AddConfigUi (cube-shell.py:5989). Edits name / username /
 // password-or-key / host / port (plus RDP auth/domain when built with
 // CUBESHELL_WITH_RDP, plus serial port params when built with
-// CUBESHELL_WITH_SERIAL) and returns a DeviceEntry via device(). Used for both
-// "add" and "edit" (setDevice to pre-fill).
+// CUBESHELL_WITH_SERIAL, plus TCP/Telnet params unconditionally) and returns a
+// DeviceEntry via device(). Used for both "add" and "edit" (setDevice to pre-fill).
+//
+// 协议下拉框无条件存在：TCP/Telnet 不依赖任何可选组件，所以至少有
+// SSH / Telnet / TCP 三项可选。（早先这里有个 CUBESHELL_HAS_PROTOCOL_COMBO 宏，
+// 定义为"RDP 或 Serial 任一开启"，在两者都关掉的鸿蒙构建上会让整个下拉框消失。）
 
 #include <QDialog>
 
@@ -20,11 +24,6 @@ class QPushButton;
 class QStackedWidget;
 
 namespace cubeshell {
-
-// 协议下拉框在 RDP 或 串口 任一开启时才有意义（只有 SSH 时不显示）。
-#if defined(CUBESHELL_WITH_RDP) || defined(CUBESHELL_WITH_SERIAL)
-#define CUBESHELL_HAS_PROTOCOL_COMBO 1
-#endif
 
 class AddDeviceDialog : public QDialog {
     Q_OBJECT
@@ -45,19 +44,23 @@ private slots:
 private:
     bool validate(QString *err) const;
 
-#ifdef CUBESHELL_HAS_PROTOCOL_COMBO
+    // 当前选中的协议值（"ssh" | "rdp" | "serial" | "telnet" | "tcp"）。
+    // 一律取 currentData() 而非 currentText()：显示文本是给人看的，一旦有人
+    // 给协议名加上 tr() 或改个大小写，比对文本的判定就会静默失效。
+    QString selectedProtocol() const;
+    bool rdpSelected() const;
+    bool serialSelected() const;
+    bool telnetSelected() const;
+    bool tcpSelected() const;
+
     // 对应Python: _on_protocol_changed（cube-shell.py:6073-6084）
     void onProtocolChanged(int index);
-#endif
-#ifdef CUBESHELL_WITH_RDP
-    bool rdpSelected() const;
-#endif
 #ifdef CUBESHELL_WITH_SERIAL
-    bool serialSelected() const;
     void onRefreshPorts();
 #endif
 
     QFormLayout *m_form = nullptr;
+    QComboBox *m_protocol = nullptr;        // Row 0: SSH | RDP | Serial | Telnet | TCP
     QLineEdit *m_name = nullptr;
     QLineEdit *m_username = nullptr;
     QLineEdit *m_host = nullptr;
@@ -73,9 +76,10 @@ private:
     QLineEdit *m_keyFile = nullptr;
     QPushButton *m_browseKey = nullptr;
 
-#ifdef CUBESHELL_HAS_PROTOCOL_COMBO
-    QComboBox *m_protocol = nullptr;        // Row 0: "SSH" | "RDP" | "Serial"
-#endif
+    // 端口框里当前放的是哪个协议的默认值。切协议时据此判断"用户没改过端口"，
+    // 从而可以安全地换成新协议的默认端口（用户手填过的端口不动）。
+    QString m_portDefaultFor;
+
 #ifdef CUBESHELL_WITH_RDP
     // RDP 专用控件。对应Python: _inject_protocol_fields（cube-shell.py:5989-6084）
     QComboBox *m_rdpAuth = nullptr;         // data: "ntlm" | "plain"
@@ -94,6 +98,15 @@ private:
     QCheckBox *m_localEcho = nullptr;
     QCheckBox *m_rxImplicitCr = nullptr;
 #endif
+    // TCP/Telnet 专用控件（无条件编译）。换行/回显/接收补 CR 三项与串口是
+    // 同一套语义，但刻意用独立控件而非复用串口那三个——串口控件在
+    // CUBESHELL_WITH_SERIAL=OFF 时不存在，而 TCP/Telnet 在任何构建里都要能用。
+    QComboBox *m_netNewline = nullptr;
+    QCheckBox *m_netLocalEcho = nullptr;
+    QCheckBox *m_netRxImplicitCr = nullptr;
+    QComboBox *m_termType = nullptr;        // Telnet TERMINAL-TYPE 上报值
+    QCheckBox *m_negotiate = nullptr;       // Telnet IAC 选项协商
+    QCheckBox *m_autoLogin = nullptr;       // Telnet 自动登录
 };
 
 } // namespace cubeshell

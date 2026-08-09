@@ -64,12 +64,32 @@ QString formatHostPort(const QString &host, quint16 port)
     return QStringLiteral("%1:%2").arg(h).arg(port);
 }
 
+quint16 defaultPortFor(const QString &protocol)
+{
+    if (protocol == QLatin1String("rdp"))
+        return 3389;
+    // 裸 TCP 没有 IANA 默认端口，但新建会话最常见的场景是先连 telnet 试探，
+    // 故与 telnet 同取 23；用户自己填的端口会覆盖它。
+    if (protocol == QLatin1String("telnet") || protocol == QLatin1String("tcp"))
+        return 23;
+    return 22;   // ssh / serial（不用端口）/ 空值旧配置
+}
+
+QString defaultNewlineModeFor(const QString &protocol)
+{
+    if (protocol == QLatin1String("telnet"))
+        return QStringLiteral("crlf");
+    if (protocol == QLatin1String("tcp"))
+        return QStringLiteral("lf");
+    return QStringLiteral("cr");   // serial / 其他
+}
+
 HostPort DeviceEntry::hostPort() const
 {
     // The pickle form stores host as "host:port"; the explicit `port` field is
     // only populated for JSON-loaded entries. Prefer parsing the host string.
-    // RDP 设备默认端口 3389。对应Python: RDP 分支的 '3389' 默认值
-    const quint16 def = isRdp() ? 3389 : 22;
+    // 各协议默认端口收敛在 defaultPortFor()。
+    const quint16 def = defaultPortFor(protocol);
     if (host.contains(QLatin1Char(':')) || host.startsWith(QLatin1Char('[')))
         return parseHostPort(host, port ? port : def);
     return {host, quint16(port ? port : def)};
@@ -172,6 +192,10 @@ bool DeviceConfigStore::saveJson(const QString &jsonPath, QString *errorOut) con
         o[QStringLiteral("newlineMode")] = e.newlineMode;
         o[QStringLiteral("localEcho")]   = e.localEcho;
         o[QStringLiteral("rxImplicitCr")] = e.rxImplicitCr;
+        // TCP/Telnet 字段（同上，非 TCP/Telnet 条目也一并写出）。
+        o[QStringLiteral("telnetNegotiate")] = e.telnetNegotiate;
+        o[QStringLiteral("termType")]        = e.termType;
+        o[QStringLiteral("autoLogin")]       = e.autoLogin;
         arr.append(o);
     }
 
@@ -208,13 +232,16 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         e.username = o[QStringLiteral("username")].toString();
         e.password = o[QStringLiteral("password")].toString();
         e.host     = o[QStringLiteral("host")].toString();
-        e.port     = quint16(o[QStringLiteral("port")].toInt(22));
-        e.keyType  = o[QStringLiteral("keyType")].toString();
-        e.keyFile  = o[QStringLiteral("keyFile")].toString();
+        // 协议要先于端口解析：port 键缺失时的回落值取决于协议
+        //（手改配置文件只写了 protocol=telnet 而没写 port 是常见情形，
+        //  一律回落 22 会让它连到 SSH 端口上）。
         // RDP 字段（旧版 JSON 无这些键时回落到 ssh/ntlm 默认值）。
         // 对应Python: util.device_protocol 的容错判别
         const QString protocol = o[QStringLiteral("protocol")].toString();
         e.protocol = protocol.isEmpty() ? QStringLiteral("ssh") : protocol;
+        e.port     = quint16(o[QStringLiteral("port")].toInt(defaultPortFor(e.protocol)));
+        e.keyType  = o[QStringLiteral("keyType")].toString();
+        e.keyFile  = o[QStringLiteral("keyFile")].toString();
         e.domain   = o[QStringLiteral("domain")].toString();
         const QString auth = o[QStringLiteral("auth")].toString();
         e.auth = auth.isEmpty() ? QStringLiteral("ntlm") : auth;
@@ -229,11 +256,21 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         const QString flow = o[QStringLiteral("flowControl")].toString();
         e.flowControl = flow.isEmpty() ? QStringLiteral("none") : flow;
         const QString newline = o[QStringLiteral("newlineMode")].toString();
-        e.newlineMode = newline.isEmpty() ? QStringLiteral("cr") : newline;
+        // 缺键按协议回落（同上面 port 的做法），不能一律用串口的 "cr"：
+        // 手改配置只写 protocol=telnet 时，发 CR 而不是 CR LF 会让回车不生效。
+        e.newlineMode = newline.isEmpty() ? defaultNewlineModeFor(e.protocol) : newline;
         e.localEcho = o[QStringLiteral("localEcho")].toBool(false);
         // 默认 true：本键是后加的，旧配置文件里没有。缺键时回落成 false 会让
         // 已保存的串口设备表现得和新建的不一样（阶梯输出），故回落成开启。
         e.rxImplicitCr = o[QStringLiteral("rxImplicitCr")].toBool(true);
+        // TCP/Telnet 字段（旧版 JSON 无这些键时的回落值同上面的容错风格）。
+        // telnetNegotiate 缺键回落 true：协商是 Telnet 的正常行为，回落成
+        // false 会让保存过的设备表现得和新建的不一样（拿不到 NAWS/TTYPE）。
+        e.telnetNegotiate = o[QStringLiteral("telnetNegotiate")].toBool(true);
+        const QString termType = o[QStringLiteral("termType")].toString();
+        e.termType = termType.isEmpty() ? QStringLiteral("xterm-256color") : termType;
+        // autoLogin 缺键回落 false：自动送密码是需要用户显式开启的行为。
+        e.autoLogin = o[QStringLiteral("autoLogin")].toBool(false);
         if (!e.name.isEmpty())
             m_devices.insert(e.name, e);
     }

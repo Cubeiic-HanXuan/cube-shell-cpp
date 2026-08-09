@@ -13,6 +13,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
+#include "dialogs/NetConnectDialog.h"      // netcombo 辅助函数（无条件可用）
 #ifdef CUBESHELL_WITH_SERIAL
 #include "dialogs/SerialConnectDialog.h"   // serialcombo 辅助函数
 #endif
@@ -32,6 +33,7 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     m_host = new QLineEdit(this);
     m_host->setPlaceholderText(tr("请输入IP地址（支持IPv6）"));
     m_port = new QLineEdit(QStringLiteral("22"), this);
+    m_portDefaultFor = QStringLiteral("ssh");
 
     m_authMethod = new QComboBox(this);
     m_authMethod->addItem(tr("密码登录"));
@@ -73,19 +75,21 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     // --- main form ---
     auto *form = new QFormLayout;
     m_form = form;
-#ifdef CUBESHELL_HAS_PROTOCOL_COMBO
     // Row 0: 连接类型选择器（配置名之前）。
     // 对应Python: _inject_protocol_fields（cube-shell.py:6017-6022）
+    // 协议名是专有名词，不翻译；userData 才是判定依据（见 selectedProtocol）。
     m_protocol = new QComboBox(this);
-    m_protocol->addItem(QStringLiteral("SSH"));
+    m_protocol->addItem(QStringLiteral("SSH"), QStringLiteral("ssh"));
 #ifdef CUBESHELL_WITH_RDP
-    m_protocol->addItem(QStringLiteral("RDP"));
+    m_protocol->addItem(QStringLiteral("RDP"), QStringLiteral("rdp"));
 #endif
 #ifdef CUBESHELL_WITH_SERIAL
-    m_protocol->addItem(QStringLiteral("Serial"));
+    m_protocol->addItem(QStringLiteral("Serial"), QStringLiteral("serial"));
 #endif
+    m_protocol->addItem(QStringLiteral("Telnet"), QStringLiteral("telnet"));
+    m_protocol->addItem(QStringLiteral("TCP"), QStringLiteral("tcp"));
     form->addRow(tr("连接类型："), m_protocol);
-#endif
+
     form->addRow(tr("配置名："), m_name);
     form->addRow(tr("用户名："), m_username);
     form->addRow(tr("IP地址："), m_host);
@@ -149,6 +153,26 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
             this, &AddDeviceDialog::onRefreshPorts);
 #endif
 
+    // TCP/Telnet 参数。终端类型/协商/自动登录只在 Telnet 下可见（裸 TCP 没有
+    // 这些概念）；换行/回显/接收补 CR 两种模式都可见。
+    m_termType = new QComboBox(this);
+    netcombo::fillTermTypes(m_termType);
+    m_negotiate = new QCheckBox(tr("选项协商（NAWS / 终端类型 / SGA）"), this);
+    m_negotiate->setChecked(true);
+    m_autoLogin = new QCheckBox(tr("自动登录（匹配 login: / Password: 提示）"), this);
+    m_netNewline = new QComboBox(this);
+    netcombo::fillNewlineMode(m_netNewline);
+    m_netLocalEcho = new QCheckBox(tr("本地回显（对端不回显输入时勾选）"), this);
+    m_netRxImplicitCr = new QCheckBox(tr("接收时给孤立的 LF 补 CR（对端发裸 \\n 时勾选）"), this);
+    m_netRxImplicitCr->setChecked(true);
+
+    form->addRow(tr("终端类型："), m_termType);
+    form->addRow(QString(), m_negotiate);
+    form->addRow(QString(), m_autoLogin);
+    form->addRow(tr("发送换行符："), m_netNewline);
+    form->addRow(QString(), m_netLocalEcho);
+    form->addRow(QString(), m_netRxImplicitCr);
+
     // --- 排版统一 ---
     // 三个 QFormLayout（主表单 + 认证堆叠页里两个）各自独立计算布局，
     // 需统一标签对齐、字段拉伸策略与标签列宽，视觉上才是同一张表。
@@ -160,9 +184,9 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
         f->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     }
     const QList<QComboBox *> combos = {
-        m_authMethod, m_keyType,
+        m_authMethod, m_keyType, m_protocol, m_termType, m_netNewline,
 #ifdef CUBESHELL_WITH_RDP
-        m_protocol, m_rdpAuth,
+        m_rdpAuth,
 #endif
     };
     for (QComboBox *cb : combos)
@@ -175,6 +199,7 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
         if (QWidget *label = f->labelForField(field))
             formLabels.append(label);
     };
+    collectLabel(form, m_protocol);
     collectLabel(form, m_name);
     collectLabel(form, m_username);
     collectLabel(form, m_host);
@@ -183,10 +208,20 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     collectLabel(pwForm, m_password);
     collectLabel(keyForm, m_keyType);
     collectLabel(keyForm, keyFileRow);
+    collectLabel(form, m_termType);
+    collectLabel(form, m_netNewline);
 #ifdef CUBESHELL_WITH_RDP
-    collectLabel(form, m_protocol);
     collectLabel(form, m_rdpAuth);
     collectLabel(form, m_domain);
+#endif
+#ifdef CUBESHELL_WITH_SERIAL
+    collectLabel(form, m_serialPortRow);
+    collectLabel(form, m_baud);
+    collectLabel(form, m_dataBits);
+    collectLabel(form, m_parity);
+    collectLabel(form, m_stopBits);
+    collectLabel(form, m_flow);
+    collectLabel(form, m_newline);
 #endif
     int labelWidth = 0;
     for (QWidget *label : formLabels)
@@ -205,26 +240,22 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     connect(m_authMethod, &QComboBox::currentIndexChanged,
             this, &AddDeviceDialog::onAuthMethodChanged);
     connect(m_browseKey, &QPushButton::clicked, this, &AddDeviceDialog::onBrowseKey);
-#ifdef CUBESHELL_HAS_PROTOCOL_COMBO
     // 对应Python: protoCombo.currentIndexChanged.connect(self._on_protocol_changed)
     connect(m_protocol, &QComboBox::currentIndexChanged,
             this, &AddDeviceDialog::onProtocolChanged);
     onProtocolChanged(m_protocol->currentIndex());
-#endif
 }
 
 void AddDeviceDialog::setDevice(const DeviceEntry &e)
 {
-#ifdef CUBESHELL_HAS_PROTOCOL_COMBO
     // 先回填协议再填 host/port，避免 onProtocolChanged 覆盖实际端口。
     // 对应Python: set_protocol（cube-shell.py:6086-6088）+ domain/auth 回填
-    QString proto = QStringLiteral("SSH");
-    if (e.isRdp())
-        proto = QStringLiteral("RDP");
-    else if (e.isSerial())
-        proto = QStringLiteral("Serial");
-    m_protocol->setCurrentText(proto);
-#endif
+    // isSsh() 兜住 protocol 为空的旧配置。
+    const QString proto = e.isSsh() ? QStringLiteral("ssh") : e.protocol;
+    const int protoIdx = m_protocol->findData(proto);
+    // 找不到 = 该协议在本次构建里没编进来（如关掉 RDP 的鸿蒙构建打开一条 RDP
+    // 配置）。保持 SSH 不动，至少让对话框能打开、名字能改。
+    m_protocol->setCurrentIndex(protoIdx < 0 ? 0 : protoIdx);
 #ifdef CUBESHELL_WITH_RDP
     m_domain->setText(e.domain);
     const int authIdx = m_rdpAuth->findData(e.auth.isEmpty() ? QStringLiteral("ntlm") : e.auth);
@@ -243,11 +274,23 @@ void AddDeviceDialog::setDevice(const DeviceEntry &e)
     m_localEcho->setChecked(ss.localEcho);
     m_rxImplicitCr->setChecked(ss.rxImplicitCr);
 #endif
+    // TCP/Telnet 同理，映射走 netSettingsFromDevice。
+    const TcpSettings ns = netSettingsFromDevice(e);
+    netcombo::fillTermTypes(m_termType, ns.termType);
+    m_negotiate->setChecked(ns.negotiate);
+    m_autoLogin->setChecked(ns.autoLogin);
+    netcombo::selectData(m_netNewline, int(ns.newlineMode));
+    m_netLocalEcho->setChecked(ns.localEcho);
+    m_netRxImplicitCr->setChecked(ns.rxImplicitCr);
+
     m_name->setText(e.name);
     m_username->setText(e.username);
     const HostPort hp = e.hostPort();
     m_host->setText(hp.host);
     m_port->setText(QString::number(hp.port));
+    // 回填过实际端口后，端口框里就不再是"某协议的默认值"了——切协议时
+    // 不该把用户存的端口冲掉。
+    m_portDefaultFor.clear();
     if (e.usesKey()) {
         m_authMethod->setCurrentIndex(1);
         m_keyType->setCurrentText(e.keyType);
@@ -285,6 +328,27 @@ DeviceEntry AddDeviceDialog::device() const
     // Store host in the pickle-compatible "host:port" string form.
     e.host = formatHostPort(host, port);
     e.port = port;
+
+    if (telnetSelected() || tcpSelected()) {
+        e.protocol = selectedProtocol();
+        e.newlineMode = netcombo::newlineModeToString(
+            netcombo::newlineModeOf(m_netNewline));
+        e.localEcho    = m_netLocalEcho->isChecked();
+        e.rxImplicitCr = m_netRxImplicitCr->isChecked();
+        if (telnetSelected()) {
+            e.telnetNegotiate = m_negotiate->isChecked();
+            e.termType = QString::fromUtf8(netcombo::termTypeOf(m_termType));
+            e.autoLogin = m_autoLogin->isChecked();
+            e.password = m_password->text();
+        } else {
+            // 裸 TCP 没有登录概念：用户名/密码不落盘，避免误导。
+            e.username.clear();
+        }
+        e.keyType.clear();
+        e.keyFile.clear();
+        return e;
+    }
+
 #ifdef CUBESHELL_WITH_RDP
     if (rdpSelected()) {
         // 对应Python: addDev 的 RDP 保存分支（cube-shell.py:6108-6119）
@@ -315,21 +379,37 @@ void AddDeviceDialog::onAuthMethodChanged(int index)
     m_authStack->setCurrentIndex(index);
 }
 
-#ifdef CUBESHELL_WITH_RDP
-
-bool AddDeviceDialog::rdpSelected() const
+QString AddDeviceDialog::selectedProtocol() const
 {
-    return m_protocol && m_protocol->currentText() == QLatin1String("RDP");
+    if (!m_protocol)
+        return QStringLiteral("ssh");
+    const QString v = m_protocol->currentData().toString();
+    return v.isEmpty() ? QStringLiteral("ssh") : v;
 }
 
-#endif // CUBESHELL_WITH_RDP
-
-#ifdef CUBESHELL_WITH_SERIAL
+// 这四个判定无条件编译：某协议没编进来时下拉框里就没有对应项，
+// currentData() 永远不会等于它，函数自然恒为 false。
+bool AddDeviceDialog::rdpSelected() const
+{
+    return selectedProtocol() == QLatin1String("rdp");
+}
 
 bool AddDeviceDialog::serialSelected() const
 {
-    return m_protocol && m_protocol->currentText() == QLatin1String("Serial");
+    return selectedProtocol() == QLatin1String("serial");
 }
+
+bool AddDeviceDialog::telnetSelected() const
+{
+    return selectedProtocol() == QLatin1String("telnet");
+}
+
+bool AddDeviceDialog::tcpSelected() const
+{
+    return selectedProtocol() == QLatin1String("tcp");
+}
+
+#ifdef CUBESHELL_WITH_SERIAL
 
 void AddDeviceDialog::onRefreshPorts()
 {
@@ -338,35 +418,33 @@ void AddDeviceDialog::onRefreshPorts()
 
 #endif // CUBESHELL_WITH_SERIAL
 
-#ifdef CUBESHELL_HAS_PROTOCOL_COMBO
-
 // 条件显隐 + 默认端口切换。对应Python: _on_protocol_changed（cube-shell.py:6073-6084）
-// 三态版本：SSH / RDP / Serial 各自显示自己的字段。
+// 五态版本：SSH / RDP / Serial / Telnet / TCP 各自显示自己的字段。
+// 用一个 proto 字符串做比较而不是五个 bool——后者读起来像布尔代数题。
 void AddDeviceDialog::onProtocolChanged(int /*index*/)
 {
-#ifdef CUBESHELL_WITH_RDP
-    const bool isRdp = rdpSelected();
-#else
-    const bool isRdp = false;
-#endif
-#ifdef CUBESHELL_WITH_SERIAL
-    const bool isSerial = serialSelected();
-#else
-    const bool isSerial = false;
-#endif
+    const QString proto = selectedProtocol();
+    const bool isRdp    = (proto == QLatin1String("rdp"));
+    const bool isSerial = (proto == QLatin1String("serial"));
+    const bool isTelnet = (proto == QLatin1String("telnet"));
+    const bool isTcp    = (proto == QLatin1String("tcp"));
+    const bool isNet    = isTelnet || isTcp;
+    const bool isSsh    = !isRdp && !isSerial && !isNet;
 
-    // 串口没有网络语义：用户名/IP/端口整组隐藏。
-    m_form->setRowVisible(m_username, !isSerial);
+    // 串口没有网络语义：IP/端口整组隐藏。用户名对裸 TCP 也没有意义
+    //（对端不一定有登录概念），Telnet 则用它做自动登录。
+    m_form->setRowVisible(m_username, isSsh || isRdp || isTelnet);
     m_form->setRowVisible(m_host, !isSerial);
     m_form->setRowVisible(m_port, !isSerial);
 
-    // RDP 只支持密码认证：隐藏"密码/私钥"选择行并固定到密码页
-    //（等效 Python 版隐藏私钥类型/私钥文件控件）。串口无认证，整组隐藏。
-    m_form->setRowVisible(m_authMethod, !isRdp && !isSerial);
-    m_form->setRowVisible(m_authStack, !isSerial);
-    if (isRdp)
+    // "密码 / 私钥"二选一只有 SSH 需要：RDP 只支持密码，Telnet 的密码是给
+    // 自动登录用的，串口和裸 TCP 没有认证。认证方式行仅 SSH 可见；
+    // 密码页在 SSH/RDP/Telnet 下可见（后两者固定停在密码页）。
+    m_form->setRowVisible(m_authMethod, isSsh);
+    m_form->setRowVisible(m_authStack, isSsh || isRdp || isTelnet);
+    if (!isSsh)
         m_authMethod->setCurrentIndex(0);
-    m_authStack->setCurrentIndex(isRdp ? 0 : m_authMethod->currentIndex());
+    m_authStack->setCurrentIndex(isSsh ? m_authMethod->currentIndex() : 0);
 
 #ifdef CUBESHELL_WITH_RDP
     m_form->setRowVisible(m_rdpAuth, isRdp);
@@ -383,14 +461,26 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
     m_form->setRowVisible(m_localEcho, isSerial);
     m_form->setRowVisible(m_rxImplicitCr, isSerial);
 #endif
+    m_form->setRowVisible(m_termType, isTelnet);
+    m_form->setRowVisible(m_negotiate, isTelnet);
+    m_form->setRowVisible(m_autoLogin, isTelnet);
+    m_form->setRowVisible(m_netNewline, isNet);
+    m_form->setRowVisible(m_netLocalEcho, isNet);
+    m_form->setRowVisible(m_netRxImplicitCr, isNet);
 
-    // 切换协议时给出合理的默认端口（串口不用端口字段，跳过）。
+    // 切协议时给出合理的默认端口（串口不用端口字段，跳过）。
+    // 只在端口框为空、或里面放的还是上一个协议的默认值时才改——用户自己
+    // 填过端口就一直保留。默认值收敛在 defaultPortFor()。
     if (!isSerial) {
         const QString cur = m_port->text().trimmed();
-        if (isRdp && (cur.isEmpty() || cur == QLatin1String("22")))
-            m_port->setText(QStringLiteral("3389"));
-        else if (!isRdp && (cur.isEmpty() || cur == QLatin1String("3389")))
-            m_port->setText(QStringLiteral("22"));
+        const bool untouched =
+            cur.isEmpty()
+            || (!m_portDefaultFor.isEmpty()
+                && cur == QString::number(defaultPortFor(m_portDefaultFor)));
+        if (untouched) {
+            m_port->setText(QString::number(defaultPortFor(proto)));
+            m_portDefaultFor = proto;
+        }
     }
 
     // 行显隐后把对话框收回到内容高度。
@@ -407,8 +497,6 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
     // 用户手动拉宽过对话框的话每次切协议都被打回去，很难用。
     resize(width(), sizeHint().height());
 }
-
-#endif // CUBESHELL_HAS_PROTOCOL_COMBO
 
 void AddDeviceDialog::onBrowseKey()
 {
@@ -429,6 +517,21 @@ bool AddDeviceDialog::validate(QString *err) const
         return true;
     }
 #endif
+    if (tcpSelected()) {
+        // 裸 TCP 只要能定位到对端就行，没有用户名/凭据的概念。
+        if (m_host->text().trimmed().isEmpty()) { *err = tr("IP地址不能为空。"); return false; }
+        return true;
+    }
+    if (telnetSelected()) {
+        if (m_host->text().trimmed().isEmpty()) { *err = tr("IP地址不能为空。"); return false; }
+        // 用户名平时可留空（很多设备只问密码，或直接给 shell），
+        // 但勾了自动登录就必须有——状态机拿它去应答 login: 提示。
+        if (m_autoLogin->isChecked() && m_username->text().trimmed().isEmpty()) {
+            *err = tr("启用自动登录时必须填写用户名。");
+            return false;
+        }
+        return true;
+    }
     if (m_username->text().trimmed().isEmpty()) { *err = tr("用户名不能为空。"); return false; }
     if (m_host->text().trimmed().isEmpty()) { *err = tr("IP地址不能为空。"); return false; }
 #ifdef CUBESHELL_WITH_RDP

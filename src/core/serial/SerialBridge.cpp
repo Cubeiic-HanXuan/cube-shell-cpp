@@ -6,6 +6,7 @@
 
 #include "Emulation.h"
 #include "Session.h"
+#include "net/LineEndings.h"
 
 namespace cubeshell {
 
@@ -124,62 +125,22 @@ void SerialBridge::sendText(const QString &text)
 QByteArray SerialBridge::applyNewlineMode(const QByteArray &input,
                                           SerialSettings::NewlineMode mode)
 {
-    // 终端的回车键产生的是 \r（CR）。Cr 模式即原样透传，是最常见的默认。
-    if (mode == SerialSettings::NewlineMode::Cr)
-        return input;
-
-    QByteArray out;
-    out.reserve(input.size() + 8);   // CrLf 最坏情况每个 \r 多一字节
-
-    for (int i = 0; i < input.size(); ++i) {
-        const char c = input.at(i);
-        if (c != '\r') {
-            out.append(c);
-            continue;
-        }
-        // 已经是 CRLF 的（终端一般不会产生，但粘贴的文本里会有）不再重复加 LF。
-        const bool nextIsLf = (i + 1 < input.size() && input.at(i + 1) == '\n');
-        switch (mode) {
-        case SerialSettings::NewlineMode::Lf:
-            out.append('\n');
-            if (nextIsLf)
-                ++i;          // 吃掉原有的 \n，避免变成 \n\n
-            break;
-        case SerialSettings::NewlineMode::CrLf:
-            out.append('\r');
-            out.append('\n');
-            if (nextIsLf)
-                ++i;          // 原本就是 \r\n，别写成 \r\n\n
-            break;
-        case SerialSettings::NewlineMode::Cr:
-            out.append('\r'); // 上面已提前返回，这里只为编译器穷尽 switch
-            break;
-        }
+    // 串口的 NewlineMode → 协议中立的 cubeshell::NewlineMode，实现在
+    // core/net/LineEndings.cpp（与 TcpBridge 共用同一份）。
+    switch (mode) {
+    case SerialSettings::NewlineMode::Lf:
+        return cubeshell::applyNewlineMode(input, NewlineMode::Lf);
+    case SerialSettings::NewlineMode::CrLf:
+        return cubeshell::applyNewlineMode(input, NewlineMode::CrLf);
+    case SerialSettings::NewlineMode::Cr:
+        break;
     }
-    return out;
+    return cubeshell::applyNewlineMode(input, NewlineMode::Cr);
 }
 
 QByteArray SerialBridge::applyRxImplicitCr(const QByteArray &input, bool &prevWasCr)
 {
-    if (input.isEmpty())
-        return input;   // 空块不该改动 prevWasCr
-
-    QByteArray out;
-    out.reserve(input.size() + 8);
-
-    bool sawCr = prevWasCr;
-    for (int i = 0; i < input.size(); ++i) {
-        const char c = input.at(i);
-        if (c == '\n' && !sawCr)
-            out.append('\r');   // 孤立 LF：补 CR，让光标回到行首
-        out.append(c);
-        sawCr = (c == '\r');
-    }
-
-    // 只有最后一个字节是 \r 才需要跨块记住 —— 下一块若以 \n 开头，那是同一个
-    // \r\n 被读取边界拆开了，不能再补 \r。
-    prevWasCr = sawCr;
-    return out;
+    return cubeshell::applyRxImplicitCr(input, prevWasCr);
 }
 
 } // namespace cubeshell

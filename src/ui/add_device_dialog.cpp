@@ -5,6 +5,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -79,15 +80,21 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     // 对应Python: _inject_protocol_fields（cube-shell.py:6017-6022）
     // 协议名是专有名词，不翻译；userData 才是判定依据（见 selectedProtocol）。
     m_protocol = new QComboBox(this);
-    m_protocol->addItem(QStringLiteral("SSH"), QStringLiteral("ssh"));
+    // 图标与设备列表树的取图标分支保持一致（device_list_widget.cpp）。
+    m_protocol->addItem(QIcon(QStringLiteral(":/icons8-ssh-48.png")),
+                        QStringLiteral("SSH"), QStringLiteral("ssh"));
 #ifdef CUBESHELL_WITH_RDP
-    m_protocol->addItem(QStringLiteral("RDP"), QStringLiteral("rdp"));
+    m_protocol->addItem(QIcon(QStringLiteral(":/icons8-windows-48.png")),
+                        QStringLiteral("RDP"), QStringLiteral("rdp"));
 #endif
 #ifdef CUBESHELL_WITH_SERIAL
-    m_protocol->addItem(QStringLiteral("Serial"), QStringLiteral("serial"));
+    m_protocol->addItem(QIcon(QStringLiteral(":/icons8-serial-48.png")),
+                        QStringLiteral("Serial"), QStringLiteral("serial"));
 #endif
-    m_protocol->addItem(QStringLiteral("Telnet"), QStringLiteral("telnet"));
-    m_protocol->addItem(QStringLiteral("TCP"), QStringLiteral("tcp"));
+    m_protocol->addItem(QIcon(QStringLiteral(":/icons8-telnet-48.png")),
+                        QStringLiteral("Telnet"), QStringLiteral("telnet"));
+    m_protocol->addItem(QIcon(QStringLiteral(":/icons8-tcp-48.png")),
+                        QStringLiteral("TCP"), QStringLiteral("tcp"));
     form->addRow(tr("连接类型："), m_protocol);
 
     form->addRow(tr("配置名："), m_name);

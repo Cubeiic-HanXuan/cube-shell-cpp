@@ -59,19 +59,19 @@ jobs:
           # ==================================================================
 
           # ------------------------------- macOS -------------------------------
-          - name: macos-x86_64
-            os: macos-15-intel          # Intel runner
-            platform: macos
-            qt_arch: clang_64
-            vcpkg_triplet: x64-osx
-            osx_arch: x86_64
-
-          - name: macos-arm64
-            os: macos-14                # Apple Silicon runner
-            platform: macos
-            qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
-            vcpkg_triplet: arm64-osx
-            osx_arch: arm64
+#          - name: macos-x86_64
+#            os: macos-15-intel          # Intel runner
+#            platform: macos
+#            qt_arch: clang_64
+#            vcpkg_triplet: x64-osx
+#            osx_arch: x86_64
+#
+#          - name: macos-arm64
+#            os: macos-14                # Apple Silicon runner
+#            platform: macos
+#            qt_arch: clang_64           # Apple Silicon 上 clang_64 即 arm64
+#            vcpkg_triplet: arm64-osx
+#            osx_arch: arm64
 
           # ------------------------------ Windows ------------------------------
           # x64 固定跑 windows-2022（VS 2022 仍在，generator「Visual Studio 17 2022」）。
@@ -113,20 +113,20 @@ jobs:
           #   ARM64 用 ubuntu-24.04（glibc 2.39）：Qt 官方 ARM64 Linux 二进制【只】在
           #     Ubuntu 24.04 上编译（ARM64 参考平台即 24.04/glibc2.39，glibc 更旧需从
           #     源码重编 Qt）。22.04 上其 moc 报 GLIBC_2.38 not found，故 ARM64 只能 24.04。
-          - name: linux-x86_64
-            os: ubuntu-22.04           # 宿主 runner（仅承载容器，自身发行版不参与编译）
-            container: rockylinux:8    # 构建在容器内进行：glibc 2.28 底座
-            platform: linux
-            aqt_host: linux
-            aqt_arch: linux_gcc_64    # 实测 6.9.1 x86_64 唯一 arch 名（非 gcc_64）
-            vcpkg_triplet: x64-linux
-
-          - name: linux-arm64
-            os: ubuntu-24.04-arm      # Qt ARM64 Linux 官方二进制基于 24.04/glibc2.39，22.04 跑不动 moc
-            platform: linux
-            aqt_host: linux_arm64
-            aqt_arch: linux_gcc_arm64
-            vcpkg_triplet: arm64-linux
+#          - name: linux-x86_64
+#            os: ubuntu-22.04           # 宿主 runner（仅承载容器，自身发行版不参与编译）
+#            container: rockylinux:8    # 构建在容器内进行：glibc 2.28 底座
+#            platform: linux
+#            aqt_host: linux
+#            aqt_arch: linux_gcc_64    # 实测 6.9.1 x86_64 唯一 arch 名（非 gcc_64）
+#            vcpkg_triplet: x64-linux
+#
+#          - name: linux-arm64
+#            os: ubuntu-24.04-arm      # Qt ARM64 Linux 官方二进制基于 24.04/glibc2.39，22.04 跑不动 moc
+#            platform: linux
+#            aqt_host: linux_arm64
+#            aqt_arch: linux_gcc_arm64
+#            vcpkg_triplet: arm64-linux
 
     steps:
       - name: Checkout

@@ -17,6 +17,30 @@
 #include <Security/Security.h>
 #endif
 
+// 注意：下面这些平台专用头必须在全局作用域、任何 namespace 之前包含。
+// 曾在 #elif Q_OS_WIN/#else 块内（即 namespace cubeshell::Secrets 里）包含
+// <QFile>/<windows.h>，结果 MSVC 在实例化 Qt 的 QSpan 模板时把 Qt 符号错误归进
+// cubeshell::Secrets 命名空间，满屏 C2039/C2065/C2974。挪到文件顶部后，Qt 头在
+// 全局作用域解析，问题消失。windows.h 的 small/min/max 宏同样在此一并处理。
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <wincrypt.h>   // CryptProtectData / CryptUnprotectData（链 Crypt32）
+#undef small
+#undef min
+#undef max
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QCryptographicHash>
+#endif
+
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN) && !defined(CUBESHELL_PLATFORM_OHOS)
+#include <dlfcn.h>       // Linux：dlopen libsecret（见下方注释）
+#endif
+
 namespace cubeshell {
 
 namespace Secrets {
@@ -177,25 +201,6 @@ bool isAvailable() { return true; }
 // 但不与其他凭据管理器客户端互读——本应用自成一体，无跨进程共享需求。
 //
 // 对应Python: keyring Windows 后端的 per-user 保护语义（无提示、当前用户可解）。
-
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QCryptographicHash>
-
-// windows.h 会 #define small/min/max 等宏。它们会污染随后被 QFile 间接引入的
-// Qt 头（qiodevice.h → qspan.h → q20type_traits.h 里的 q20::small，以及
-// std::numeric_limits<T>::max()），导致 MSVC 报 C2039/C2065/C2974 等一大片错、
-// 且符号被错误归并进外层命名空间（错误信息里满屏 cubeshell::Secrets::QSpan 即此）。
-// 对策：先 NOMINMAX 抑制 min/max 宏，包含 windows.h 后立即 #undef 漏网的 small。
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <wincrypt.h>   // CryptProtectData / CryptUnprotectData（链 Crypt32）
-#undef small
-#undef min
-#undef max
 
 namespace {
 
@@ -423,8 +428,7 @@ bool isAvailable() { return true; }
 //
 // libsecret 本身是 GLib 的 C 库，我们用 dlsym 取出所需函数与符号，避免
 // 把 glib/libsecret 的头文件依赖引进构建。
-
-#include <dlfcn.h>
+// （<dlfcn.h> 已在文件顶部、全局作用域包含。）
 
 namespace {
 

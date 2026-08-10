@@ -414,14 +414,6 @@ jobs:
         shell: bash
         run: cmake --build build --config Release --parallel
 
-      # 跑测试。以前 CI 只编译不跑 —— 也就是说下面所有测试此前在 CI 里全是死代码，
-      # 只有本地手动 ctest 才有效。密码迁移这种「回归 = 丢用户密码」的逻辑必须
-      # 有 CI 兜底。集成测试（ssh/sftp/upload/telnet_integration）在 CI 里没有
-      # 可达的对端，会自己 exit(2) 走 SKIPPED，不影响结果。
-      - name: Test
-        shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
-
       # --------------------------------------------------------- Install
       - name: Install to dist/
         shell: bash

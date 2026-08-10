@@ -4,9 +4,12 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QSaveFile>
 #include <QStandardPaths>
+
+#include "ConfigUtil.h"
 
 namespace cubeshell {
 
@@ -98,6 +101,26 @@ QString GlobalState::tunnelConfigPath()
 QString GlobalState::groupsConfigPath()
 {
     return configFilePath(QStringLiteral("groups.json"));
+}
+
+QStringList GlobalState::hardenConfigPermissions()
+{
+    // devices.json —— 设备清单（迁移完成前还含明文密码）
+    // config.dat   —— Python 版写的 pickle，明文密码，从未设过权限
+    // tunnel.json  —— 内网穿透/跳板拓扑与账号
+    // *.plain.bak  —— 迁移期的明文备份（由迁移流程自己写成 0600，这里兜底）
+    static const char *const kSensitive[] = {
+        "devices.json", "config.dat", "tunnel.json", "devices.json.plain.bak",
+    };
+    QStringList failed;
+    for (const char *name : kSensitive) {
+        const QString path = configFilePath(QLatin1String(name));
+        if (!QFileInfo::exists(path))
+            continue;
+        if (!ConfigUtil::restrictPermissions(path))
+            failed << path;
+    }
+    return failed;
 }
 
 // 对应Python: function/theme.py::MainWindow._load_current_settings (util.read_json 部分)

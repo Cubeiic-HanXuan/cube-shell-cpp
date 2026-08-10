@@ -135,6 +135,12 @@ int main(int argc, char *argv[])
     cubeshell::GlobalState &state = cubeshell::GlobalState::instance();
     state.loadTheme(locateThemeJson());
 
+    // 1b. 收敛含凭据配置文件的权限到 0600。
+    // 必须在这里做而不是只在写出时做：历史版本按 umask 建出来的是 0644，
+    // 用户磁盘上现存的那一份才是正在泄露的那一份。幂等，每次启动跑一遍。
+    for (const QString &path : cubeshell::GlobalState::hardenConfigPermissions())
+        qWarning("无法收紧配置文件权限（该卷可能不支持 POSIX 权限）: %s", qPrintable(path));
+
     // 2. 主题应用（QSS + QPalette）。对应Python: applyAppearance
     cubeshell::ThemeManager::applyTheme(&app, state.appearance());
 

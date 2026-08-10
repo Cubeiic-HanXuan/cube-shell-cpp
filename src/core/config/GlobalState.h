@@ -18,6 +18,7 @@
 
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 namespace cubeshell {
 
@@ -86,6 +87,14 @@ public:
     static QString tunnelConfigPath();
     // Convenience: configDir()/groups.json (group_manager._get_groups_file_path).
     static QString groupsConfigPath();
+
+    // 把配置目录里含凭据的文件权限收敛到 0600（幂等，启动时调一次）。
+    //
+    // 只让新写出的文件是 0600 不够：用户磁盘上**已经存在**的那一份才是正在
+    // 泄露的那一份，而它是历史版本按 umask 建出来的 0644。config.dat 尤其要紧
+    // ——Python 版往里写的是明文密码，且从未设过权限。
+    // 返回未能收敛的文件列表（正常情况为空；非 POSIX 卷上可能非空）。
+    static QStringList hardenConfigPermissions();
 
     // --- theme / language state (conf/theme.json, util.THEME equivalent) ---
 

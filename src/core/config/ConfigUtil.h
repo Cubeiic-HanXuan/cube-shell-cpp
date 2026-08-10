@@ -30,6 +30,22 @@ QJsonValue readJson(const QString &filePath, QString *errorOut = nullptr);
 bool writeJson(const QString &filePath, const QJsonValue &value,
                QString *errorOut = nullptr);
 
+// 原子写 + 把最终文件权限收敛到 0600（仅属主可读写）。
+//
+// 配置目录里的文件默认按 umask 建出来是 0644——同一台机器上的其他用户可以
+// 直接 cat。devices.json / tunnel.json 这类含连接凭据与内网拓扑的文件不该如此。
+//
+// 返回 false 只表示**数据没写成**。权限收敛失败会 qWarning 但仍返回 true：
+// 字节已经落盘了，此时报「保存失败」会误导用户去重试一次同样写得成的操作。
+// 需要确认权限是否真的收紧的调用方，自己再调一次 restrictPermissions()。
+bool writeSecure(const QString &filePath, const QByteArray &data,
+                 QString *errorOut = nullptr);
+
+// 把已存在文件的权限收敛到 0600。幂等；文件不存在时视为成功（无可收敛之物）。
+// 用于给历史遗留的 0644 文件补权限——只写新文件是不够的，用户磁盘上现存的
+// 那一份才是正在泄露的那一份。
+bool restrictPermissions(const QString &filePath, QString *errorOut = nullptr);
+
 // 对应Python: cube-shell.py::nat_lod 中的 toml.load(file)
 // Minimal TOML subset reader (see header comment). Dotted keys and [table]
 // headers become nested QVariantMap; [[name]] appends to a QVariantList.

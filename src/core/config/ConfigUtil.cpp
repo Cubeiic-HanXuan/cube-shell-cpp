@@ -48,17 +48,44 @@ bool writeJson(const QString &filePath, const QJsonValue &value, QString *errorO
         if (errorOut) *errorOut = QStringLiteral("JSON root must be object or array");
         return false;
     }
+    return writeSecure(filePath, doc.toJson(QJsonDocument::Indented), errorOut);
+}
 
+bool restrictPermissions(const QString &filePath, QString *errorOut)
+{
+    if (!QFileInfo::exists(filePath))
+        return true;    // 幂等：没有的文件无需收敛
+    const QFileDevice::Permissions want =
+        QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+    if (QFile::setPermissions(filePath, want))
+        return true;
+    // FAT32 / 网络共享等不支持 POSIX 权限的卷上会走到这里。
+    if (errorOut)
+        *errorOut = QStringLiteral("cannot restrict permissions on %1").arg(filePath);
+    return false;
+}
+
+bool writeSecure(const QString &filePath, const QByteArray &data, QString *errorOut)
+{
     QSaveFile f(filePath);
     if (!f.open(QIODevice::WriteOnly)) {
         if (errorOut) *errorOut = QStringLiteral("cannot write %1").arg(filePath);
         return false;
     }
-    f.write(doc.toJson(QJsonDocument::Indented));
+    if (f.write(data) != data.size()) {
+        f.cancelWriting();
+        if (errorOut) *errorOut = QStringLiteral("short write on %1").arg(filePath);
+        return false;
+    }
     if (!f.commit()) {
         if (errorOut) *errorOut = QStringLiteral("commit failed for %1").arg(filePath);
         return false;
     }
+    // 必须在 commit 之后。QSaveFile 走的是「临时文件 + rename」，commit 之前
+    // filePath 上要么还是旧文件、要么根本不存在，此刻设权限设的是错误的对象。
+    QString permErr;
+    if (!restrictPermissions(filePath, &permErr))
+        qWarning("%s", qPrintable(permErr));
     return true;
 }
 

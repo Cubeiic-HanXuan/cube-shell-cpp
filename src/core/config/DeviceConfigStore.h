@@ -121,7 +121,8 @@ public:
     // 无论哪种情况，落进 m_devices 的副本 password 一律清空。
     void addDevice(const DeviceEntry &entry);
 
-    bool removeDevice(const QString &name) { return m_devices.remove(name) > 0; }
+    // QHash::remove 在 Qt6 返回 bool（Qt5 是 int），直接透传；写 > 0 会触发 MSVC C4804。
+    bool removeDevice(const QString &name) { return m_devices.remove(name); }
     const DeviceEntry *find(const QString &name) const;
     int count() const { return m_devices.size(); }
     bool isEmpty() const { return m_devices.isEmpty(); }

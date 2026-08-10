@@ -31,6 +31,7 @@ set(CORE_SOURCES
     config/FrequentlyUsedCommands.cpp # port of core/frequently_used_commands.py
     config/ConfigUtil.cpp       # JSON/TOML config loading helpers
     config/Secrets.cpp          # port of keyring-backed secret storage
+    config/SecretMigration.cpp  # 明文密码 → 钥匙串的一次性迁移
 
     # --- util ---
     util/StringUtil.cpp         # port of function/util.py string helpers
@@ -195,6 +196,19 @@ if(APPLE)
         "-framework Security" "-framework CoreFoundation"
         "-framework Cocoa" "-framework AppKit" "-framework CoreServices"
     )
+endif()
+
+# Secrets.cpp 的 Windows 后端用 DPAPI（CryptProtectData/CryptUnprotectData），
+# 这两个函数在 Crypt32.dll 里，必须显式链接。
+if(WIN32)
+    target_link_libraries(cube_core PRIVATE Crypt32)
+endif()
+
+# Secrets.cpp 的 Linux 后端用 dlopen("libsecret-1.so.0") 运行期加载（见该文件
+# 注释：rockylinux:8 容器 + portable tarball 不能 link-time 依赖 libsecret）。
+# 只需链接 libdl 提供 dlopen/dlsym。
+if(UNIX AND NOT APPLE AND NOT CUBESHELL_PLATFORM_OHOS)
+    target_link_libraries(cube_core PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 if(CUBESHELL_WITH_SSH)

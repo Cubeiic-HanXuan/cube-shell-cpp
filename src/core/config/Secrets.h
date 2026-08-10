@@ -11,14 +11,23 @@
 // Backends:
 //   macOS   Security.framework (SecItemAdd/SecItemCopyMatching/SecItemDelete)
 //           — fully implemented.
-//   Windows DPAPI (CryptProtectData) + file storage — TODO(win32) stub.
-//   Linux   libsecret — TODO(linux) stub.
+//   Windows DPAPI (CryptProtectData) + 密文文件（dataDir()/secrets/），链 Crypt32。
+//   Linux   libsecret 经 dlopen 运行期加载（不 link-time，见 Secrets.cpp 注释）。
+//   OHOS    沙箱内混淆文件（QSettings IniFormat；一期，二期接 HUKS）。
 
 #include <QString>
 
 namespace cubeshell {
 
 namespace Secrets {
+
+// 本平台的后端是否真的能存取机密。
+//
+// 存在的理由：Windows/Linux 后端曾经（现在仍可能在某些环境下）是空壳，
+// 调用 storeSecret 只会 return false。把设备密码从明文 JSON 迁进钥匙串之前
+// 必须先问这个问题——后端不可用却照迁不误，等于把 21 条密码删干净。
+// 返回 false 时调用方应当**保持明文、不迁移**，而不是迁一半。
+bool isAvailable();
 
 // 对应Python: keyring.set_password(service, account, secret)
 // Creates the item or updates it in place when it already exists.

@@ -182,8 +182,20 @@ bool isAvailable() { return true; }
 #include <QFile>
 #include <QFileInfo>
 #include <QCryptographicHash>
+
+// windows.h 会 #define small/min/max 等宏。它们会污染随后被 QFile 间接引入的
+// Qt 头（qiodevice.h → qspan.h → q20type_traits.h 里的 q20::small，以及
+// std::numeric_limits<T>::max()），导致 MSVC 报 C2039/C2065/C2974 等一大片错、
+// 且符号被错误归并进外层命名空间（错误信息里满屏 cubeshell::Secrets::QSpan 即此）。
+// 对策：先 NOMINMAX 抑制 min/max 宏，包含 windows.h 后立即 #undef 漏网的 small。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <wincrypt.h>   // CryptProtectData / CryptUnprotectData（链 Crypt32）
+#undef small
+#undef min
+#undef max
 
 namespace {
 

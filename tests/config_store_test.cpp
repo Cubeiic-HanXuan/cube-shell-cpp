@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 
 #include "config/DeviceConfigStore.h"
 
@@ -79,6 +80,25 @@ static void testCrudRoundTrip()
     CHECK(reloaded.count() == store.count());
     const DeviceEntry *rw = reloaded.find(QStringLiteral("web服务器"));
     CHECK(rw && rw->username == QStringLiteral("root"));
+
+    // 这份 store 来自 config.dat（pickle），inlinePasswords 为 true ——
+    // 迁移窗口期内保存就必须继续写明文。翻闸门 + 再存一次，才是新格式。
+    QFile f0(jsonPath);
+    CHECK(f0.open(QIODevice::ReadOnly));
+    CHECK(f0.readAll().contains("\"password\""));   // 窗口期：明文仍在
+    f0.close();
+
+    store.setInlinePasswords(false);                // 迁移验证通过后翻闸门
+    CHECK(store.saveJson(jsonPath));
+
+    // 密码绝不进 JSON：直接读文件字节，不能用 loadJson 间接验证
+    //（loadJson 只认键名，手抖把 "password" 拼成 "passwrod" 它就看不出来了）。
+    QFile f(jsonPath);
+    CHECK(f.open(QIODevice::ReadOnly));
+    const QByteArray raw = f.readAll();
+    CHECK(!raw.contains("\"password\""));
+    // id 必须在：它是钥匙串里密码的唯一索引。
+    CHECK(raw.contains("\"id\""));
 }
 
 int main(int argc, char *argv[])

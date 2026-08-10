@@ -207,18 +207,19 @@ void NatDialog::onConnectClicked()
     // 对应Python: pickle.loads(config.dat)[device] 取 username/password/host
     //             /key_type/key_file（3 字段与 5 字段两种格式）
     const QString device = m_device->currentText();
-    const DeviceEntry *entry = m_store ? m_store->find(device) : nullptr;
-    if (!entry) {
+    // resolved()：内网穿透要真的建 SSH 连接，需要密码（find() 拿到的条目不带）。
+    const DeviceEntry entry = m_store ? m_store->resolved(device) : DeviceEntry{};
+    if (entry.name.isEmpty()) {
         // Python 在此抛 KeyError（槽内未捕获）；C++ 侧给出可见提示。
         QMessageBox::warning(hostWindow(), tr("错误"),
                              tr("未找到设备“%1”的连接配置。").arg(device));
         return;
     }
-    params.host = entry->host;
-    params.username = entry->username;
-    params.password = entry->password;
-    params.keyType = entry->keyType;
-    params.keyFile = entry->keyFile;
+    params.host = entry.host;
+    params.username = entry.username;
+    params.password = entry.password;
+    params.keyType = entry.keyType;
+    params.keyFile = entry.keyFile;
 
     // 显示进度对话框（对应Python: QProgressDialog(..., None, 0, 0, self)）
     closeProgress(); // C++ 特有：清掉上一轮可能残留的进度框，避免悬挂窗口

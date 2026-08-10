@@ -246,6 +246,10 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
 
     connect(m_authMethod, &QComboBox::currentIndexChanged,
             this, &AddDeviceDialog::onAuthMethodChanged);
+    // textEdited 而非 textChanged：只有用户敲键盘才算「动过密码」，
+    // setDevice 的程序性回填不算。这个区分决定了保存时要不要覆盖已存密码。
+    connect(m_password, &QLineEdit::textEdited,
+            this, [this]() { m_passwordEdited = true; });
     connect(m_browseKey, &QPushButton::clicked, this, &AddDeviceDialog::onBrowseKey);
     // 对应Python: protoCombo.currentIndexChanged.connect(self._on_protocol_changed)
     connect(m_protocol, &QComboBox::currentIndexChanged,
@@ -255,6 +259,7 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
 
 void AddDeviceDialog::setDevice(const DeviceEntry &e)
 {
+    m_id = e.id;   // 编辑既有条目：id 必须原样带回，它是钥匙串的索引
     // 先回填协议再填 host/port，避免 onProtocolChanged 覆盖实际端口。
     // 对应Python: set_protocol（cube-shell.py:6086-6088）+ domain/auth 回填
     // isSsh() 兜住 protocol 为空的旧配置。
@@ -307,11 +312,25 @@ void AddDeviceDialog::setDevice(const DeviceEntry &e)
         m_password->setText(e.password);
     }
     onAuthMethodChanged(m_authMethod->currentIndex());
+    // 回填不算用户编辑——setText 会触发 textEdited 之外的信号，但我们连的是
+    // textEdited（仅用户输入才发），这里再清一次是为了防止将来改用 textChanged。
+    m_passwordEdited = false;
+}
+
+void AddDeviceDialog::setHasStoredPassword(bool has)
+{
+    m_hasStoredPassword = has;
+    if (has && m_password->text().isEmpty())
+        m_password->setPlaceholderText(tr("已保存，留空则不修改"));
 }
 
 DeviceEntry AddDeviceDialog::device() const
 {
     DeviceEntry e;
+    // id 必须在这里赋 —— 本函数下面有 4 个提前 return（串口 / telnet+tcp /
+    // RDP / SSH-密钥），放到末尾会让 5 个协议里的 3 个拿到空 id，
+    // 密码就存不进钥匙串了。
+    e.id = m_id.isEmpty() ? DeviceConfigStore::newDeviceId() : m_id;
     e.name = m_name->text().trimmed();
 #ifdef CUBESHELL_WITH_SERIAL
     if (serialSelected()) {
@@ -544,14 +563,22 @@ bool AddDeviceDialog::validate(QString *err) const
 #ifdef CUBESHELL_WITH_RDP
     if (rdpSelected()) {
         // 对应Python: 'RDP 连接需要提供密码！'（cube-shell.py:6109-6111）
-        if (m_password->text().isEmpty()) { *err = tr("RDP 连接需要提供密码。"); return false; }
+        // m_hasStoredPassword：密码已在钥匙串里时密码框本就是空的，
+        // 此时仍强制要求填写，等于所有已有 RDP 设备都不能改端口/域名。
+        if (m_password->text().isEmpty() && !m_hasStoredPassword) {
+            *err = tr("RDP 连接需要提供密码。");
+            return false;
+        }
         return true;
     }
 #endif
     if (m_authMethod->currentIndex() == 1) {
         if (m_keyFile->text().trimmed().isEmpty()) { *err = tr("请选择私钥文件。"); return false; }
     } else {
-        if (m_password->text().isEmpty()) { *err = tr("请输入密码（或切换为私钥登录）。"); return false; }
+        if (m_password->text().isEmpty() && !m_hasStoredPassword) {
+            *err = tr("请输入密码（或切换为私钥登录）。");
+            return false;
+        }
     }
     return true;
 }

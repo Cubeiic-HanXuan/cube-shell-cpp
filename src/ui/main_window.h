@@ -96,6 +96,8 @@ private:
     void setupBastion();
 
     void loadDevices();
+    // 明文密码 → 钥匙串的一次性迁移（幂等；已迁移过则直接返回）。
+    void migrateSecrets();
     void refreshDeviceList();
     bool saveDevices();
 

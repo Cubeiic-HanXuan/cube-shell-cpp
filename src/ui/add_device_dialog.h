@@ -33,7 +33,21 @@ public:
     // Pre-fill for editing an existing entry.
     void setDevice(const DeviceEntry &entry);
     // The edited entry (valid after accept()).
+    //
+    // 注意 e.password 的语义：为空表示「用户没有输入新密码」，**不是**「密码被
+    // 清空」。密码不再随条目落盘（见 DeviceConfigStore 的说明），编辑已有设备时
+    // 密码框一开始就是空的，把空串当成"清空"会让人一改端口就丢密码。
+    // 要判断用户是否真的动过密码，用 passwordEdited()。
     DeviceEntry device() const;
+
+    // 用户是否在本次对话框里动过密码框。
+    // 只有它为 true 时调用方才应该去改存储里的密码。
+    bool passwordEdited() const { return m_passwordEdited; }
+
+    // 告知对话框：这个设备在钥匙串里已经存有密码。
+    // 于是密码框可以留空（占位符提示"留空则不修改"），校验也不再强制要求填写
+    // ——否则迁移一完成，所有 RDP 设备都会因为密码框是空的而无法保存。
+    void setHasStoredPassword(bool has);
 
     void accept() override;
 
@@ -79,6 +93,12 @@ private:
     // 端口框里当前放的是哪个协议的默认值。切协议时据此判断"用户没改过端口"，
     // 从而可以安全地换成新协议的默认端口（用户手填过的端口不动）。
     QString m_portDefaultFor;
+
+    // 编辑态：钥匙串里已有密码 / 用户动过密码框。见 passwordEdited() 的说明。
+    bool m_hasStoredPassword = false;
+    bool m_passwordEdited = false;
+    // 正在编辑的条目 id。新建设备时为空，由 device() 现分配。
+    QString m_id;
 
 #ifdef CUBESHELL_WITH_RDP
     // RDP 专用控件。对应Python: _inject_protocol_fields（cube-shell.py:5989-6084）

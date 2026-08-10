@@ -60,6 +60,7 @@
 #include "dialogs/TunnelConfigWidget.h"
 
 #include "config/GlobalState.h"
+#include "config/SecretMigration.h"
 #include "ai/AiChatPanel.h"
 #include "ai/CommandConfirmDialog.h"
 #include "ai/ServerProfileBuilder.h"
@@ -443,6 +444,8 @@ void MainWindow::setupMenus()
             if (m_store.load(path, &err)) {
                 m_configPath = path;
                 m_jsonPath = QFileInfo(path).absolutePath() + QStringLiteral("/devices.json");
+                // 手动打开的 config.dat 里必然是明文密码，同样要迁移。
+                migrateSecrets();
                 refreshDeviceList();
             } else {
                 QMessageBox::warning(this, tr("加载失败"), err);
@@ -1331,18 +1334,19 @@ void MainWindow::setupTunnels()
     m_tunnelPool->loadConfig();
     m_tunnelPool->setCredentialResolver(
         [this](const QString &deviceName, TunnelSpec &spec, QString &error) {
-            const DeviceEntry *e = m_store.find(deviceName);
-            if (!e) {
+            // resolved()：隧道要真的建 SSH 连接，需要密码。
+            const DeviceEntry e = m_store.resolved(deviceName);
+            if (e.name.isEmpty()) {
                 error = tr("未找到设备“%1”").arg(deviceName);
                 return false;
             }
-            const HostPort hp = e->hostPort();
+            const HostPort hp = e.hostPort();
             spec.sshHost = hp.host;
             spec.sshPort = hp.port;
-            spec.sshUser = e->username;
-            spec.sshPassword = e->password;
-            spec.keyType = e->keyType;
-            spec.keyFile = e->keyFile;
+            spec.sshUser = e.username;
+            spec.sshPassword = e.password;
+            spec.keyType = e.keyType;
+            spec.keyFile = e.keyFile;
             return true;
         });
 }
@@ -1437,6 +1441,9 @@ void MainWindow::loadDevices()
                << QDir::currentPath() + QStringLiteral("/config.dat")
                << QDir::currentPath() + QStringLiteral("/../conf/config.dat");
 
+    m_jsonPath = GlobalState::configFilePath(QStringLiteral("devices.json"));
+    bool loaded = false;
+
     for (const QString &path : candidates) {
         if (!QFileInfo::exists(path))
             continue;
@@ -1444,18 +1451,71 @@ void MainWindow::loadDevices()
         if (m_store.load(path, &err)) {
             m_configPath = path;
             m_jsonPath = QFileInfo(path).absolutePath() + QStringLiteral("/devices.json");
-            // If a JSON store already exists (newer), prefer it.
-            if (QFileInfo::exists(m_jsonPath)) {
-                DeviceConfigStore json;
-                if (json.loadJson(m_jsonPath))
-                    m_store = json;
-            }
-            refreshDeviceList();
-            return;
+            loaded = true;
+            break;
         }
     }
-    m_jsonPath = GlobalState::configFilePath(QStringLiteral("devices.json"));
-    m_deviceList->setStatus(tr("未找到 config.dat — 请使用“文件 ▸ 打开 config.dat…”"));
+
+    // JSON 存在就优先用它（更新）。
+    //
+    // 这个分支以前嵌在上面的 config.dat 循环里，于是「有 devices.json 但没有
+    // config.dat」的用户什么都读不到。迁移之后这条路径变得要命：devices.json
+    // 里存的 id 是钥匙串密码的唯一索引，读不到它就等于所有密码都成了孤儿。
+    if (QFileInfo::exists(m_jsonPath)) {
+        DeviceConfigStore json;
+        if (json.loadJson(m_jsonPath)) {
+            m_store = json;
+            loaded = true;
+        }
+    }
+
+    if (!loaded) {
+        m_deviceList->setStatus(tr("未找到 config.dat — 请使用“文件 ▸ 打开 config.dat…”"));
+        return;
+    }
+
+    migrateSecrets();
+    refreshDeviceList();
+}
+
+// 明文密码 → 钥匙串的一次性迁移。详见 core/config/SecretMigration.h。
+void MainWindow::migrateSecrets()
+{
+    if (!m_store.needsMigration())
+        return;
+
+    const SecretMigration::Result r = SecretMigration::run(m_store, m_jsonPath);
+    switch (r.status) {
+    case SecretMigration::Result::NotNeeded:
+        break;
+    case SecretMigration::Result::Unsupported:
+        // Windows/Linux 后端补齐前会走到这里。密码仍是明文，但文件权限已经
+        // 收到 0600。只在状态栏说一句——每次启动弹一个用户改不了的模态框
+        // 没有意义。
+        setStatus(tr("当前平台暂不支持系统密钥库，设备密码仍以明文保存"
+                     "（文件权限已限制为仅本人可读）"));
+        break;
+    case SecretMigration::Result::Migrated:
+        if (r.migrated > 0) {
+            QMessageBox::information(
+                this, tr("密码已迁移"),
+                tr("已将 %1 个设备密码从配置文件迁入系统钥匙串，"
+                   "配置文件中不再保存明文密码。\n\n"
+                   "迁移前的配置已备份到：\n%2\n\n"
+                   "确认各设备均可正常连接后，建议手动删除该备份文件"
+                   "（它仍含明文密码）。")
+                    .arg(r.migrated).arg(r.backupPath));
+        }
+        break;
+    case SecretMigration::Result::Failed:
+        // 失败时明文原样保留，功能不受影响，下次启动会再试一次。
+        QMessageBox::warning(
+            this, tr("密码迁移未完成"),
+            tr("未能将设备密码迁入系统钥匙串：%1\n\n"
+               "配置文件中的密码保持不变，设备仍可正常连接，"
+               "下次启动会自动重试。").arg(r.error));
+        break;
+    }
 }
 
 void MainWindow::refreshDeviceList()
@@ -1474,6 +1534,13 @@ bool MainWindow::saveDevices()
         QMessageBox::warning(this, tr("保存失败"), err);
         return false;
     }
+    // 密码与设备条目必须一起落盘：只写 JSON 会让新增设备连不上（钥匙串里没有
+    // 它的密码），只写钥匙串会在下次启动时留下对不上号的孤儿。
+    if (!m_store.flushSecrets(&err)) {
+        QMessageBox::warning(this, tr("保存密码失败"),
+                             tr("设备已保存，但密码未能写入系统钥匙串：%1").arg(err));
+        return false;
+    }
     setStatus(tr("已保存 %1 个设备 → %2").arg(m_store.count()).arg(m_jsonPath));
     return true;
 }
@@ -1483,6 +1550,8 @@ void MainWindow::addDevice()
     AddDeviceDialog dlg(this);
     if (dlg.exec() != QDialog::Accepted)
         return;
+    // 新建设备：dlg.device() 已在构造时分配好 id，密码随条目带进来，
+    // addDevice 负责把它搬进密码表。
     m_store.addDevice(dlg.device());
     refreshDeviceList();
     saveDevices();
@@ -1490,16 +1559,32 @@ void MainWindow::addDevice()
 
 void MainWindow::editDevice(const QString &name)
 {
-    const DeviceEntry *e = m_store.find(name);
-    if (!e)
+    const DeviceEntry *found = m_store.find(name);
+    if (!found)
         return;
+    // 值副本，不是指针。find() 返回的是哈希内部地址，下面的 removeDevice()
+    // 一执行就失效，继续用就是 use-after-free。
+    const DeviceEntry old = *found;
+
     AddDeviceDialog dlg(this);
-    dlg.setDevice(*e);
+    dlg.setDevice(old);
+    // 钥匙串里已有密码时，密码框允许留空（校验放行、占位符提示）。
+    // 不告诉对话框这件事，迁移一完成所有 RDP 设备就都保存不了了。
+    dlg.setHasStoredPassword(m_store.hasPassword(old.id));
     if (dlg.exec() != QDialog::Accepted)
         return;
+
+    DeviceEntry edited = dlg.device();
+    edited.id = old.id;    // 改名也好改协议也好，id 终生不变——它是密码的索引
+
     // Name may have changed: remove the old key, insert the new.
     m_store.removeDevice(name);
-    m_store.addDevice(dlg.device());
+    m_store.addDevice(edited);
+    // 只有用户真的动过密码框才覆盖。空密码框是「没改」而不是「清空」，
+    // 照单全收会让人一改端口就把密码丢了。
+    if (dlg.passwordEdited())
+        m_store.setPassword(old.id, edited.password);
+
     refreshDeviceList();
     saveDevices();
 }
@@ -1510,6 +1595,10 @@ void MainWindow::removeDevice(const QString &name)
                               tr("确定要删除“%1”吗？此操作无法恢复。").arg(name))
             != QMessageBox::Yes)
         return;
+    // 先清密码再删条目：flushSecrets 只保留仍被引用的 id，
+    // 顺序反了这条密码就会在钥匙串里变成永远清理不掉的孤儿。
+    if (const DeviceEntry *e = m_store.find(name))
+        m_store.setPassword(e->id, QString());
     m_store.removeDevice(name);
     refreshDeviceList();
     saveDevices();
@@ -1524,10 +1613,17 @@ void MainWindow::exportDevices()
     if (path.isEmpty())
         return;
     QString err;
-    if (m_store.saveJson(path, &err))
-        setStatus(tr("已导出 %1 个设备 → %2").arg(m_store.count()).arg(path));
-    else
+    // exportJson 而非 saveJson：导出物要给人拷来拷去，不带密码也不带 id。
+    if (m_store.exportJson(path, &err)) {
+        setStatus(tr("已导出 %1 个设备 → %2（不含密码）").arg(m_store.count()).arg(path));
+        QMessageBox::information(
+            this, tr("导出完成"),
+            tr("已导出 %1 个设备到：\n%2\n\n"
+               "出于安全考虑，导出文件不包含密码。\n"
+               "在其他机器导入后需要重新输入密码。").arg(m_store.count()).arg(path));
+    } else {
         QMessageBox::warning(this, tr("导出失败"), err);
+    }
 }
 
 // 对应Python: cube-shell.py::import_config（导入设备配置 Shift+Ctrl+I）
@@ -1549,11 +1645,38 @@ void MainWindow::importDevices()
         QMessageBox::warning(this, tr("导入失败"), err);
         return;
     }
-    for (const DeviceEntry &e : imported.devices())
+
+    int renamed = 0;
+    for (const DeviceEntry &src : imported.devices()) {
+        DeviceEntry e = src;
+        // 外部文件的 id 一律不可信：同一份导出文件导入两次就会撞 id，
+        // 手写的文件可能压根没有。清空让 addDevice 现分配一个。
+        const QString importedId = e.id;
+        e.id.clear();
+        // 重名不再静默覆盖。以前覆盖的只是一条配置；现在会让原设备的密码
+        // 在钥匙串里变成孤儿，而新设备又没有密码——坏得无声无息。
+        if (m_store.find(e.name)) {
+            int n = 2;
+            QString candidate;
+            do {
+                candidate = tr("%1 (导入 %2)").arg(src.name).arg(n++);
+            } while (m_store.find(candidate));
+            e.name = candidate;
+            ++renamed;
+        }
+        // cachedPassword 而非 resolved：只取导入文件自带的密码，
+        // 不去解锁本机钥匙串（那里按 importedId 查也只会查到别人的东西）。
+        e.password = imported.cachedPassword(importedId);
         m_store.addDevice(e);
+    }
     refreshDeviceList();
     saveDevices();
-    setStatus(tr("已导入 %1 个设备").arg(imported.count()));
+    if (renamed > 0) {
+        setStatus(tr("已导入 %1 个设备（%2 个重名已自动改名）")
+                      .arg(imported.count()).arg(renamed));
+    } else {
+        setStatus(tr("已导入 %1 个设备").arg(imported.count()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2241,8 +2364,12 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
 {
     // The list item only carries name/host; pull the full entry (credentials)
     // from the store by name.
-    const DeviceEntry *full = m_store.find(stub.name);
-    const DeviceEntry device = full ? *full : stub;
+    //
+    // resolved() 而非 find()：设备列表里的条目不带密码（密码只在钥匙串里），
+    // 这里是「真要连了」的时刻，才按需解锁取出来。找不到时回落 stub，
+    // 与原先 find() 返回 nullptr 的兜底行为一致。
+    const DeviceEntry full = m_store.resolved(stub.name);
+    const DeviceEntry device = full.name.isEmpty() ? stub : full;
 
     // --- 协议分发 ---
     // 五种协议，按 device.protocol 显式分流。方法名叫 openSshSession 是历史

@@ -325,6 +325,19 @@ target_link_libraries(update_checker_test PRIVATE
     cube_core
 )
 
+# 明文密码 → 钥匙串的迁移正确性测试。跑真实钥匙串后端（macOS 上一个聚合条目）。
+# 重点不是「能迁移」，而是「迁移失败时一条密码都不会少」。
+qt_add_executable(secrets_migration_test
+    secrets_migration_test.cpp
+)
+target_include_directories(secrets_migration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(secrets_migration_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # 串口模块：换行转换纯函数 + SerialSettings 默认值 + 端口枚举 +
 # 下拉框取值解析（含手输回归用例）+ DeviceEntry 串口字段 JSON 往返
 # （无硬件也能全部跑过）。
@@ -409,6 +422,7 @@ add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
 add_test(NAME terminal_search_test COMMAND terminal_search_test)
 add_test(NAME update_checker_test COMMAND update_checker_test)
+add_test(NAME secrets_migration_test COMMAND secrets_migration_test)
 if(CUBESHELL_WITH_SERIAL)
     add_test(NAME serial_test COMMAND serial_test)
 endif()

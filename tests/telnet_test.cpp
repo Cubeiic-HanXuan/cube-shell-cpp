@@ -606,6 +606,10 @@ static void testDeviceEntryRoundTrip()
     store.addDevice(sshDev);
     QString err;
     CHECK(store.saveJson(jsonPath, &err));
+    // saveJson 不写密码后，resolved() 的唯一来源就是钥匙串。
+    // 生产路径里 saveJson 之后总是紧跟 flushSecrets（saveDevices 就是这么做的），
+    // 这里也得一样，否则等于在验证一个应用里不存在的中间态。
+    CHECK(store.flushSecrets(&err));
 
     DeviceConfigStore reloaded;
     CHECK(reloaded.loadJson(jsonPath, &err));
@@ -624,7 +628,10 @@ static void testDeviceEntryRoundTrip()
         CHECK(got->rxImplicitCr == false);
 
         // 持久化形态 → 运行时形态的映射。
-        const TcpSettings s = netSettingsFromDevice(*got);
+        // 密码要经 resolved() 取：store.addDevice() 把密码放进了密码表，
+        // find() 按新不变量返回的条目是不带密码的。
+        const DeviceEntry resolvedDev = reloaded.resolved(QStringLiteral("交换机"));
+        const TcpSettings s = netSettingsFromDevice(resolvedDev);
         CHECK(s.mode == QStringLiteral("telnet"));
         CHECK(s.host == QStringLiteral("10.0.0.1"));
         CHECK(s.port == 2323);

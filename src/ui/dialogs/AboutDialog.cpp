@@ -7,8 +7,6 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 
-#include "config/GlobalState.h"
-
 namespace cubeshell {
 
 // 对应Python: function/about.py::AboutDialog.init_ui
@@ -28,10 +26,12 @@ AboutDialog::AboutDialog(QWidget *parent)
     logo->setAlignment(Qt::AlignCenter);
     layout->addWidget(logo);
 
-    // 版本号取 theme.json 的 "version"（对应 util.THEME['version']）。
-    QString version = GlobalState::instance().theme().value(QStringLiteral("version")).toString();
+    // 版本号取编译进二进制的 PROJECT_VERSION（main.cpp 里 setApplicationVersion）。
+    // 不再读 theme.json 的 "version"：该配置与 Python 版共用，值可能缺失或过期，
+    // 显示出来会和实际运行的版本对不上。
+    QString version = QApplication::applicationVersion();
     if (version.isEmpty())
-        version = QApplication::applicationVersion();
+        version = QStringLiteral(CUBESHELL_VERSION);
     auto *versionLabel = new QLabel(
         tr("版本：  %1\n\n作者：     寒暄\n\n公众号：  IT技术小屋").arg(version), this);
     versionLabel->setAlignment(Qt::AlignCenter);

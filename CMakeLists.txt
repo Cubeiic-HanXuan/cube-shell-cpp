@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(cube-shell
-    VERSION 3.2.0
+    VERSION 3.1.1
     DESCRIPTION "CubeShell - C++/Qt6 rewrite of the Python terminal/SSH/RDP/AI client"
     LANGUAGES CXX
 )
@@ -9,6 +9,13 @@ project(cube-shell
 # ---------------------------------------------------------------------------
 # Global settings
 # ---------------------------------------------------------------------------
+
+# 版本号编进二进制，作为「本机运行版本」的唯一权威来源。
+# 更新检查与关于对话框都读它，而不是 conf/theme.json 的 "version"——
+# 该配置文件与 Python 版共用，键可能缺失（老配置）或停在 Python 版的版本号，
+# 两种情况都会让更新检查得出错误结论。
+add_compile_definitions(CUBESHELL_VERSION="${PROJECT_VERSION}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

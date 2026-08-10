@@ -312,6 +312,19 @@ target_link_libraries(terminal_search_test PRIVATE
     qtermwidget
 )
 
+# 更新检查：仓库地址、版本号解析/比较、Release JSON 解析、平台 asset 匹配
+# （纯逻辑，不发起网络请求）。
+qt_add_executable(update_checker_test
+    update_checker_test.cpp
+)
+target_include_directories(update_checker_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(update_checker_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # 串口模块：换行转换纯函数 + SerialSettings 默认值 + 端口枚举 +
 # 下拉框取值解析（含手输回归用例）+ DeviceEntry 串口字段 JSON 往返
 # （无硬件也能全部跑过）。
@@ -395,6 +408,7 @@ endif()
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
 add_test(NAME terminal_search_test COMMAND terminal_search_test)
+add_test(NAME update_checker_test COMMAND update_checker_test)
 if(CUBESHELL_WITH_SERIAL)
     add_test(NAME serial_test COMMAND serial_test)
 endif()

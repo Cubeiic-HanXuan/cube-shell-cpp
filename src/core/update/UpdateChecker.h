@@ -56,12 +56,15 @@ class UpdateChecker : public QObject {
     Q_OBJECT
 public:
     // 对应Python: github_api.GITHUB_API / RELEASE_PAGE / USER_AGENT
+    // 指向 C++ 重写版仓库 cube-shell-cpp。老仓库 cube-shell 是 Python 版，
+    // 最新 tag 停在 V2.8.0，资产命名也不同（cube-shell-<os>-<arch>.tar.xz），
+    // 继续指过去会把 3.x 用户往回推 2.8.0。
     static constexpr const char *kGitHubApi =
-        "https://api.github.com/repos/Cubeiic-HanXuan/cube-shell/releases/latest";
+        "https://api.github.com/repos/Cubeiic-HanXuan/cube-shell-cpp/releases/latest";
     static constexpr const char *kReleasePage =
-        "https://github.com/Cubeiic-HanXuan/cube-shell/releases/latest";
+        "https://github.com/Cubeiic-HanXuan/cube-shell-cpp/releases/latest";
     static constexpr const char *kUserAgent =
-        "cube-shell-updater (+https://github.com/Cubeiic-HanXuan/cube-shell)";
+        "cube-shell-updater (+https://github.com/Cubeiic-HanXuan/cube-shell-cpp)";
 
     explicit UpdateChecker(QObject *parent = nullptr);
 

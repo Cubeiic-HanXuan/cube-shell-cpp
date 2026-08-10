@@ -2675,6 +2675,16 @@ void MainWindow::showLinuxCommands()
 // 更新检查
 // ---------------------------------------------------------------------------
 
+// 本机运行版本号 —— 取编译进二进制的 PROJECT_VERSION。
+// 刻意不读 theme.json 的 "version"：该文件与 Python 版共用配置目录，
+// 老配置里根本没有这个键（退化成 "0" → 每次都误报有新版本），
+// 或者停在 Python 版的 2.8.0（→ 把 3.x 用户往回推）。
+static QString localAppVersion()
+{
+    const QString v = QCoreApplication::applicationVersion();
+    return v.isEmpty() ? QStringLiteral(CUBESHELL_VERSION) : v;
+}
+
 // 手动触发检查更新（帮助菜单项 + 关于对话框按钮共用入口）。
 // 对应Python: cube-shell.py::check_for_update + _on_update_checked
 void MainWindow::checkForUpdates()
@@ -2696,10 +2706,8 @@ void MainWindow::checkForUpdates()
         });
         connect(m_updateChecker, &UpdateChecker::noUpdateAvailable, this, [this]() {
             setStatus(QString());
-            const QString local = GlobalState::instance().theme()
-                                      .value(QStringLiteral("version")).toString();
             QMessageBox::information(this, tr("检查更新"),
-                                     tr("已是最新版本(v%1)。").arg(local));
+                                     tr("已是最新版本(v%1)。").arg(localAppVersion()));
         });
         connect(m_updateChecker, &UpdateChecker::checkFailed, this,
                 [this](const QString &error) {
@@ -2710,9 +2718,7 @@ void MainWindow::checkForUpdates()
     if (m_updateChecker->isChecking())
         return;   // 防重复触发，对应Python: _update_worker.isRunning() 判断
     setStatus(tr("正在检查更新…"));
-    const QString local = GlobalState::instance().theme()
-                              .value(QStringLiteral("version")).toString();
-    m_updateChecker->checkForUpdates(local.isEmpty() ? QStringLiteral("0") : local);
+    m_updateChecker->checkForUpdates(localAppVersion());
 }
 
 // ---------------------------------------------------------------------------

@@ -121,6 +121,9 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("cube-shell"));
     QApplication::setOrganizationName(QStringLiteral("CubeShell"));
+    // 版本号来自 CMake 的 PROJECT_VERSION（见根 CMakeLists 的 CUBESHELL_VERSION）。
+    // 更新检查/关于对话框都以此为准，不读 theme.json 的 "version"。
+    QApplication::setApplicationVersion(QStringLiteral(CUBESHELL_VERSION));
 #ifndef Q_OS_MACOS
     // Linux/Windows: 从编译资源设置窗口/任务栏图标。
     // macOS: 由 bundle 的 Info.plist → logo.icns 处理 Dock 图标，不可在此覆盖。

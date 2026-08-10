@@ -40,6 +40,14 @@
     "supports_thinking": false
   },
   {
+    "key": "kimi",
+    "name": "Kimi code",
+    "base_url": "https://api.kimi.com/coding/v1",
+    "anthropic_base_url": "https://api.kimi.com/coding",
+    "models": ["k3", "kimi-for-coding", "kimi-for-coding-highspeed", "k3-256k"],
+    "supports_thinking": false
+  },
+  {
     "key": "spark",
     "name": "讯飞星火",
     "base_url": "https://spark-api-open.xf-yun.com/v1",

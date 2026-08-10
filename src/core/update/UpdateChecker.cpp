@@ -134,12 +134,21 @@ struct PlatformRule {
     QStringList archKw;
 };
 
+// exts 的顺序即偏好顺序，首个是「首选格式」，评分时额外 +2。
+// 顺序按 cube-shell-cpp 的实际发布物排：macOS 发 .dmg，Linux 发 .tar.gz，
+// Windows 发 .zip（资产名形如 cube-shell-3.2.0-<os>-<arch>.<ext>）。
 static bool currentPlatformRule(PlatformRule *out)
 {
     const QString arch = QSysInfo::currentCpuArchitecture(); // x86_64 / arm64 / i386 / arm
 #if defined(Q_OS_WIN)
     if (arch == QLatin1String("x86_64")) {
         *out = {{"windows", "win", "win64"}, {".zip", ".exe"}, {"x86_64", "x64", "amd64"}};
+        return true;
+    }
+    if (arch == QLatin1String("arm64")) {
+        // Windows on ARM：发布物有 cube-shell-<ver>-windows-arm64.zip，
+        // 缺这一支会让 ARM 版 Windows 永远匹配不到 asset,只能退回 Release 页。
+        *out = {{"windows", "win"}, {".zip", ".exe"}, {"arm64", "aarch64"}};
         return true;
     }
     if (arch == QLatin1String("i386")) {
@@ -149,25 +158,25 @@ static bool currentPlatformRule(PlatformRule *out)
     return false;
 #elif defined(Q_OS_MACOS)
     if (arch == QLatin1String("arm64")) {
-        *out = {{"macos", "mac", "darwin"}, {".zip", ".dmg"}, {"arm64", "aarch64", "apple"}};
+        *out = {{"macos", "mac", "darwin"}, {".dmg", ".zip"}, {"arm64", "aarch64", "apple"}};
         return true;
     }
     if (arch == QLatin1String("x86_64")) {
-        *out = {{"macos", "mac", "darwin"}, {".zip", ".dmg"}, {"x86_64", "x64", "amd64", "intel"}};
+        *out = {{"macos", "mac", "darwin"}, {".dmg", ".zip"}, {"x86_64", "x64", "amd64", "intel"}};
         return true;
     }
     return false;
 #elif defined(Q_OS_LINUX)
     if (arch == QLatin1String("x86_64")) {
-        *out = {{"linux"}, {".tar.xz", ".tar.gz"}, {"x86_64", "x64", "amd64"}};
+        *out = {{"linux"}, {".tar.gz", ".tar.xz"}, {"x86_64", "x64", "amd64"}};
         return true;
     }
     if (arch == QLatin1String("arm64")) {
-        *out = {{"linux"}, {".tar.xz", ".tar.gz"}, {"aarch64", "arm64"}};
+        *out = {{"linux"}, {".tar.gz", ".tar.xz"}, {"aarch64", "arm64"}};
         return true;
     }
     if (arch.startsWith(QLatin1String("arm"))) {
-        *out = {{"linux"}, {".tar.xz", ".tar.gz"}, {"armv7", "arm", "armhf"}};
+        *out = {{"linux"}, {".tar.gz", ".tar.xz"}, {"armv7", "arm", "armhf"}};
         return true;
     }
     return false;

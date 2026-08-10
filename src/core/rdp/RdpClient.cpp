@@ -6,7 +6,6 @@
 #include <QCoreApplication>
 #include <QProcess>
 #include <QStandardPaths>
-#include <QUrl>
 
 // winsock2.h 必须早于任何 windows.h（FreeRDP/WinPR 头会间接引入），
 // 否则 winsock.h 先被拉进来会与 winsock2 的宏/结构体定义冲突。
@@ -210,39 +209,11 @@ RdpHostPort normalizeRdpHost(const QString &rawHost, int defaultPort)
 }
 
 // ---------------------------------------------------------------------------
-// buildRdpUrl
+// buildRdpUrl —— 已删除
 // ---------------------------------------------------------------------------
-// 对应Python: core/rdp/rdp_client.py::build_rdp_url
-QString buildRdpUrl(const RdpSettings &settings, const QString &auth)
-{
-    const QString scheme = auth == QLatin1String("ntlm")
-        ? QStringLiteral("rdp+ntlm-password")
-        : QStringLiteral("rdp");
-
-    QString userinfo;
-    if (!settings.username.isEmpty()) {
-        const QString user = settings.domain.isEmpty()
-            ? settings.username
-            : settings.domain + QLatin1Char('\\') + settings.username;
-        // 保留反斜杠（DOMAIN\user 形式），其余按 userinfo 规则转义
-        userinfo = QString::fromUtf8(
-            QUrl::toPercentEncoding(user, QByteArrayLiteral("\\")));
-        if (!settings.password.isEmpty()) {
-            userinfo += QLatin1Char(':')
-                + QString::fromUtf8(QUrl::toPercentEncoding(settings.password));
-        }
-        userinfo += QLatin1Char('@');
-    }
-
-    const RdpHostPort target = normalizeRdpHost(settings.host, settings.port);
-    QString host = target.host;
-    // 裸 IPv6 地址加方括号
-    if (host.count(QLatin1Char(':')) >= 2 && !host.startsWith(QLatin1Char('[')))
-        host = QLatin1Char('[') + host + QLatin1Char(']');
-
-    return QStringLiteral("%1://%2%3:%4").arg(scheme, userinfo, host,
-                                              QString::number(target.port));
-}
+// 原实现把明文密码 percent-encode 进 rdp:// URL（唯一调用点是 macOS `open`
+// 兜底），属不安全的死代码，随 RDP 命令行密码泄露修复一并移除。
+// 对应Python: core/rdp/rdp_client.py::build_rdp_url（同样不应再使用）
 
 // ---------------------------------------------------------------------------
 // FreeRDP 后端（find_package(FreeRDP) 命中时编译）
@@ -999,12 +970,13 @@ QString RdpClient::resolveCommandLineArgs(QStringList *args) const
         // 无法携带密码；`full address=s:` 是 .rdp 文件语法，open 不识别）
         *args << QStringLiteral("rdp://") + hostPort;
     } else {
-        // xfreerdp /v:host:port /u:user /p:pwd /d:domain /size:WxH /cert:ignore
+        // xfreerdp /v:host:port /u:user /d:domain /size:WxH /cert:ignore
+        // 密码绝不放命令行：/p:%1 会让密码在整个连接期间对同机任意用户的
+        // `ps -ef` 可见。FreeRDP 官方推荐用 /from-stdin:force 从 stdin 读密码
+        //（连接前一次性读入），见 connectToHost() 里 start() 后的写管道。
         *args << QStringLiteral("/v:%1").arg(hostPort);
         if (!m_settings.username.isEmpty())
             *args << QStringLiteral("/u:%1").arg(m_settings.username);
-        if (!m_settings.password.isEmpty())
-            *args << QStringLiteral("/p:%1").arg(m_settings.password);
         if (!m_settings.domain.isEmpty())
             *args << QStringLiteral("/d:%1").arg(m_settings.domain);
         if (m_settings.fullscreen)
@@ -1013,9 +985,20 @@ QString RdpClient::resolveCommandLineArgs(QStringList *args) const
             *args << QStringLiteral("/size:%1x%2").arg(m_settings.width)
                                                   .arg(m_settings.height);
         *args << QStringLiteral("/cert:ignore") << QStringLiteral("+clipboard");
+        if (!m_settings.password.isEmpty())
+            *args << QStringLiteral("/from-stdin:force");
     }
 #endif
     return program;
+}
+
+QStringList RdpClient::commandLineArgsForTest() const
+{
+    QStringList args;
+    const QString program = resolveCommandLineArgs(&args);
+    if (program.isEmpty())
+        return {};
+    return QStringList{program} + args;
 }
 
 void RdpClient::setState(State state)
@@ -1110,6 +1093,14 @@ void RdpClient::connectToHost(const RdpSettings &settings)
                 emit disconnected();
             });
     m_process->start(program, args);
+    // 密码经 stdin 传给 xfreerdp（/from-stdin:force 在连接前读一行密码）。
+    // 只写一行——用户名/域已通过 /u: /d: 提供，FreeRDP 不会再去 stdin 读它们，
+    // 多写只会留在管道里没人消费。写完立即关写端，避免进程挂起等输入。
+    if (!m_settings.password.isEmpty()) {
+        m_process->write(m_settings.password.toUtf8());
+        m_process->write("\n");
+        m_process->closeWriteChannel();
+    }
 #endif
 }
 

@@ -72,10 +72,8 @@ struct RdpHostPort {
 // 协商之前，与 NLA/TLS 配置无关，故所有入口统一在此收敛。
 RdpHostPort normalizeRdpHost(const QString &rawHost, int defaultPort = 3389);
 
-// 对应Python: core/rdp/rdp_client.py::build_rdp_url
-// 构造 rdp[+ntlm-password]://[domain\user[:pwd]@]host:port URL（密码
-// percent-encoding，IPv6 主机加方括号）。C++ 侧仅用于日志/诊断展示。
-QString buildRdpUrl(const RdpSettings &settings, const QString &auth = QStringLiteral("ntlm"));
+// （buildRdpUrl 已删除：唯一用途是把明文密码 percent-encode 进 URL，
+//  属不安全的死代码，无任何调用点。）
 
 class RdpClient : public QObject {
     Q_OBJECT
@@ -96,6 +94,10 @@ public:
 
     State state() const { return m_state; }
     RdpSettings settings() const { return m_settings; }
+
+    // 命令行后端的完整参数（program + args），供测试断言命令行不含明文密码。
+    // 仅在 CommandLine 后端有值；FreeRDP 库后端或解析不到客户端时返回空。
+    QStringList commandLineArgsForTest() const;
 
     // 对应Python: RDPInterfaceThread.start（异步建连，结果经信号回报）
     void connectToHost(const RdpSettings &settings);

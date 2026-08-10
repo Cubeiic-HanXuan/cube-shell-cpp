@@ -5,7 +5,7 @@
 //   - WindowsIntegration : 平台支持判定（非 Windows 下 stub 语义）
 //   - UrlSchemeRegistrar : 默认 scheme 集合 / isRegistered 不崩不写
 //   - PlatformIntegration: 门面按平台分发与底层一致
-// CUBESHELL_WITH_RDP=ON 时额外覆盖 buildRdpUrl（对应 Python build_rdp_url）。
+// CUBESHELL_WITH_RDP=ON 时额外覆盖 RDP 命令行参数不含明文密码。
 //
 // 刻意**不**调用 install/register：那些会真实改动用户环境（~/Library/Services、
 // HKCU 注册表、~/.local/share/applications），单测只做只读探测。
@@ -136,39 +136,7 @@ void testPlatformIntegrationFacade()
 #ifdef CUBESHELL_WITH_RDP
 void testRdp()
 {
-    std::printf("RdpClient (buildRdpUrl)\n");
-    cubeshell::RdpSettings settings;
-    settings.host = QStringLiteral("10.0.0.5");
-    settings.port = 3389;
-    settings.username = QStringLiteral("Administrator");
-    settings.password = QStringLiteral("p@ss word");
-    settings.domain = QStringLiteral("CORP");
-
-    // 对应Python: build_rdp_url —— ntlm 走 rdp+ntlm-password，DOMAIN\user
-    // 保留反斜杠，密码完整 percent-encoding
-    const QString url = cubeshell::buildRdpUrl(settings);
-    check(url.startsWith(QStringLiteral("rdp+ntlm-password://")),
-          "ntlm 认证使用 rdp+ntlm-password scheme");
-    check(url.contains(QStringLiteral("CORP\\Administrator")),
-          "DOMAIN\\user 形式保留反斜杠");
-    check(url.contains(QStringLiteral("p%40ss%20word")), "密码做 percent-encoding");
-    check(url.endsWith(QStringLiteral("@10.0.0.5:3389")), "host:port 结尾正确");
-
-    const QString plain = cubeshell::buildRdpUrl(settings, QStringLiteral("plain"));
-    check(plain.startsWith(QStringLiteral("rdp://")), "plain 认证使用 rdp scheme");
-
-    // IPv6 裸地址加方括号
-    cubeshell::RdpSettings v6;
-    v6.host = QStringLiteral("fe80::1");
-    v6.port = 3389;
-    check(cubeshell::buildRdpUrl(v6).contains(QStringLiteral("[fe80::1]:3389")),
-          "IPv6 主机自动加方括号");
-
-    // 无凭据时不应出现 '@'
-    cubeshell::RdpSettings bare;
-    bare.host = QStringLiteral("host.local");
-    check(!cubeshell::buildRdpUrl(bare).contains(QLatin1Char('@')),
-          "无用户名时不产生 userinfo");
+    std::printf("RdpClient (命令行密码不得出现在 argv)\n");
 
     // 后端解析：编入 FreeRDP 走库后端，否则命令行后备。
     //
@@ -180,6 +148,37 @@ void testRdp()
     check(backend == cubeshell::RdpClient::Backend::FreeRdp
               || backend == cubeshell::RdpClient::Backend::CommandLine,
           "backend() 返回合法后端取值");
+
+    if (backend == cubeshell::RdpClient::Backend::CommandLine) {
+        cubeshell::RdpSettings settings;
+        settings.host = QStringLiteral("10.0.0.5");
+        settings.port = 3389;
+        settings.username = QStringLiteral("Administrator");
+        settings.password = QStringLiteral("Sup3rSecret!");
+        settings.domain = QStringLiteral("CORP");
+
+        cubeshell::RdpClient client;
+        client.connectToHost(settings);   // 会真的尝试启动；失败也无妨，只取参数
+        const QStringList argv = client.commandLineArgsForTest();
+        client.disconnectFromHost();
+
+        if (argv.isEmpty()) {
+            // 本机没有 xfreerdp/mstsc：探测不崩即可，无法断言参数
+            check(true, "命令行后端但无外部客户端，跳过参数断言");
+        } else {
+            const QString joined = argv.join(QLatin1Char(' '));
+            check(!joined.contains(settings.password),
+                  "命令行参数不含明文密码（/from-stdin 替代 /p:）");
+            check(!joined.contains(QStringLiteral("/p:")),
+                  "命令行参数不使用 /p: 形式");
+            check(joined.contains(QStringLiteral("/from-stdin:force")),
+                  "命令行参数声明 /from-stdin:force");
+        }
+    } else {
+        // FreeRDP 库后端：进程内建连，密码根本不进命令行
+        check(true, "FreeRDP 库后端：无命令行，密码天然不外泄");
+    }
+
     // 本机可能没装 xfreerdp/mstsc，只要求探测不崩
     (void)cubeshell::RdpClient::commandLineProgram();
     check(true, "commandLineProgram() 探测不崩溃");

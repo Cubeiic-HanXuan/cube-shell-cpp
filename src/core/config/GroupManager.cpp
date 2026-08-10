@@ -141,7 +141,9 @@ void GroupManager::moveDeviceToGroup(const QString &deviceName, const QString &g
 void GroupManager::removeDeviceFromGroup(const QString &deviceName)
 {
     GroupData data = loadGroups();
-    if (data.deviceGroupMap.remove(deviceName) > 0)
+    // QHash::remove 在 Qt6 返回 bool（Qt5 是 int）：直接当布尔判定，
+    // 不要写 > 0——MSVC C4804 会对 bool 的 '>' 比较报警。
+    if (data.deviceGroupMap.remove(deviceName))
         saveGroups(data);
 }
 

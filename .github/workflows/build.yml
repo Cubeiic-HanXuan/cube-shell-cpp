@@ -458,7 +458,13 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          windeployqt --release --no-translations dist/bin/cube-shell.exe
+          # x86_64 加 --no-opengl-sw：Qt 官方 x64 包自带 opengl32sw.dll（软件 OpenGL
+          # 兜底）+ 其依赖 D3Dcompiler_47.dll，windeployqt 默认会一并拷入，白白多出
+          # 几 MB。cube-shell 是 Qt Widgets 应用、渲染走 RHI/D3D11，用不到 CPU 光栅
+          # 化兜底，故剔除以瘦身。ARM64 官方包本就不含 opengl32sw，无需此旗标。
+          $extra = @()
+          if ('${{ matrix.qt_arch }}' -eq 'win64_msvc2022_64') { $extra = @('--no-opengl-sw') }
+          windeployqt --release --no-translations @extra dist/bin/cube-shell.exe
           New-Item -ItemType Directory -Force -Path out | Out-Null
           $zip = "out/cube-shell-${{ env.APP_VERSION }}-${{ matrix.name }}.zip"
           Compress-Archive -Path dist/* -DestinationPath $zip

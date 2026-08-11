@@ -86,6 +86,14 @@ struct DeviceEntry {
     QString termType = QStringLiteral("xterm-256color");         // TERMINAL-TYPE 上报值
     bool    autoLogin = false;                                   // 匹配提示自动送凭据
 
+    // 该条目由 jms:// URL 现场构造，连的是 JumpServer 跳板机（koko）而非资产本身。
+    // **纯运行时标记，不参与 JSON 序列化**（toJsonArray/loadJson 都是逐字段枚举，
+    // 不会顺带写盘）——它描述的是"这次连接怎么来的"，不是设备的持久属性；
+    // 侧栏里保存的设备永远为 false。
+    // 用途：koko 的 SFTP 子系统是与资产无关的虚拟命名空间，面板要据此给出
+    // 准确说明而不是抛 libssh2 原始错误（见 SftpBrowserWidget::setBastionProxied）。
+    bool viaBastion = false;
+
     bool isRdp() const { return protocol == QLatin1String("rdp"); }
     bool isSerial() const { return protocol == QLatin1String("serial"); }
     bool isTcp() const { return protocol == QLatin1String("tcp"); }

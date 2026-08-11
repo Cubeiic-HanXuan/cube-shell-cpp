@@ -19,6 +19,10 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
     // 显示（对应Python: 左侧 treeWidget 连接后切换为远程文件树）。
     m_sftp = new SftpBrowserWidget(this);
     m_sftp->setVisible(false);
+    // 必须在这里（而不是等 connected 信号）标记：下面的 connected 处理器一进来
+    // 就 setClient() → 触发首次 loadPath，而首次加载正是要靠这个标记判断
+    // "代理端不提供文件浏览"的那一次。晚一步设置就赶不上。
+    m_sftp->setBastionProxied(device.viaBastion);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);

@@ -49,6 +49,19 @@ public:
     void setCurrentPath(const QString &path);
     QString currentPath() const { return m_cwd; }
 
+    // 标记该会话是经跳板机（JumpServer/koko）代理建立的。
+    // 代理端的 SFTP 子系统是一套与资产无关的虚拟命名空间：token 会话下根目录
+    // 为空、资产上的任何绝对路径都打不开。有了这个标记才能在面板上给出准确
+    // 说明，而不是把 libssh2 的原始报错糊给用户。
+    // 对应Python: cube-shell.py 的 ssh_conn.is_jumpserver_proxy 标记
+    void setBastionProxied(bool on) { m_bastionProxied = on; }
+
+    // 「代理端不提供文件浏览」的判定。抽成静态纯函数便于单测。
+    // 命中条件：经代理 + 连根目录都列不出东西 ⇒ 这条通道没有文件系统可给。
+    // 只在 path 为根时判定：非根路径列不出来可能只是权限或路径不存在，
+    // 不足以推断整条通道不可用。
+    static bool sftpLooksUnavailable(bool bastionProxied, const QString &path, int entryCount);
+
     // 在路径栏左侧显示/隐藏分屏序号徽章（多分屏时避免混淆 SFTP 目录归属）。
     // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
     // tabTitle: 用于 tooltip 的标签名，展示完整的“分屏 N · 标签名”。
@@ -76,7 +89,22 @@ private slots:
     void decompressSelected();
 
 private:
-    void loadPath(const QString &path);
+    // 目录加载的触发来源，决定失败时怎么表现。
+    //  UserRequested — 用户主动导航（双击/路径栏/刷新/上一级）：失败必须报错，
+    //                  否则用户不知道自己点的地方去不了。
+    //  CwdSync       — 终端 OSC 7 上报 cwd 的联动：这是我们替用户猜的，猜错了
+    //                  不能弹错误。终端 cwd 与 SFTP 通道可能压根不是同一个
+    //                  命名空间（跳板机代理、chroot 过的 sftp 子系统都会这样）。
+    //  Initial       — setClient 的首次加载，同样属于推测（m_cwd 可能是连接
+    //                  就绪前由 setCurrentPath 种进来的终端 cwd）。
+    enum class LoadReason { UserRequested, CwdSync, Initial };
+    void loadPath(const QString &path, LoadReason reason = LoadReason::UserRequested);
+    // 清空列表并显示「代理端不提供 SFTP 文件浏览」的说明行 + 状态栏文案。
+    // 对应Python: cube-shell.py::_on_file_tree_unavailable（清空树 + 提示）
+    void showUnavailableNotice();
+    // 写操作闸门：处于不可用态时给出统一说明并返回 true（调用方应直接 return），
+    // 免得用户点上传/新建各撞一次 libssh2 原始错误。
+    bool blockedByUnavailable(const QString &title);
     // 登记并启动自建 worker 线程（finished→deleteLater，QPointer 随删除自动置空），
     // 供析构函数统一 quit()+wait()，避免后台线程访问已删除的 m_sftp 等子对象。
     // 经此启动的线程析构时会被有限等待，超时将泄漏其引用对象，
@@ -109,6 +137,10 @@ private:
     QLabel *m_status = nullptr;
 
     QString m_cwd = QStringLiteral("/");
+    // 该会话经跳板机代理（见 setBastionProxied）。
+    bool m_bastionProxied = false;
+    // 已判定「代理端不提供文件浏览」，列表里现在是说明行而非目录内容。
+    bool m_sftpUnavailable = false;
     // 目录加载请求序号：回调仅接受最新请求的结果，防止乱序返回的
     // 陈旧目录数据覆盖新目录（快速连续双击多个文件夹时）。
     quint64 m_loadSeq = 0;

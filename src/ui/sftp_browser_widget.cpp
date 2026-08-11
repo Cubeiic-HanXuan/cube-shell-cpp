@@ -256,7 +256,9 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
     // 后台预建并行传输连接：每条要走完整 SSH 握手，等用户点上传时再建
     // 会把握手成本压在首次传输上（高延迟链路上足以让并行反而更慢）。
     m_uploader->prewarmConnections();
-    loadPath(m_cwd);
+    // Initial：m_cwd 可能是连接就绪前由 setCurrentPath 种进来的终端 cwd，
+    // 属于推测，加载失败不该弹错误（见 LoadReason 注释）。
+    loadPath(m_cwd, LoadReason::Initial);
 }
 
 QString SftpBrowserWidget::joinPath(const QString &dir, const QString &name)
@@ -282,7 +284,12 @@ void SftpBrowserWidget::setCurrentPath(const QString &path)
     }
     if (clean == m_cwd)
         return;
-    loadPath(clean);
+    // 已判定该通道不提供文件系统：终端每换一次目录都去试一遍只会白费往返，
+    // 还会把说明行刷掉又刷回来。
+    if (m_sftpUnavailable)
+        return;
+    // CwdSync：终端 cwd 与 SFTP 通道未必是同一命名空间，失败不弹错误。
+    loadPath(clean, LoadReason::CwdSync);
 }
 
 // 刷新路径栏左侧的分屏徽章。单分屏时隐藏，完整信息走 tooltip。
@@ -292,7 +299,7 @@ void SftpBrowserWidget::setPaneIndicator(int paneNumber, int totalPanes,
     updatePaneBadge(m_paneBadge, paneNumber, totalPanes, tabTitle);
 }
 
-void SftpBrowserWidget::loadPath(const QString &path)
+void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
 {
     if (!m_sftp)
         return;
@@ -308,23 +315,57 @@ void SftpBrowserWidget::loadPath(const QString &path)
 
     // Fetch on a worker thread (listdirAttr is blocking under the session lock).
     SftpClient *sftp = m_sftp;
-    QThread *worker = QThread::create([this, sftp, path, seq]() {
+    QThread *worker = QThread::create([this, sftp, path, seq, reason]() {
         SshError err;
         const SftpFileInfoList entries = sftp->listdirAttr(path, err);
         const QString errMsg = err.message;
         // 回主线程渲染（与 editSelected/decompressSelected 同款接线）。
-        QMetaObject::invokeMethod(this, [this, path, seq, entries, errMsg]() {
+        QMetaObject::invokeMethod(this, [this, path, seq, reason, entries, errMsg]() {
             if (seq != m_loadSeq)   // 已有更新的请求在途/完成，丢弃陈旧结果
                 return;
             if (entries.isEmpty() && !errMsg.isEmpty()) {
-                // 失败：旧树原样保留，路径栏回退到 m_cwd（手输无效路径时残留的
-                // 错误文本会破坏“路径栏 == m_cwd == 树内容”不变量），
-                // 状态栏明确给出目标路径与失败原因，避免误认旧内容为目标目录。
-                m_status->setText(tr("加载 %1 失败：%2").arg(path, errMsg));
+                if (reason == LoadReason::UserRequested) {
+                    // 用户主动去的地方去不了，必须说清楚：旧树原样保留，路径栏
+                    // 回退到 m_cwd（手输无效路径时残留的错误文本会破坏
+                    // “路径栏 == m_cwd == 树内容”不变量），状态栏给出目标路径
+                    // 与失败原因，避免误认旧内容为目标目录。
+                    m_status->setText(tr("加载 %1 失败：%2").arg(path, errMsg));
+                    m_pathEdit->setText(m_cwd);
+                    return;
+                }
+                // 推测性加载（终端 cwd 联动 / 首次加载）失败：这是我们替用户猜的，
+                // 不能弹错误。终端 cwd 与 SFTP 通道可能不是同一个命名空间——
+                // 跳板机代理、chroot 过的 sftp 子系统都会这样。
+                qInfo("SFTP: 推测性加载 %s 失败（%s），退回根目录",
+                      qPrintable(path), qPrintable(errMsg));
                 m_pathEdit->setText(m_cwd);
+                // 退回根目录，让面板落到一个可用的位置，而不是留着陈旧空树。
+                // 已经在试根目录了就别再递归，直接判定这条通道没有文件系统。
+                if (path != QLatin1String("/")) {
+                    loadPath(QStringLiteral("/"), LoadReason::Initial);
+                    return;
+                }
+                if (m_bastionProxied) {
+                    // 树里放的不再是任何目录的内容，路径栏跟着落到刚探测过的根
+                    // 目录（此处 path 恒为 "/"），否则会停在探测失败的旧路径上，
+                    // 破坏“路径栏 == m_cwd == 树内容”不变量。
+                    m_cwd = path;
+                    m_pathEdit->setText(m_cwd);
+                    showUnavailableNotice();
+                } else
+                    m_status->setText(tr("无法列出目录：%1").arg(errMsg));
+                return;
+            }
+            // 代理端连根目录都是空的 ⇒ 它不提供资产文件系统，给出准确说明，
+            // 而不是让用户对着一棵空树猜。
+            if (sftpLooksUnavailable(m_bastionProxied, path, int(entries.size()))) {
+                m_cwd = path;
+                m_pathEdit->setText(m_cwd);
+                showUnavailableNotice();
                 return;
             }
             // 成功后才一次性提交：保证任意时刻路径栏 == m_cwd == 树内容所属目录
+            m_sftpUnavailable = false;
             m_cwd = path;
             m_pathEdit->setText(m_cwd);
             populate(path, entries);
@@ -332,6 +373,40 @@ void SftpBrowserWidget::loadPath(const QString &path)
         }, Qt::QueuedConnection);
     });
     startWorker(worker);
+}
+
+// 只在 path 为根时判定：非根路径列不出来可能只是权限或路径不存在。
+bool SftpBrowserWidget::sftpLooksUnavailable(bool bastionProxied, const QString &path,
+                                             int entryCount)
+{
+    return bastionProxied && path == QLatin1String("/") && entryCount == 0;
+}
+
+// 对应Python: cube-shell.py::_on_file_tree_unavailable
+void SftpBrowserWidget::showUnavailableNotice()
+{
+    m_sftpUnavailable = true;
+    m_tree->setUpdatesEnabled(false);
+    m_tree->clear();
+    // 一行不可选中的说明，占位在原本列目录的地方（Python 侧是 add_line_edit）。
+    auto *item = new QTreeWidgetItem(m_tree);
+    item->setFirstColumnSpanned(true);
+    item->setText(0, tr("此连接经 JumpServer 代理，代理端未提供 SFTP 文件浏览。"
+                        "文件传输请在 JumpServer 网页端进行。"));
+    item->setFlags(Qt::NoItemFlags);   // 不可选中/不可双击，避免当成目录点进去
+    m_tree->setUpdatesEnabled(true);
+    m_status->setText(tr("已连接 · SFTP 不可用"));
+}
+
+// 写操作闸门：不可用态下统一给说明，别让用户逐个撞 libssh2 原始错误。
+bool SftpBrowserWidget::blockedByUnavailable(const QString &title)
+{
+    if (!m_sftpUnavailable)
+        return false;
+    QMessageBox::information(this, title,
+                             tr("此连接经 JumpServer 代理，代理端未提供 SFTP 文件传输。"
+                                "请在 JumpServer 网页端进行文件传输。"));
+    return true;
 }
 
 // 渲染当前目录（平铺，首行为 ".." 返回上级）。
@@ -443,6 +518,8 @@ QStringList SftpBrowserWidget::selectedRemotePaths() const
 
 void SftpBrowserWidget::mkdir()
 {
+    if (blockedByUnavailable(tr("创建文件夹")))
+        return;
     bool ok = false;
     const QString name = QInputDialog::getText(this, tr("创建文件夹"), tr("文件夹名称："),
                                                QLineEdit::Normal, QString(), &ok);
@@ -532,6 +609,8 @@ void SftpBrowserWidget::uploadFiles()
 {
     if (!m_uploader)
         return;
+    if (blockedByUnavailable(tr("上传文件")))
+        return;
     const QStringList files = QFileDialog::getOpenFileNames(this, tr("上传文件"));
     for (const QString &local : files) {
         const QString remote = joinPath(m_cwd, QFileInfo(local).fileName());
@@ -612,6 +691,8 @@ void SftpBrowserWidget::showContextMenu(const QPoint &pos)
 void SftpBrowserWidget::createFileHere()
 {
     if (!m_sftp)
+        return;
+    if (blockedByUnavailable(tr("创建文件")))
         return;
     bool ok = false;
     const QString name = QInputDialog::getText(this, tr("创建文件"), tr("文件名字:"),

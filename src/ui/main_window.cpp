@@ -1438,6 +1438,10 @@ void MainWindow::onBastionConnect(const BastionConnectParams &params)
     device.port = quint16(params.port);
     device.keyType = params.keyType;
     device.keyFile = params.keyFile;
+    // 这条连接落在 JumpServer 的 koko 上，不是资产本身。SFTP 面板要靠这个标记
+    // 才能把"代理端不提供文件浏览"说清楚（见 SftpBrowserWidget::setBastionProxied）。
+    // 运行时标记，不会写进 devices.json。
+    device.viaBastion = true;
     openSshSession(device);
 }
 

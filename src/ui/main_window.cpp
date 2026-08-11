@@ -1402,6 +1402,27 @@ void MainWindow::handleUrl(const QString &url)
         openNetTab(settings);
         return;
     }
+#ifdef CUBESHELL_WITH_LOCALPTY
+    // cubeshell://open-local?path=<dir>[&command=<cmd>] → 直接开本机终端标签。
+    // Finder 快速操作 / Windows 右键菜单“在 CubeShell 中打开终端”走的就是这条路径。
+    // 必须在此接管：BastionClient::handleUrl 只解析 jms:// 与 ssh://，落到它那里
+    // 会得到 valid == false 并被静默丢弃（即菜单点了没反应）。
+    // 对应Python: cube-shell.py::handle_open_url 的 cubeshell:// 分支
+    // 鸿蒙：无本地 shell，不接管（openLocalTerminalAt 在 LOCALPTY 外不存在）。
+    if (url.startsWith(QLatin1String("cubeshell://"))) {
+        const UrlConnectionInfo info = parseCubeshellUrl(url);
+        if (!info.valid) {
+            setStatus(tr("无效的 CubeShell URL：%1").arg(info.error));
+            return;
+        }
+        if (info.action != QLatin1String("open-local")) {
+            setStatus(tr("不支持的 CubeShell 操作：%1").arg(info.action));
+            return;
+        }
+        openLocalTerminalAtPath(info.path, info.command);
+        return;
+    }
+#endif
     if (m_bastion)
         m_bastion->handleUrl(url);
 }
@@ -2293,6 +2314,39 @@ void MainWindow::resetStatusItems()
 void MainWindow::openLocalTerminal()
 {
     openLocalTerminalAt(QString());
+}
+
+// 在 path 目录新开本机终端，可选在 shell 就绪后自动执行 command。
+// cubeshell://open-local 的落地点（Finder 快速操作 / Windows 右键菜单）。
+// 对应Python: cube-shell.py::open_local_terminal_at_path
+void MainWindow::openLocalTerminalAtPath(const QString &path, const QString &command)
+{
+    // 对应Python: if not os.path.isdir(path): logger.warning(...); return
+    // parseCubeshellUrl 已校验过一次，但直接调用方（命令行传目录）没有，这里兜底。
+    if (!QFileInfo(path).isDir()) {
+        setStatus(tr("目录不存在：%1").arg(path));
+        return;
+    }
+
+    // 窗口刚 show() 尚未完成布局时创建终端，PTY 会按错误的初始尺寸建窗；
+    // 延到事件循环下一轮再开，冷启动（argv 带 URL）和已运行时都安全。
+    // 对应Python: QTimer.singleShot(0, lambda: window.open_local_terminal_at_path(...))
+    QTimer::singleShot(0, this, [this, path, command]() {
+        QTermWidget *term = openLocalTerminalAt(path);
+        if (!term)
+            return;
+        if (command.trimmed().isEmpty())
+            return;
+        // 对应Python: QTimer.singleShot(500, _send_terminal_line)；
+        // Windows ConPTY 需要 \r 才能执行，macOS/Linux 用 \n（与 openClaudeTerminal 一致）。
+        QTimer::singleShot(500, term, [term, command]() {
+#ifdef Q_OS_WIN
+            term->sendText(command + QStringLiteral("\r"));
+#else
+            term->sendText(command + QStringLiteral("\n"));
+#endif
+        });
+    });
 }
 
 // startDir 非空时以其为 shell 初始工作目录（延迟启动：先设目录再 run）。

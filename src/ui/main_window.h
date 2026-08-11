@@ -107,6 +107,10 @@ private:
     // 返回新建的终端（openClaudeTerminal 需要向其发送命令）。
     // 对应Python: cube-shell.py::open_local_terminal_in_selected_folder
     QTermWidget *openLocalTerminalAt(const QString &dir);
+    // 在 path 目录新开本机终端，command 非空时在 shell 就绪后自动执行。
+    // cubeshell://open-local 的落地点（Finder 快速操作 / Windows 右键菜单）。
+    // 对应Python: cube-shell.py::open_local_terminal_at_path
+    void openLocalTerminalAtPath(const QString &path, const QString &command = QString());
 #endif
     void openSshSession(const DeviceEntry &device);
     void setStatus(const QString &text);

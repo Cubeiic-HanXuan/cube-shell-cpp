@@ -441,4 +441,21 @@ UrlConnectionInfo parseUrl(const QString &url)
     return out;
 }
 
+// 对应Python: cube-shell.py 启动段“Windows: 如果参数是本地目录路径（非 URL）”分支
+QString directoryArgumentAsUrl(const QStringList &args)
+{
+    for (int i = 1; i < args.size(); ++i) {   // argv[1:] — 跳过程序名
+        const QString &arg = args.at(i);
+        if (arg.startsWith(QLatin1Char('-')))   // 跳过选项（-url 等）
+            continue;
+        if (!QFileInfo(arg).isDir())
+            continue;
+        // safe="/" 与 workflow 内的 python3 urllib.parse.quote(..., safe='/') 一致，
+        // 保留路径分隔符、转义空格等字符（parseCubeshellUrl 会解回来）。
+        return QStringLiteral("cubeshell://open-local?path=")
+            + QString::fromUtf8(QUrl::toPercentEncoding(arg, "/"));
+    }
+    return QString();
+}
+
 } // namespace cubeshell

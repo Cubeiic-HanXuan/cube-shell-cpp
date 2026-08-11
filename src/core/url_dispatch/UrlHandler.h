@@ -100,4 +100,10 @@ UrlConnectionInfo parseRdpUrl(const QString &url);
 // result with an error message.
 UrlConnectionInfo parseUrl(const QString &url);
 
+// 把命令行里的裸目录路径参数转成 cubeshell://open-local?path=<encoded>。
+// Windows 右键菜单的注册表 command 模板传的是 "%1" / "%V"（目录路径本身，
+// 不是 URL），需先归一化再交给统一的 URL 分发。无目录参数时返回空串。
+// 对应Python: cube-shell.py 启动段“Windows: 如果参数是本地目录路径（非 URL）”分支
+QString directoryArgumentAsUrl(const QStringList &args);
+
 } // namespace cubeshell

@@ -26,6 +26,7 @@
 #include "LanguageManager.h"
 
 #include "config/GlobalState.h"
+#include "url_dispatch/UrlHandler.h"
 #include "util/ThemeManager.h"
 
 namespace {
@@ -165,8 +166,11 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    // 5. 命令行 URL 参数（jms:// 直连）。
-    const QString startupUrl = urlFromArguments(QCoreApplication::arguments());
+    // 5. 命令行 URL 参数（jms:// 直连；cubeshell://open-local 开本机终端）。
+    QString startupUrl = urlFromArguments(QCoreApplication::arguments());
+    // Windows 右键菜单传裸目录路径，转成 cubeshell://open-local 走同一条分发。
+    if (startupUrl.isEmpty())
+        startupUrl = cubeshell::directoryArgumentAsUrl(QCoreApplication::arguments());
 
     // 6. 创建主窗口。
     cubeshell::MainWindow window;

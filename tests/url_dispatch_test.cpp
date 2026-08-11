@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QUrl>
 
 #include "url_dispatch/BastionClient.h"
@@ -222,6 +223,36 @@ static void testParseUrlDispatchAndArgvScan()
     CHECK(!c.valid);
 }
 
+// Windows 右键菜单传裸目录路径（注册表 command 的 "%1" / "%V"），需归一化成
+// cubeshell://open-local 才能走统一分发；回归 "点了菜单没反应" 的那条链路。
+static void testDirectoryArgumentAsUrl()
+{
+    const QString dir = QDir::tempPath();
+
+    // 裸目录参数 → 可被 parseCubeshellUrl 解回同一目录（往返一致）
+    const QString url = directoryArgumentAsUrl({QStringLiteral("cube-shell"), dir});
+    CHECK(url.startsWith(QStringLiteral("cubeshell://open-local?path=")));
+    UrlConnectionInfo a = parseCubeshellUrl(url);
+    CHECK(a.valid && a.action == QStringLiteral("open-local"));
+    CHECK(a.path == dir);
+
+    // 含空格的目录：percent-encode 后仍能往返（workflow 里 quote(safe='/') 的行为）
+    QTemporaryDir spaced(QDir::tempPath() + QStringLiteral("/cs url XXXXXX"));
+    if (spaced.isValid()) {
+        UrlConnectionInfo b = parseCubeshellUrl(
+            directoryArgumentAsUrl({QStringLiteral("cube-shell"), spaced.path()}));
+        CHECK(b.valid && b.path == spaced.path());
+    }
+
+    // 选项、文件、不存在的路径都不当作目录参数
+    CHECK(directoryArgumentAsUrl({QStringLiteral("cube-shell"), QStringLiteral("-url")}).isEmpty());
+    CHECK(directoryArgumentAsUrl({QStringLiteral("cube-shell"),
+                                  QStringLiteral("/no/such/dir/xyz-42")}).isEmpty());
+    CHECK(directoryArgumentAsUrl({QStringLiteral("cube-shell")}).isEmpty());
+    // argv[0] 即便是目录也要跳过（只扫 argv[1:]）
+    CHECK(directoryArgumentAsUrl({dir}).isEmpty());
+}
+
 #ifdef CUBESHELL_WITH_RDP
 // rdp:// / rdp+ntlm-password:// 解析（对应 build_rdp_url 的两种 scheme）。
 static void testRdpUrl()
@@ -322,6 +353,7 @@ int main(int argc, char *argv[])
     testSshUrl();
     testCubeshellUrl();
     testParseUrlDispatchAndArgvScan();
+    testDirectoryArgumentAsUrl();
 #ifdef CUBESHELL_WITH_RDP
     testRdpUrl();
 #endif

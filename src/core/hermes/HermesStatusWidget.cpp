@@ -6,11 +6,14 @@
 #include "hermes/HermesBackend.h"
 
 #include <QDateTime>
+#include <QDir>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QTextEdit>
 #include <QVBoxLayout>
@@ -23,6 +26,15 @@ namespace {
 const QLatin1String kColorGreen("#27ae60");
 const QLatin1String kColorRed("#e74c3c");
 const QLatin1String kColorGray("#7f8c8d");
+
+// 官方一键安装脚本(hermes-agent README)——Hermes 不发布到 PyPI
+const QLatin1String kInstallShell(
+    "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash");
+const QLatin1String kInstallPowerShell(
+    "iex (irm https://hermes-agent.nousresearch.com/install.ps1)");
+
+// 远程模式下 `hermes update` 要跑 git pull + 依赖重装,默认 30s 远远不够
+constexpr int kUpdateTimeoutMs = 15 * 60 * 1000;
 
 QFont boldFont()
 {
@@ -44,6 +56,12 @@ HermesStatusWidget::HermesStatusWidget(QWidget *parent)
 
 HermesStatusWidget::~HermesStatusWidget()
 {
+    // 更新/安装可能跑很久：析构时终止它，不阻塞退出
+    if (m_taskProcess && m_taskProcess->state() != QProcess::NotRunning) {
+        m_taskProcess->disconnect(this);
+        m_taskProcess->kill();
+        m_taskProcess->waitForFinished(3000);
+    }
     for (QFuture<void> &f : m_futures)
         f.waitForFinished();
 }
@@ -220,94 +238,202 @@ void HermesStatusWidget::onRunDoctor()
 }
 
 // 对应Python: _on_update
+// Hermes 是 git 检出而非 PyPI 包,升级入口是 `hermes update`(见头文件说明);
+// 原先的 `pip install --upgrade hermes-agent` 必然失败。
 void HermesStatusWidget::onUpdateHermes()
 {
     if (!m_backend)
         return;
-    startPip(true);
+
+    const QStringList cliArgs{QStringLiteral("update"), QStringLiteral("--yes")};
+
+    // 远程模式没有本地进程可流式输出，退回阻塞式 CLI（放大超时）
+    if (m_backend->isRemote()) {
+        setButtonsEnabled(false);
+        appendStamped(tr("正在更新 Hermes..."));
+        runCommand(cliArgs, tr("update --yes"), "handleCommandDone",
+                   kUpdateTimeoutMs);
+        return;
+    }
+
+    const QString bin = m_backend->cliPath();
+    startTask(TaskKind::Update, bin, cliArgs,
+              bin + QLatin1Char(' ') + cliArgs.join(QLatin1Char(' ')));
 }
 
 // 对应Python: _on_install（安装不依赖 backend——未安装时 backend 可能不可用）
+// pip 对安装同样无效，改为执行官方一键安装脚本，执行前必须用户确认。
 void HermesStatusWidget::onInstallHermes()
 {
-    startPip(false);
+#ifdef Q_OS_WIN
+    const QString command = kInstallPowerShell;
+#else
+    const QString command = kInstallShell;
+#endif
+
+    // 远程模式不代跑安装脚本——目标主机的 shell 环境不可控，给出命令让用户自己执行
+    if (m_backend && m_backend->isRemote()) {
+        appendStamped(tr("远程主机未安装 Hermes Agent"));
+        m_logOutput->append(tr("请在远程主机上执行官方安装命令：\n\n  %1\n\n"
+                               "安装完成后点击「刷新状态」。").arg(kInstallShell));
+        m_logOutput->append(QString());
+        return;
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("确认安装 Hermes"));
+    box.setText(tr("即将执行：\n\n%1\n\n该脚本来自 NousResearch 官方"
+                   "（hermes-agent.nousresearch.com）。").arg(command));
+    QPushButton *okBtn = box.addButton(tr("确认执行"), QMessageBox::AcceptRole);
+    QPushButton *cancelBtn = box.addButton(tr("取消"), QMessageBox::RejectRole);
+    box.setDefaultButton(cancelBtn);
+    box.exec();
+    if (box.clickedButton() != okBtn)
+        return;
+
+#ifdef Q_OS_WIN
+    startTask(TaskKind::Install, QStringLiteral("powershell"),
+              {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), command},
+              command);
+#else
+    // 登录 shell：GUI 进程继承的环境常常缺少 curl/git/uv 所在的用户目录
+    startTask(TaskKind::Install, QStringLiteral("/bin/bash"),
+              {QStringLiteral("-lc"), command}, command);
+#endif
 }
 
 // ---------------------------------------------------------------------------
-// pip install / upgrade
+// long-running task process (update / install)
 // ---------------------------------------------------------------------------
 
-// 对应Python: PipInstallWorker.run
-void HermesStatusWidget::startPip(bool upgrade)
+// 取代 Python 版的 PipInstallWorker：异步 QProcess + 实时输出 + 真实退出码。
+void HermesStatusWidget::startTask(TaskKind kind, const QString &program,
+                                   const QStringList &args,
+                                   const QString &displayCommand)
 {
-    if (m_pipProcess && m_pipProcess->state() != QProcess::NotRunning)
+    if (m_taskProcess && m_taskProcess->state() != QProcess::NotRunning)
         return;
     setButtonsEnabled(false);
-    m_pipUpgrade = upgrade;
+    m_taskKind = kind;
+    m_taskBuffer.clear();
+    m_taskFailed = false;
 
-    const QString timestamp = QDateTime::currentDateTime()
-                                  .toString(QStringLiteral("HH:mm:ss"));
-    m_logOutput->append(QStringLiteral("[%1] %2")
-                            .arg(timestamp,
-                                 upgrade ? tr("正在更新 Hermes...")
-                                         : tr("正在安装 Hermes...")));
+    appendStamped(kind == TaskKind::Update ? tr("正在更新 Hermes...")
+                                           : tr("正在安装 Hermes..."));
+    m_logOutput->append(QStringLiteral("$ ") + displayCommand);
 
-    if (!m_pipProcess) {
-        m_pipProcess = new QProcess(this);
-        m_pipProcess->setProcessChannelMode(QProcess::MergedChannels);
-        connect(m_pipProcess,
+    if (!m_taskProcess) {
+        m_taskProcess = new QProcess(this);
+        m_taskProcess->setProcessChannelMode(QProcess::MergedChannels);
+        connect(m_taskProcess, &QProcess::readyReadStandardOutput,
+                this, &HermesStatusWidget::onProcessOutput);
+        connect(m_taskProcess,
                 QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this](int exitCode, QProcess::ExitStatus) {
-                    onPipFinished(exitCode);
-                });
-        connect(m_pipProcess, &QProcess::errorOccurred, this,
-                [this](QProcess::ProcessError) {
-                    const QString timestamp =
-                        QDateTime::currentDateTime()
-                            .toString(QStringLiteral("HH:mm:ss"));
-                    m_logOutput->append(QStringLiteral("[%1] %2: %3")
-                                            .arg(timestamp, tr("更新失败"),
-                                                 m_pipProcess->errorString()));
+                this, &HermesStatusWidget::onProcessFinished);
+        connect(m_taskProcess, &QProcess::errorOccurred, this,
+                [this](QProcess::ProcessError error) {
+                    // Crashed 等错误 finished() 也会到，只在这里处理起不来的情况
+                    if (error != QProcess::FailedToStart)
+                        return;
+                    m_taskFailed = true;
+                    appendStamped(m_taskKind == TaskKind::Update
+                                      ? tr("更新失败：%1")
+                                            .arg(m_taskProcess->errorString())
+                                      : tr("安装失败：%1")
+                                            .arg(m_taskProcess->errorString()));
                     m_logOutput->append(QString());
                     setButtonsEnabled(true);
                 });
-    }
 
 #ifdef Q_OS_WIN
-    // Windows GUI 应用下防止弹出控制台黑窗口
-    m_pipProcess->setCreateProcessArgumentsModifier(
-        [](QProcess::CreateProcessArguments *args) {
-            args->flags |= 0x08000000; // CREATE_NO_WINDOW
-        });
-    const QString python = QStringLiteral("python");
+        // Windows GUI 应用下防止弹出控制台黑窗口
+        m_taskProcess->setCreateProcessArgumentsModifier(
+            [](QProcess::CreateProcessArguments *args) {
+                args->flags |= 0x08000000; // CREATE_NO_WINDOW
+            });
 #else
-    const QString python = QStringLiteral("python3");
+        // GUI 进程（Finder/Dock 启动）拿到的 PATH 通常只有 /usr/bin:/bin，
+        // 而 hermes update 内部要调 git / uv / python。补上常见用户目录。
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        QStringList paths = env.value(QStringLiteral("PATH"))
+                                .split(QLatin1Char(':'), Qt::SkipEmptyParts);
+        const QString home = QDir::homePath();
+        const QStringList extra{
+            home + QStringLiteral("/.local/bin"),
+            QStringLiteral("/opt/homebrew/bin"),
+            QStringLiteral("/usr/local/bin"),
+            QStringLiteral("/usr/bin"),
+            QStringLiteral("/bin"),
+        };
+        for (const QString &p : extra) {
+            if (!paths.contains(p))
+                paths << p;
+        }
+        env.insert(QStringLiteral("PATH"), paths.join(QLatin1Char(':')));
+        m_taskProcess->setProcessEnvironment(env);
 #endif
+    }
 
-    QStringList args{QStringLiteral("-m"), QStringLiteral("pip"),
-                     QStringLiteral("install")};
-    if (upgrade)
-        args << QStringLiteral("--upgrade");
-    args << QStringLiteral("hermes-agent");
-    m_pipProcess->start(python, args);
+    m_taskProcess->start(program, args);
 }
 
-// 对应Python: _on_update_finished
-void HermesStatusWidget::onPipFinished(int exitCode)
+// 进程输出按行落到日志：QTextEdit::append 每次都开新段落，
+// 所以必须自己按 \n 切分，未完成的尾部留到下次。
+void HermesStatusWidget::drainProcessOutput(bool flush)
 {
-    Q_UNUSED(exitCode);
-    const QString timestamp = QDateTime::currentDateTime()
-                                  .toString(QStringLiteral("HH:mm:ss"));
-    m_logOutput->append(QStringLiteral("[%1] %2")
-                            .arg(timestamp, tr("更新完成")));
-    const QString output = QString::fromLocal8Bit(
-        m_pipProcess->readAllStandardOutput()).trimmed();
-    if (!output.isEmpty())
-        m_logOutput->append(output);
+    if (m_taskProcess)
+        m_taskBuffer += QString::fromLocal8Bit(
+            m_taskProcess->readAllStandardOutput());
+    m_taskBuffer.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+
+    int nl;
+    while ((nl = m_taskBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
+        QString line = m_taskBuffer.left(nl);
+        m_taskBuffer.remove(0, nl + 1);
+        // git/pip 的进度条用 \r 原地刷新，只保留该行最终状态
+        const int cr = line.lastIndexOf(QLatin1Char('\r'));
+        if (cr >= 0)
+            line = line.mid(cr + 1);
+        m_logOutput->append(line);
+    }
+
+    if (flush && !m_taskBuffer.isEmpty()) {
+        m_logOutput->append(m_taskBuffer);
+        m_taskBuffer.clear();
+    }
+}
+
+void HermesStatusWidget::onProcessOutput()
+{
+    drainProcessOutput(false);
+}
+
+// 取代 Python 版的 _on_update_finished —— 关键区别：退出码真的被用上了
+void HermesStatusWidget::onProcessFinished(int exitCode,
+                                           QProcess::ExitStatus status)
+{
+    drainProcessOutput(true); // 先把输出写完，再写结论行
+    if (m_taskFailed)
+        return; // FailedToStart 已经报过
+
+    const bool ok = status == QProcess::NormalExit && exitCode == 0;
+    if (ok) {
+        appendStamped(m_taskKind == TaskKind::Update ? tr("更新完成")
+                                                     : tr("安装完成"));
+    } else if (status == QProcess::CrashExit) {
+        appendStamped(m_taskKind == TaskKind::Update ? tr("更新失败：进程异常终止")
+                                                     : tr("安装失败：进程异常终止"));
+    } else {
+        appendStamped(m_taskKind == TaskKind::Update
+                          ? tr("更新失败（退出码 %1）").arg(exitCode)
+                          : tr("安装失败（退出码 %1）").arg(exitCode));
+    }
     m_logOutput->append(QString());
     setButtonsEnabled(true);
-    // 更新完成后自动刷新状态
-    refreshStatus();
+    // 完成后自动刷新状态（失败时也刷新，卡片要反映真实状态）
+    if (m_backend)
+        refreshStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -315,9 +441,10 @@ void HermesStatusWidget::onPipFinished(int exitCode)
 // ---------------------------------------------------------------------------
 
 // 对应Python: _run_command + _on_worker_finished
+// timeoutMs < 0 表示用 HermesBackend 的默认超时。
 void HermesStatusWidget::runCommand(const QStringList &args,
                                     const QString &description,
-                                    const char *handler)
+                                    const char *handler, int timeoutMs)
 {
     for (int i = m_futures.size() - 1; i >= 0; --i) {
         if (m_futures.at(i).isFinished())
@@ -325,9 +452,11 @@ void HermesStatusWidget::runCommand(const QStringList &args,
     }
     HermesBackend *backend = m_backend;
     const QByteArray handlerName(handler);
+    const int timeout = timeoutMs < 0 ? HermesBackend::kDefaultTimeoutMs
+                                      : timeoutMs;
     m_futures.append(QtConcurrent::run(
-        [this, backend, args, description, handlerName]() {
-            const QString output = backend->execCli(args);
+        [this, backend, args, description, handlerName, timeout]() {
+            const QString output = backend->execCli(args, timeout);
             // 回 UI 线程：先写日志，再分发给对应的结果回调
             QMetaObject::invokeMethod(this, [this, description, output,
                                              handlerName]() {
@@ -338,6 +467,13 @@ void HermesStatusWidget::runCommand(const QStringList &args,
                                           Q_ARG(QString, output));
             }, Qt::QueuedConnection);
         }));
+}
+
+void HermesStatusWidget::appendStamped(const QString &text)
+{
+    const QString timestamp = QDateTime::currentDateTime()
+                                  .toString(QStringLiteral("HH:mm:ss"));
+    m_logOutput->append(QStringLiteral("[%1] %2").arg(timestamp, text));
 }
 
 void HermesStatusWidget::appendLog(const QString &description,

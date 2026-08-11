@@ -76,6 +76,11 @@ public:
     // 对应Python: LocalBackend.exec_cli / RemoteBackend.exec_cli
     QString execCli(const QStringList &args, int timeoutMs = kDefaultTimeoutMs);
 
+    // Resolved path of the local `hermes` executable (bare "hermes" if not
+    // found). For callers that need to drive a long-running CLI command with
+    // their own QProcess instead of the blocking execCli above.
+    QString cliPath() const { return findHermesBin(); }
+
     // --- files ---
 
     // 对应Python: read_file / write_file / list_dir / file_exists / delete_file

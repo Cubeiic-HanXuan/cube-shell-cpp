@@ -100,6 +100,12 @@ UrlConnectionInfo parseRdpUrl(const QString &url);
 // result with an error message.
 UrlConnectionInfo parseUrl(const QString &url);
 
+// url 是否是 parseUrl 认得的 scheme（只看前缀，不解析载荷）。
+// 供命令行扫描与 macOS QFileOpenEvent 过滤器共用一份 scheme 清单——两处各写
+// 一遍必然漂移（曾漏过 cubeshell://）。RDP 分支同样受 CUBESHELL_WITH_RDP 约束。
+// 对应Python: bastion_client.py::UrlEventFilter 里的 url.startswith(...) 判断
+bool isSupportedUrlScheme(const QString &url);
+
 // 把命令行里的裸目录路径参数转成 cubeshell://open-local?path=<encoded>。
 // Windows 右键菜单的注册表 command 模板传的是 "%1" / "%V"（目录路径本身，
 // 不是 URL），需先归一化再交给统一的 URL 分发。无目录参数时返回空串。

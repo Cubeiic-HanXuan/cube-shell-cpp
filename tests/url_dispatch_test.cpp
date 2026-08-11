@@ -253,6 +253,75 @@ static void testDirectoryArgumentAsUrl()
     CHECK(directoryArgumentAsUrl({dir}).isEmpty());
 }
 
+// scheme 前缀判定：命令行扫描与 macOS QFileOpenEvent 过滤器共用这一份清单。
+static void testIsSupportedUrlScheme()
+{
+    CHECK(isSupportedUrlScheme(makeJmsUrl(kFullJson)));
+    CHECK(isSupportedUrlScheme(QStringLiteral("ssh://root@h")));
+    CHECK(isSupportedUrlScheme(QStringLiteral("telnet://h:23")));
+    CHECK(isSupportedUrlScheme(QStringLiteral("cubeshell://open-local?path=/tmp")));
+#ifdef CUBESHELL_WITH_RDP
+    CHECK(isSupportedUrlScheme(QStringLiteral("rdp://u@h")));
+    CHECK(isSupportedUrlScheme(QStringLiteral("rdp+ntlm-password://u@h")));
+#endif
+
+    // 非我方 scheme 一律放行——过滤器返回 true 会吞掉事件，把"拖文件到 Dock
+    // 图标"这类 QFileOpenEvent 一并吃掉。
+    CHECK(!isSupportedUrlScheme(QStringLiteral("ftp://h")));
+    CHECK(!isSupportedUrlScheme(QStringLiteral("/Users/me/notes.txt")));
+    CHECK(!isSupportedUrlScheme(QString()));
+
+    // 判定与 parseUrl 的分支保持一致（清单漂移的回归闸门）。
+    for (const QString &u : {makeJmsUrl(kFullJson), QStringLiteral("ssh://root@h"),
+                             QStringLiteral("telnet://h:23")})
+        CHECK(isSupportedUrlScheme(u) == parseUrl(u).valid);
+    CHECK(isSupportedUrlScheme(QStringLiteral("ftp://h"))
+          == parseUrl(QStringLiteral("ftp://h")).valid);
+}
+
+// 真实 jms:// URL 过不了 QUrl —— 钉住 QFileOpenEvent 里 file() 优先的理由。
+//
+// JumpServer 把 Base64 载荷放在 hostname 位置，而 QUrl 按 DNS 规则校验主机名：
+// 单 label 上限 63 字符。实测边界就在这里（63 合法 / 64 非法），而真实载荷
+// 120~680 字符，因此每一条 jms:// 都会被判非法：isValid() 为 false，
+// toString()/toEncoded() 双双返回空串。
+// 修这个 bug 之前的写法是 url().isValid() ? url().toString() : file()，靠
+// isValid() 为假恰好落到 file()；现在无条件 file() 优先。这条用例的作用是：
+// 谁要是把取值"简化"成 url().toString()，立刻红。
+// 对应Python: bastion_client.py::UrlEventFilter 的同一取值顺序及其注释
+static void testJmsUrlSurvivesWhereQUrlFails()
+{
+    // 先把 QUrl 的规则本身钉住：63/64 就是那道坎。
+    CHECK(QUrl(QStringLiteral("jms://") + QString(63, QLatin1Char('a'))).isValid());
+    CHECK(!QUrl(QStringLiteral("jms://") + QString(64, QLatin1Char('a'))).isValid());
+
+    // 再用逼真的 v2 载荷验证端到端后果。字段布局照抄真实签发结果（含
+    // asset.name 里 percent-encode 过的 "user%40host%5Btime%5D" 形态）。
+    const QByteArray json =
+        "{\"version\":2,\"id\":\"db1fa04f-7c1a-46bb-b094-21ce353b7f50\","
+        "\"value\":\"MpmKAFk3IDoi37y4\","
+        "\"name\":\"testuser%40cubeshell-test-target%5B2026-08-11_20%3A23%3A34%5D\","
+        "\"protocol\":\"ssh\","
+        "\"token\":{\"id\":\"db1fa04f-7c1a-46bb-b094-21ce353b7f50\",\"value\":\"MpmKAFk3IDoi37y4\"},"
+        "\"asset\":{\"id\":\"7b9cab7b\",\"name\":\"cubeshell-test-target\",\"address\":\"172.23.0.3\"},"
+        "\"endpoint\":{\"host\":\"localhost\",\"port\":2222}}";
+    const QString url = makeJmsUrl(json);
+    CHECK(url.size() - 6 > 63);                  // 载荷确实超过单 label 上限
+
+    const QUrl qurl(url);
+    CHECK(!qurl.isValid());                      // QUrl 表达不了它
+    CHECK(qurl.toString().isEmpty());            // → 过滤器若走 url() 只能拿到空串
+    CHECK(qurl.toEncoded().isEmpty());
+    CHECK(QUrl::fromEncoded(url.toUtf8()).toString().isEmpty());
+
+    // 而我们自己的判定/解析完全不受影响：URL 原样进来就能连。
+    CHECK(isSupportedUrlScheme(url));
+    const UrlConnectionInfo info = parseJmsUrl(url);
+    CHECK(info.valid && info.host == QStringLiteral("localhost") && info.port == 2222);
+    CHECK(info.user == QStringLiteral("JMS-db1fa04f-7c1a-46bb-b094-21ce353b7f50"));
+    CHECK(info.password == QStringLiteral("MpmKAFk3IDoi37y4"));
+}
+
 #ifdef CUBESHELL_WITH_RDP
 // rdp:// / rdp+ntlm-password:// 解析（对应 build_rdp_url 的两种 scheme）。
 static void testRdpUrl()
@@ -354,6 +423,8 @@ int main(int argc, char *argv[])
     testCubeshellUrl();
     testParseUrlDispatchAndArgvScan();
     testDirectoryArgumentAsUrl();
+    testIsSupportedUrlScheme();
+    testJmsUrlSurvivesWhereQUrlFails();
 #ifdef CUBESHELL_WITH_RDP
     testRdpUrl();
 #endif

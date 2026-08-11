@@ -441,6 +441,22 @@ UrlConnectionInfo parseUrl(const QString &url)
     return out;
 }
 
+// 对应Python: bastion_client.py::UrlEventFilter 里的 url.startswith(...) 判断
+bool isSupportedUrlScheme(const QString &url)
+{
+    // 与 parseUrl 的分支一一对应；改一处务必改另一处。
+    if (url.startsWith(QLatin1String("jms://"))
+            || url.startsWith(QLatin1String("ssh://"))
+            || url.startsWith(QLatin1String("cubeshell://"))
+            || url.startsWith(QLatin1String("telnet://")))
+        return true;
+#ifdef CUBESHELL_WITH_RDP
+    if (url.startsWith(QLatin1String("rdp://")) || url.startsWith(QLatin1String("rdp+")))
+        return true;
+#endif
+    return false;
+}
+
 // 对应Python: cube-shell.py 启动段“Windows: 如果参数是本地目录路径（非 URL）”分支
 QString directoryArgumentAsUrl(const QStringList &args)
 {

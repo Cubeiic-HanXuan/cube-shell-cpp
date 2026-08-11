@@ -1,9 +1,12 @@
 // main.cpp — 应用入口：完整启动流程。
 // 对应Python: cube-shell.py 末尾 `if __name__ == "__main__":` 启动段
 //
-// 流程：GlobalState/theme.json 加载 → 主题应用 → 语言加载 → 单实例检查
-// (QLockFile) → 解析命令行 jms:// URL → 创建主窗口 → 处理 URL 事件 →
-// 进入事件循环。macOS 下额外安装 QFileOpenEvent 过滤器处理 URL Scheme。
+// 流程：安装 URL 事件过滤器 → GlobalState/theme.json 加载 → 主题应用 → 语言
+// 加载 → 单实例检查 (QLockFile) → 解析命令行 jms:// URL → 创建主窗口 → 处理
+// URL → 进入事件循环。
+//
+// 过滤器排在最前面不是随手写的：macOS 冷启动时 QFileOpenEvent 到得很早，装晚了
+// 就丢，症状是"应用起来了但没连上资源"。详见 UrlOpenFilter 的注释。
 
 #include <QApplication>
 #include <QDir>
@@ -17,6 +20,7 @@
 #endif
 #include <QMessageBox>
 #include <QStandardPaths>
+#include <QTimer>
 
 #ifndef Q_OS_WIN
 #include <csignal>
@@ -33,14 +37,38 @@ namespace {
 
 #ifndef CUBESHELL_PLATFORM_OHOS
 // macOS URL Scheme 事件（jms:// 由系统经 QFileOpenEvent 投递给运行中的应用）。
-// 对应Python: cube-shell.py::UrlSchemeApplication.event(QFileOpenEvent)
+// 对应Python: core/url_dispatch/bastion_client.py::UrlEventFilter
 // 鸿蒙：无 QFileOpenEvent 机制（系统交互走 Want/Uri），不编译。
+//
+// 两个要点，缺一都会导致"点了只启动、不连接"：
+//  1. 【本次 bug 的真正原因】过滤器必须在 MainWindow 之前安装，且窗口未就绪时
+//     要把 URL 存下来。macOS 冷启动（浏览器里点"打开 cube-shell.app"）时
+//     QFileOpenEvent 在启动早期就投递过来，而旧代码是建完窗口才 install，
+//     事件根本没人接 —— 应用起来了、URL 没了。m_pendingUrl 负责接住这一发。
+//  2. 取值必须 file() 优先。jms:// 的 Base64 载荷落在 hostname 位置，而 QUrl 按
+//     DNS 规则校验主机名：单个 label 上限 63 字符。JumpServer 的载荷实测 120~680
+//     字符（本机联调的一条是 676），必然超限；Base64 里的 '+' '=' 同样非法。
+//     结果是 isValid() 为 false 且 toString()/toEncoded() 全返回空串。
+//     旧代码写成 url().isValid() ? url().toString() : file() —— 靠 isValid() 为
+//     假而恰好落到 file()，能用但纯属巧合；这里改成无条件 file() 优先，把意图
+//     写死，免得后人"优化"成 url().toString() 又把 URL 变成空串。
+//     回归闸门见 tests/url_dispatch_test.cpp::testJmsUrlSurvivesWhereQUrlFails。
 class UrlOpenFilter : public QObject {
 public:
-    explicit UrlOpenFilter(cubeshell::MainWindow *window, QObject *parent = nullptr)
+    explicit UrlOpenFilter(QObject *parent = nullptr)
         : QObject(parent)
-        , m_window(window)
     {
+    }
+
+    // 主窗口就绪后调用；在此之前到达的 URL 都存在 m_pendingUrl 里。
+    void setWindow(cubeshell::MainWindow *window) { m_window = window; }
+
+    // 取走并清空缓存的 URL（没有则返回空串）。
+    QString takePendingUrl()
+    {
+        const QString url = m_pendingUrl;
+        m_pendingUrl.clear();
+        return url;
     }
 
 protected:
@@ -48,11 +76,19 @@ protected:
     {
         if (event->type() == QEvent::FileOpen) {
             auto *openEvent = static_cast<QFileOpenEvent *>(event);
-            const QString url = openEvent->url().isValid()
-                                    ? openEvent->url().toString()
-                                    : openEvent->file();
-            if (!url.isEmpty() && m_window) {
-                m_window->handleUrl(url);
+            // file() 优先——见上面第 1 点。后两者仅作兜底。
+            QString url = openEvent->file();
+            if (url.isEmpty())
+                url = openEvent->url().toString();
+            if (url.isEmpty())
+                url = QString::fromUtf8(openEvent->url().toEncoded());
+            // 只接管自己的 scheme。file() 对"把文件拖到 Dock 图标"返回的是
+            // 普通路径，那类事件要放行给下游，不能在这里吞掉。
+            if (cubeshell::isSupportedUrlScheme(url)) {
+                if (m_window)
+                    m_window->handleUrl(url);
+                else
+                    m_pendingUrl = url;   // 窗口还没好，先存着
                 return true;
             }
         }
@@ -60,7 +96,8 @@ protected:
     }
 
 private:
-    cubeshell::MainWindow *m_window;
+    cubeshell::MainWindow *m_window = nullptr;
+    QString m_pendingUrl;
 };
 #endif // CUBESHELL_PLATFORM_OHOS
 
@@ -92,17 +129,9 @@ QString urlFromArguments(const QStringList &args)
         const QString &arg = args.at(i);
         if (arg == QLatin1String("-url") && i + 1 < args.size())
             return args.at(i + 1);
-        if (arg.startsWith(QLatin1String("jms://"))
-                || arg.startsWith(QLatin1String("ssh://"))
-                || arg.startsWith(QLatin1String("telnet://"))
-                || arg.startsWith(QLatin1String("cubeshell://")))
+        // scheme 清单与 QFileOpenEvent 过滤器共用（含 telnet:// 与 rdp 变体）。
+        if (cubeshell::isSupportedUrlScheme(arg))
             return arg;
-#ifdef CUBESHELL_WITH_RDP
-        // rdp:// / rdp+ntlm-password:// → MainWindow::handleUrl 直开 RDP 标签
-        if (arg.startsWith(QLatin1String("rdp://"))
-                || arg.startsWith(QLatin1String("rdp+")))
-            return arg;
-#endif
     }
     return QString();
 }
@@ -129,6 +158,20 @@ int main(int argc, char *argv[])
     // Linux/Windows: 从编译资源设置窗口/任务栏图标。
     // macOS: 由 bundle 的 Info.plist → logo.icns 处理 Dock 图标，不可在此覆盖。
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/logo.png")));
+#endif
+
+    // 0. URL 事件过滤器：必须紧跟 QApplication 构造安装，早于一切可能自旋事件
+    // 循环的代码（下面单实例检查里的 QMessageBox 就会自旋）。
+    // 对应Python: cube-shell.py 里 `app = CubeShellApp(...)` 之后立刻
+    //             `url_filter = create_url_event_filter(app)`
+    //
+    // macOS 冷启动（浏览器里点"打开 cube-shell.app"）时系统投递 QFileOpenEvent
+    // 的时机很早，装晚了事件已经被丢掉，表现就是"应用起来了但没连接"。
+    // 此刻窗口还不存在，URL 先进过滤器的缓存，等窗口就绪再消费。
+    // 鸿蒙：系统交互走 Want/Uri，无此事件，过滤器不安装。
+#ifndef CUBESHELL_PLATFORM_OHOS
+    auto *urlFilter = new UrlOpenFilter(&app);
+    app.installEventFilter(urlFilter);
 #endif
 
     // 1. 配置加载（theme.json → GlobalState 单例）。
@@ -176,16 +219,30 @@ int main(int argc, char *argv[])
     cubeshell::MainWindow window;
     window.show();
 
-    // 7. macOS QFileOpenEvent（应用已运行时系统投递的 URL Scheme 事件）。
-    // 鸿蒙：系统交互走 Want/Uri，无此事件，过滤器不安装。
 #ifndef CUBESHELL_PLATFORM_OHOS
-    auto *urlFilter = new UrlOpenFilter(&window, &app);
-    app.installEventFilter(urlFilter);
+    urlFilter->setWindow(&window);
+    // 窗口就绪前缓存下来的 URL，现在消费掉（命令行参数优先）。
+    if (startupUrl.isEmpty())
+        startupUrl = urlFilter->takePendingUrl();
 #endif
 
-    // 8. 启动参数里带 URL → 主窗口就绪后处理（BastionClient 解析并自动连接）。
+    // 7. 启动参数里带 URL → 主窗口就绪后处理（BastionClient 解析并自动连接）。
     if (!startupUrl.isEmpty())
         window.handleUrl(startupUrl);
+
+#ifndef CUBESHELL_PLATFORM_OHOS
+    // 8. 延迟兜底：FileOpen 事件也可能在 exec() 起来之后才到（macOS 冷启动
+    // 常见）。此时 setWindow() 已生效，过滤器会直接转发；这里只兜住"事件恰好
+    // 落在 setWindow() 之前、又没被上面消费到"的窄缝。
+    // 对应Python: bastion_client.py::setup_deferred_url_check 的 500ms 检查。
+    if (startupUrl.isEmpty()) {
+        QTimer::singleShot(500, &window, [urlFilter, &window]() {
+            const QString pending = urlFilter->takePendingUrl();
+            if (!pending.isEmpty())
+                window.handleUrl(pending);
+        });
+    }
+#endif
 
     return QApplication::exec();
 }

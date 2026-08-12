@@ -30,6 +30,7 @@
 #include "LanguageManager.h"
 
 #include "config/GlobalState.h"
+#include "platform/UrlSchemeRegistrar.h"
 #include "url_dispatch/UrlHandler.h"
 #include "util/ThemeManager.h"
 
@@ -148,6 +149,14 @@ int main(int argc, char *argv[])
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
+#ifdef Q_OS_MACOS
+    // 强制 Qt Multimedia 用原生 darwin(AVFoundation/CoreAudio) 后端。
+    // VoiceInput 的 QAudioSource 麦克风采集走它；FFmpeg 后端在打包时已被剔除
+    // （见 build.yml macOS 瘦身段），这里写死可确保 Qt 绝不会去回退加载 FFmpeg。
+    // 须在首次触碰 QMediaDevices/QAudioSource 之前设置（后端是懒解析的）。
+    qputenv("QT_MEDIA_BACKEND", "darwin");
+#endif
+
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("cube-shell"));
     QApplication::setOrganizationName(QStringLiteral("CubeShell"));
@@ -173,6 +182,14 @@ int main(int argc, char *argv[])
     auto *urlFilter = new UrlOpenFilter(&app);
     app.installEventFilter(urlFilter);
 #endif
+
+    // 0. URL Scheme 注册（jms:// / cubeshell:// / telnet:// → 本程序）。
+    // 对应Python: cube-shell.py __main__ 段的 ensure_registered()。
+    // 幂等：已注册（注册表命令指向当前 exe）则直接返回；未注册/指向旧程序则
+    // 静默改写。Windows 上写 HKCU\Software\Classes\<scheme>，无需管理员权限。
+    // 缺失这一步会导致注册表仍指向旧版 Python 程序——JumpServer 页面点击连接
+    // 拉起的是老程序。鸿蒙内部短路为 no-op（HAP 由系统声明 scheme）。
+    cubeshell::UrlSchemeRegistrar::ensureRegistered();
 
     // 1. 配置加载（theme.json → GlobalState 单例）。
     // 对应Python: util.THEME 的初始化

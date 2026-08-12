@@ -440,6 +440,25 @@ jobs:
           # 1) 部署 Qt 框架/插件（不在这里出 dmg）
           macdeployqt dist/cube-shell.app -verbose=1
 
+          # 1b) 瘦身：删除 Qt Multimedia 的 FFmpeg 后端及其 FFmpeg 动态库。
+          # cube-shell 只用 QAudioSource 做麦克风采集（VoiceInput 语音输入），macOS 上
+          # 走原生 darwin(AVFoundation/CoreAudio) 后端，用不到 FFmpeg 后端。后者会被
+          # macdeployqt 连同 libavcodec.61(~28.5MB)/libavformat/libavutil/libsw* 一起
+          # 拷进 bundle，纯属死重。这里在签名前删掉它们；VoiceInput 已用
+          # QT_MEDIA_BACKEND=darwin 强制原生后端，绝不会回退加载 FFmpeg 后端。
+          APP=dist/cube-shell.app
+          rm -f "$APP"/Contents/PlugIns/multimedia/libffmpegmediaplugin.dylib
+          rm -f "$APP"/Contents/Frameworks/libavcodec.*.dylib \
+                "$APP"/Contents/Frameworks/libavformat.*.dylib \
+                "$APP"/Contents/Frameworks/libavutil.*.dylib \
+                "$APP"/Contents/Frameworks/libswresample.*.dylib \
+                "$APP"/Contents/Frameworks/libswscale.*.dylib \
+                "$APP"/Contents/Frameworks/libpostproc.*.dylib
+          echo "=== 瘦身：已删除 FFmpeg 后端，剩余 multimedia 插件与 FFmpeg 库 ==="
+          ls -la "$APP"/Contents/PlugIns/multimedia/ 2>/dev/null || true
+          ls "$APP"/Contents/Frameworks/ | grep -iE 'libav|libsw|libpostproc' \
+            && echo "WARNING: 仍有残留 FFmpeg 库" || echo "FFmpeg 库已清空 ✓"
+
           # 2) ad-hoc 签名整个 bundle（--deep 递归签内嵌框架/插件，--force 覆盖旧签名）
           codesign -s - --force --deep dist/cube-shell.app
           # 校验签名有效（ad-hoc 会显示 "Signature=adhoc"）

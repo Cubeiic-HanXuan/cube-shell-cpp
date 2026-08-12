@@ -18,23 +18,29 @@
 //  - 取消标志：Python 的 threading.Event -> 每文件一个 std::atomic<bool>。
 //  - 进度信号从工作线程经 Qt::QueuedConnection 回投到本对象线程后发射。
 //
-// 并发模型（多连接真并行）：
+// 并发模型（两级并行）：
 // libssh2 的 SFTP handle 与其底层 LIBSSH2_SESSION 都非线程安全，同一个
-// session 上的所有调用必须经 SshClient::sessionLock() 串行 —— 只用主连接的话
-// 无论开多少线程，同一时刻都只有一个分片在飞。而 SFTP 是请求/应答协议，
-// 单流吞吐 ≈ chunk / RTT，与带宽无关：跨洋链路上加线程不加连接毫无收益。
+// session 上的所有调用必须经 SshClient::sessionLock() 串行。
 //
-// 因此传输走 SftpTransferPool：它按主连接的凭据另开若干条独立 SSH 连接
-// （各自一个 LIBSSH2_SESSION + 一个 SFTP 通道），每条传输流独占一条，彼此
-// 无锁竞争。并行发生在两个维度上：
-//   - 多文件：QThreadPool 每文件一个任务，各任务租用不同连接同时传。
+// 第一级（凭据可重放：密码/密钥直连）：SftpTransferPool 按主连接凭据另开
+// 若干条独立 SSH 连接（各自一个 session + 一个 SFTP 通道），每条流独占一条，
+// 无锁竞争，真正并行。主连接不参与传输，终端 shell 不被大文件传输拖住。
+//
+// 第二级（凭据不可重放：jms 一次性 token / keyboard-interactive MFA）：
+// 克隆不了连接，但 SSH 协议允许一条连接复用多条 channel —— 连接池改在主
+// session 上开多条独立 SFTP 通道，每条流各用一条。所有 channel 仍共享
+// sessionLock，但本文件按「逐调用加锁、EAGAIN 锁外等待」的纪律
+// （sftpCallInt/sftpCallPtr），多条通道的分片在一条 TCP 连接上交错在飞，
+// 且 UI 线程的终端写入不再被持锁空等堵死（曾因此卡 UI）。
+//
+// 并行发生在两个维度上：
+//   - 多文件：QThreadPool 每文件一个任务，各任务租用不同连接/通道同时传。
 //   - 单个大文件：切成 4MB 分片后由 kMaxStreamsPerFile 条流按"工作窃取"
 //     并行抢传（每条流各开一个远端 handle，seek 到自己的分片位置写）。
-// 主连接不参与并行传输（除降级情形），终端 shell 不再被大文件传输拖住。
 //
-// 降级：主连接用 OTP/keyboard-interactive 登录、或服务端 MaxSessions 打满时，
-// SftpTransferPool 拿不到克隆连接，自动退回"主连接 + sessionLock 串行"，
-// 语义与旧实现一致，只是不加速。详见 SftpTransferPool.h。
+// 最终降级：连主 session 的通道也开不出来（MaxSessions 打满）时，退回
+// "主连接共享 SFTP 通道 + sessionLock 串行"，功能不变只是不加速。
+// 详见 SftpTransferPool.h。
 //
 // 断点续传与并行的关系：元数据只有 uploaded_size 一个标量（Python 侧要按
 // 字段互认，不能加字段），标量天然只能表达"前缀已完成"。因此乱序完成的分片
@@ -96,9 +102,14 @@ public:
 
     // 并行传输连接数上限（含降级用的主连接）。1 = 完全串行。
     void setMaxTransferConnections(int n);
+    // 允许/禁止克隆独立连接（见 SftpTransferPool::setCloningEnabled）。
+    // 禁用后并行走主 session 通道多路复用（jms token / MFA 的默认形态）；
+    // 对之后因换连接新建的连接池同样生效。
+    void setCloningEnabled(bool enabled);
     // 实际可用的并行度（已建成的传输连接数）。传输开始后才有意义。
     int activeTransferConnections() const;
-    // 当前连接是否支持并行（OTP 登录 / 服务端限流时为 false）。
+    // 当前连接是否支持并行传输（可克隆 → 独立连接；jms token / MFA → 主
+    // session 通道多路复用；皆不可时为 false）。
     bool canParallelize() const;
 
     // 后台预建传输连接。挂接连接后尽早调用：每条连接要走完整 SSH 握手
@@ -219,6 +230,7 @@ private:
     // 连接池的另一份持有在 m_ctx->pool 上：析构等不到工作线程时，本对象先走，
     // 池由最后一个退出的工作线程释放，不再需要"故意泄漏"。
     std::shared_ptr<SftpTransferPool> m_transferPool;
+    bool m_cloningEnabled = true;       // 新建连接池时应用（见 setCloningEnabled）
     QString m_metadataDir;
     // 指针持有：析构超时时要能把它整个丢下（release），否则 ~QThreadPool 会
     // 无条件 waitForDone()，UI 线程照样被钉死 —— 那正是逃生口要避免的事。

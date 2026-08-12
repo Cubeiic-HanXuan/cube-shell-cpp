@@ -159,6 +159,19 @@ target_link_libraries(transfer_pool_test PRIVATE
     cube_core
 )
 
+# 主 session 通道多路复用（jms token / MFA 并行路径）的集成测试。
+# 强制 setCloningEnabled(false) 走通道路径；需要活的 sshd，连不上 exit 2 跳过。
+qt_add_executable(channel_multiplex_test
+    channel_multiplex_test.cpp
+)
+target_include_directories(channel_multiplex_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(channel_multiplex_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # UrlHandler / BastionClient unit test (pure logic, no network).
 qt_add_executable(url_dispatch_test
     url_dispatch_test.cpp
@@ -454,9 +467,11 @@ add_test(NAME command_executor_test COMMAND command_executor_test)
 add_test(NAME uploader_test COMMAND uploader_test)
 add_test(NAME upload_teardown_test COMMAND upload_teardown_test)
 add_test(NAME transfer_pool_test COMMAND transfer_pool_test)
+add_test(NAME channel_multiplex_test COMMAND channel_multiplex_test)
 add_test(NAME telnet_integration_test COMMAND telnet_integration_test)
 set_tests_properties(ssh_integration_test sftp_integration_test
     command_executor_test uploader_test upload_teardown_test
+    channel_multiplex_test
     telnet_integration_test PROPERTIES
     SKIP_RETURN_CODE 2
 )

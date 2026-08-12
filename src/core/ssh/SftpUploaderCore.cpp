@@ -43,47 +43,8 @@ const QString kMetaUploadedSize = QStringLiteral("uploaded_size");
 const QString kMetaLastModified = QStringLiteral("last_modified");
 const QString kMetaTimestamp    = QStringLiteral("timestamp");
 
-// libssh2 SFTP 调用的 EAGAIN 重试（连接自己的锁内调用）。
-// 主连接是非阻塞 session（openShell 里 set_blocking(0)）会返回 EAGAIN；
-// 连接池克隆出的传输连接没调过 openShell，保持阻塞模式，走不到重试分支。
-//
-// cancel 非空且置位时立即放弃：关闭路径上如果不看取消标志，非阻塞的主连接
-// 会一直 EAGAIN → select → EAGAIN 地空转，工作线程永不退出，析构就卡住了。
-// 与 SftpClient.cpp 的同名帮助函数保持一致的行为。
-template <typename Fn>
-auto sftpRetryInt(SshClient *client, Fn &&fn,
-                  const std::atomic<bool> *cancel = nullptr) -> decltype(fn())
-{
-    for (;;) {
-        auto rc = fn();
-        if (rc == LIBSSH2_ERROR_EAGAIN) {
-            if (cancel && cancel->load())
-                return rc;
-            client->waitReadable(5000);
-            continue;
-        }
-        return rc;
-    }
-}
-
-template <typename Fn>
-auto sftpRetryPtr(SshClient *client, Fn &&fn,
-                  const std::atomic<bool> *cancel = nullptr) -> decltype(fn())
-{
-    for (;;) {
-        auto *h = fn();
-        if (!h && libssh2_session_last_errno(client->rawSession()) == LIBSSH2_ERROR_EAGAIN) {
-            if (cancel && cancel->load())
-                return h;
-            client->waitReadable(5000);
-            continue;
-        }
-        return h;
-    }
-}
-
-// 取消感知的加锁。降级到主连接时用的是 SshClient::sessionLock()，终端读循环
-// 会长时间持有它 —— 无限等锁的话取消标志根本没机会被检查，工作线程退不出，
+// 取消感知的加锁。共享 session（主连接 / 通道槽）用的是 SshClient::sessionLock()，
+// 终端读循环也在争它 —— 无限等锁的话取消标志根本没机会被检查，工作线程退不出，
 // 关闭标签页就只能靠"泄漏连接池"兜底。这里改成轮询式 tryLock，两者之间
 // 检查取消标志，让关闭路径总能及时收敛。
 // 独占的克隆连接上这把锁没人竞争，首次 tryLock 即成功，无额外开销。
@@ -114,6 +75,81 @@ private:
     QRecursiveMutex *m_lock;
 };
 
+// 在租约连接上执行一次 int 返回的 libssh2 SFTP 调用，EAGAIN 自动重试。
+//
+// 锁纪律（本文件的硬规矩）：锁粒度收缩到单次调用，EAGAIN 的等待在锁外。
+// 共享 session（主连接 / 主 session 通道槽）上这是刚需 —— 持锁 select 空等
+// 会把终端读循环和 UI 线程的 writeChannel 全部堵死（jms/MFA 会话批量上传
+// 卡 UI 的根因）；锁一放，多条 SFTP 通道的分片才能在一条 TCP 连接上交错
+// 在飞。独占克隆连接（阻塞 session）上没有 EAGAIN，同一条路径退化为
+// 「拿锁一次调用」，两种租约不需要两套写法。
+//
+// cancel 置位时立即带 EAGAIN 哨兵返回（调用方把它当失败并走取消分支）：
+// 关闭路径上如果不看取消标志，非阻塞的主连接会一直 EAGAIN → select →
+// EAGAIN 地空转，工作线程永不退出，析构就卡住了。
+template <typename Fn>
+auto sftpCallInt(QRecursiveMutex *lock, SshClient *client, Fn &&fn,
+                 const std::atomic<bool> *cancel = nullptr) -> decltype(fn())
+{
+    for (;;) {
+        decltype(fn()) rc;
+        {
+            CancelableLock guard(lock, cancel);
+            if (!guard.held())
+                return static_cast<decltype(fn())>(LIBSSH2_ERROR_EAGAIN); // 已取消
+            rc = fn();
+        } // 锁在此释放 —— EAGAIN 等待发生在锁外
+        if (rc == LIBSSH2_ERROR_EAGAIN) {
+            if (cancel && cancel->load())
+                return rc;
+            client->waitReadable(5000);
+            continue;
+        }
+        return rc;
+    }
+}
+
+// 句柄返回版。EAGAIN 判定（session last_errno）必须在锁内完成 —— 放锁后
+// 其它线程的 libssh2 调用会改写 last_errno，锁外判定会把真失败误判成 EAGAIN。
+template <typename Fn>
+auto sftpCallPtr(QRecursiveMutex *lock, SshClient *client, Fn &&fn,
+                 const std::atomic<bool> *cancel = nullptr) -> decltype(fn())
+{
+    for (;;) {
+        decltype(fn()) h;
+        bool again = false;
+        {
+            CancelableLock guard(lock, cancel);
+            if (!guard.held())
+                return nullptr; // 已取消
+            h = fn();
+            if (!h)
+                again = libssh2_session_last_errno(client->rawSession())
+                        == LIBSSH2_ERROR_EAGAIN;
+        }
+        if (again) {
+            if (cancel && cancel->load())
+                return h;
+            client->waitReadable(5000);
+            continue;
+        }
+        return h;
+    }
+}
+
+// 读取 session 最近错误文本（用于失败文案；调用时最好已持锁，诊断用途容错）。
+QString sessionErrorText(SshClient *client)
+{
+    if (!client || !client->rawSession())
+        return QString();
+    char *msg = nullptr;
+    int len = 0;
+    libssh2_session_last_error(client->rawSession(), &msg, &len, 0);
+    if (msg && len > 0)
+        return QString::fromLatin1(msg, len);
+    return QString();
+}
+
 // 远程路径的父目录（远端固定为 POSIX 路径语义）。
 // 对应Python: os.path.dirname(remote_path)
 QString remoteDirname(const QString &path)
@@ -129,6 +165,42 @@ QString remoteDirname(const QString &path)
 QString baseName(const QString &path)
 {
     return QFileInfo(path).fileName(); // 对应Python: os.path.basename
+}
+
+// 在【已有租约】上判断远端路径是否存在。不新租连接 —— 供已持有租约的流复用
+// 同一条通道（见 runUploadStream 的目录补建），避免「持租约再租」的嵌套：
+// 连接池对主 session 通道是一律独占、租不到就等的（见 SftpTransferPool::lease），
+// 嵌套再租会让一个工作线程等自己占着的槽，直接死锁。
+bool remoteExistsOn(SftpTransferPool::Lease &lease, const QString &remotePath)
+{
+    if (!lease.isValid())
+        return false;
+    LIBSSH2_SFTP_ATTRIBUTES attrs{};
+    const QByteArray p = remotePath.toUtf8();
+    const int rc = sftpCallInt(lease.lock(), lease.client(), [&] {
+        return libssh2_sftp_stat_ex(lease.sftp(), p.constData(), quint32(p.size()),
+                                    LIBSSH2_SFTP_STAT, &attrs);
+    });
+    return rc == 0;
+}
+
+// 在【已有租约】上递归创建远程目录（对应Python: _mkdir_p）。
+bool remoteMkdirPOn(SftpTransferPool::Lease &lease, const QString &remotePath)
+{
+    if (remotePath.isEmpty() || remotePath == QStringLiteral("/"))
+        return true;
+    if (remoteExistsOn(lease, remotePath))
+        return true;
+    const QString parent = remoteDirname(remotePath);
+    if (!parent.isEmpty() && parent != remotePath) {
+        if (!remoteMkdirPOn(lease, parent))
+            return false;
+    }
+    const QByteArray p = remotePath.toUtf8();
+    const int rc = sftpCallInt(lease.lock(), lease.client(), [&] {
+        return libssh2_sftp_mkdir_ex(lease.sftp(), p.constData(), quint32(p.size()), 0755);
+    });
+    return rc == 0 || remoteExistsOn(lease, remotePath); // 并发下目录可能已被别的流建出
 }
 
 } // namespace
@@ -285,6 +357,7 @@ void SftpUploaderCore::setSshClient(SshClient *client)
         qCWarning(uploaderLog) << "upload workers still running while switching client; "
                                   "abandoning old transfer pool";
         m_transferPool = std::make_shared<SftpTransferPool>(client);
+        m_transferPool->setCloningEnabled(m_cloningEnabled);
         // 注意不换 ctx：在途任务还要靠它读自己的取消标志。它们各自的租约
         // 指向旧池，旧池的持有留在它们的栈上，不受这里替换的影响。
         QMutexLocker ctxLock(&m_ctx->lock);
@@ -298,6 +371,12 @@ void SftpUploaderCore::setMaxTransferConnections(int n)
 {
     m_transferPool->setMaxConnections(n);
     m_pool->setMaxThreadCount(qMax(1, n));
+}
+
+void SftpUploaderCore::setCloningEnabled(bool enabled)
+{
+    m_cloningEnabled = enabled;
+    m_transferPool->setCloningEnabled(enabled);
 }
 
 int SftpUploaderCore::activeTransferConnections() const
@@ -540,40 +619,16 @@ bool SftpUploaderCore::remoteExists(const WorkerContextPtr &ctx, const QString &
     auto lease = ctx->pool->lease();
     if (!lease.isValid())
         return false;
-    QMutexLocker<QRecursiveMutex> lock(lease.lock());
-    LIBSSH2_SFTP_ATTRIBUTES attrs{};
-    const QByteArray p = remotePath.toUtf8();
-    const int rc = sftpRetryInt(lease.client(), [&] {
-        return libssh2_sftp_stat_ex(lease.sftp(), p.constData(), quint32(p.size()),
-                                    LIBSSH2_SFTP_STAT, &attrs);
-    });
-    return rc == 0;
+    return remoteExistsOn(lease, remotePath);
 }
 
 // 对应Python: _mkdir_p
 bool SftpUploaderCore::remoteMkdirP(const WorkerContextPtr &ctx, const QString &remotePath)
 {
-    if (remotePath.isEmpty() || remotePath == QStringLiteral("/"))
-        return true;
-    if (remoteExists(ctx, remotePath))
-        return true;
-    const QString parent = remoteDirname(remotePath);
-    if (!parent.isEmpty() && parent != remotePath) {
-        if (!remoteMkdirP(ctx, parent))
-            return false;
-    }
     auto lease = ctx->pool->lease();
     if (!lease.isValid())
         return false;
-    int rc = -1;
-    {
-        QMutexLocker<QRecursiveMutex> lock(lease.lock());
-        const QByteArray p = remotePath.toUtf8();
-        rc = sftpRetryInt(lease.client(), [&] {
-            return libssh2_sftp_mkdir_ex(lease.sftp(), p.constData(), quint32(p.size()), 0755);
-        });
-    }
-    return rc == 0 || remoteExists(ctx, remotePath); // 并发下目录可能已被别的流建出
+    return remoteMkdirPOn(lease, remotePath);
 }
 
 // 建立远端空文件（totalSize == 0）。
@@ -583,9 +638,8 @@ bool SftpUploaderCore::createEmptyRemoteFile(const WorkerContextPtr &ctx,
     auto lease = ctx->pool->lease(&errorOut);
     if (!lease.isValid())
         return false;
-    QMutexLocker<QRecursiveMutex> lock(lease.lock());
     const QByteArray p = remotePath.toUtf8();
-    LIBSSH2_SFTP_HANDLE *handle = sftpRetryPtr(lease.client(), [&] {
+    LIBSSH2_SFTP_HANDLE *handle = sftpCallPtr(lease.lock(), lease.client(), [&] {
         return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
                                     LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
                                     0644, LIBSSH2_SFTP_OPENFILE);
@@ -594,12 +648,15 @@ bool SftpUploaderCore::createEmptyRemoteFile(const WorkerContextPtr &ctx,
         errorOut = QStringLiteral("创建远程文件失败: %1").arg(remotePath);
         return false;
     }
-    sftpRetryInt(lease.client(), [&] { return libssh2_sftp_close_handle(handle); });
+    sftpCallInt(lease.lock(), lease.client(),
+                [&] { return libssh2_sftp_close_handle(handle); });
     return true;
 }
 
 // 在已开好的 handle 上写一个分片（含 kMaxRetries 次重试）。
 // 每次重试都重新 seek —— 上一次可能已经写进去一部分，位置是脏的。
+// 锁纪律：逐次 libssh2 调用加锁、EAGAIN 锁外等待（见 sftpCallInt）；handle 是
+// 本条流独占的（每条流各开一个），调用之间的放锁不会被别人串改文件位置。
 bool SftpUploaderCore::writeChunk(LIBSSH2_SFTP_HANDLE *handle, QRecursiveMutex *lock,
                                   SshClient *client, const QByteArray &data,
                                   qint64 offset, QString &errorOut,
@@ -607,26 +664,24 @@ bool SftpUploaderCore::writeChunk(LIBSSH2_SFTP_HANDLE *handle, QRecursiveMutex *
 {
     for (int retry = 0; retry < kMaxRetries; ++retry) {
         QString err;
-        {
-            CancelableLock guard(lock, cancel);
-            if (!guard.held()) {
-                errorOut = QStringLiteral("上传已取消");
-                return false;
-            }
+        // seek 只改 handle 本地 offset（libssh2_sftp_seek64 无网络 I/O），
+        // 但 session 非线程安全，仍按统一纪律进锁。
+        sftpCallInt(lock, client, [&] {
             libssh2_sftp_seek64(handle, quint64(offset));
-            qint64 written = 0;
-            while (written < data.size()) {
-                const ssize_t n = sftpRetryInt(client, [&] {
-                    return libssh2_sftp_write(handle, data.constData() + written,
-                                              size_t(data.size() - written));
-                }, cancel);
-                if (n < 0) {
-                    err = QStringLiteral("sftp write failed (rc=%1) at offset %2")
-                              .arg(qint64(n)).arg(offset);
-                    break;
-                }
-                written += n;
+            return 0;
+        }, cancel);
+        qint64 written = 0;
+        while (written < data.size()) {
+            const ssize_t n = sftpCallInt(lock, client, [&] {
+                return libssh2_sftp_write(handle, data.constData() + written,
+                                          size_t(data.size() - written));
+            }, cancel);
+            if (n < 0) {
+                err = QStringLiteral("sftp write failed (rc=%1) at offset %2")
+                          .arg(qint64(n)).arg(offset);
+                break;
             }
+            written += n;
         }
         if (err.isEmpty())
             return true;
@@ -654,9 +709,13 @@ void SftpUploaderCore::runUploadStream(const WorkerContextPtr &ctx, FileTransfer
                                        const QString &fileId, const QString &localPath,
                                        const QString &remotePath)
 {
+    const std::atomic<bool> *cancel = state.cancel;
     QString leaseErr;
-    auto lease = ctx->pool->lease(&leaseErr);
+    // 等空闲槽期间若被取消，lease 带无效租约返回（不算错误，走取消分支）。
+    auto lease = ctx->pool->lease(&leaseErr, cancel);
     if (!lease.isValid()) {
+        if (cancel && cancel->load())
+            return; // 已取消：保留续传元数据，由 workerUpload 走取消分支
         state.setFailed(leaseErr.isEmpty() ? QStringLiteral("SFTP客户端未设置") : leaseErr);
         return;
     }
@@ -671,34 +730,29 @@ void SftpUploaderCore::runUploadStream(const WorkerContextPtr &ctx, FileTransfer
     // 打开远端文件：CREAT|WRITE 不带 TRUNC，各流 seek 到自己的分片位置写。
     // 越过 EOF 的写由 SFTP 服务端补零/稀疏化，与 Python 'rb+' 定位写语义一致。
     const QByteArray p = remotePath.toUtf8();
-    const std::atomic<bool> *cancel = state.cancel;
-    LIBSSH2_SFTP_HANDLE *handle = nullptr;
-    {
-        CancelableLock guard(lease.lock(), cancel);
-        if (guard.held()) {
-            handle = sftpRetryPtr(lease.client(), [&] {
-                return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
-                                            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
-                                            0644, LIBSSH2_SFTP_OPENFILE);
-            }, cancel);
-        }
-    }
+    LIBSSH2_SFTP_HANDLE *handle = sftpCallPtr(lease.lock(), lease.client(), [&] {
+        return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
+                                    LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
+                                    0644, LIBSSH2_SFTP_OPENFILE);
+    }, cancel);
     if (!handle && !(cancel && cancel->load())) {
-        // 父目录可能不存在（Python 在此路径下也会补建目录）。
-        remoteMkdirP(ctx, remoteDirname(remotePath));
-        CancelableLock guard(lease.lock(), cancel);
-        if (guard.held()) {
-            handle = sftpRetryPtr(lease.client(), [&] {
-                return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
-                                            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
-                                            0644, LIBSSH2_SFTP_OPENFILE);
-            }, cancel);
-        }
+        // 父目录可能不存在（Python 在此路径下也会补建目录）。复用本条流的租约
+        // （而不是再租一条）：连接池对主 session 通道租不到就等，再租会等自己。
+        remoteMkdirPOn(lease, remoteDirname(remotePath));
+        handle = sftpCallPtr(lease.lock(), lease.client(), [&] {
+            return libssh2_sftp_open_ex(lease.sftp(), p.constData(), quint32(p.size()),
+                                        LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT,
+                                        0644, LIBSSH2_SFTP_OPENFILE);
+        }, cancel);
     }
     if (!handle) {
         // 取消导致的打开失败不算错误：由 workerUpload 走取消分支保留续传元数据。
-        if (!(cancel && cancel->load()))
-            state.setFailed(QStringLiteral("open remote file failed: %1").arg(remotePath));
+        if (!(cancel && cancel->load())) {
+            const QString detail = sessionErrorText(lease.client());
+            state.setFailed(QStringLiteral("open remote file failed: %1%2")
+                                .arg(remotePath, detail.isEmpty()
+                                         ? QString() : QStringLiteral(" — ") + detail));
+        }
         return;
     }
 
@@ -738,10 +792,10 @@ void SftpUploaderCore::runUploadStream(const WorkerContextPtr &ctx, FileTransfer
         });
     }
 
-    // 收尾关句柄：取消时抢不到锁就放弃优雅关闭，句柄随连接关闭一并回收。
-    CancelableLock guard(lease.lock(), cancel);
-    if (guard.held())
-        sftpRetryInt(lease.client(), [&] { return libssh2_sftp_close_handle(handle); }, cancel);
+    // 收尾关句柄：取消时 sftpCall* 抢锁即带哨兵返回（不再争锁），句柄随连接/
+    // 通道关闭一并回收 —— 与原「取消时放弃优雅关闭」语义一致。
+    sftpCallInt(lease.lock(), lease.client(),
+                [&] { return libssh2_sftp_close_handle(handle); }, cancel);
 }
 
 // 对应Python: _upload_file_worker（Python 侧单线程串行；这里并行拆流）

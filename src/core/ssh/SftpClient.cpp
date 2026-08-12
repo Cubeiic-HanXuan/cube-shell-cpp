@@ -141,6 +141,34 @@ static auto sftpRetryPtr(SshClient *client, Fn &&fn,
     }
 }
 
+// 大文件传输流（downloadStream/uploadStream 的热循环）专用的调用纪律：
+// 逐次 libssh2 调用加锁、EAGAIN 锁外等待。共享 session（主连接 / 主 session
+// 通道槽）上持锁 select 空等会堵死终端读循环与 UI 线程的 writeChannel
+// （jms/MFA 会话传输卡 UI 的根因）；锁一放，多条 SFTP 通道才能在一条 TCP
+// 连接上真正交错。独占克隆连接（阻塞 session）上没有 EAGAIN，退化为
+// 「拿锁一次调用」。cancel 置位时带 EAGAIN 哨兵返回（调用方当失败退出）。
+// 与 sftpRetryInt 的区别仅在于 EAGAIN 等待发生在锁外 —— 上面的同步元数据
+// 操作都是短调用，仍用 sftpRetry*；传输热循环必须用这个。
+template <typename Fn>
+static auto sftpStreamCall(QRecursiveMutex *lock, SshClient *client, Fn &&fn,
+                           const std::atomic<bool> *cancel) -> decltype(fn())
+{
+    for (;;) {
+        decltype(fn()) rc;
+        {
+            QMutexLocker<QRecursiveMutex> guard(lock);
+            rc = fn();
+        } // 锁在此释放 —— EAGAIN 等待发生在锁外
+        if (rc == LIBSSH2_ERROR_EAGAIN) {
+            if (cancel && cancel->load())
+                return rc;
+            client->waitReadable(5000);
+            continue;
+        }
+        return rc;
+    }
+}
+
 bool SftpClient::open(SshError &error)
 {
     if (m_sftp)
@@ -679,8 +707,10 @@ void SftpClient::downloadStream(TransferState &state, const QString &remotePath,
                                 const QString &localPath)
 {
     QString leaseErr;
-    auto lease = m_transferPool->lease(&leaseErr);
+    auto lease = m_transferPool->lease(&leaseErr, &m_cancel);
     if (!lease.isValid()) {
+        if (m_cancel.load())
+            return; // 已取消：等空闲槽被打断，不算错误
         state.setFailed(leaseErr.isEmpty() ? QStringLiteral("no SFTP connection available")
                                            : leaseErr);
         return;
@@ -714,14 +744,12 @@ void SftpClient::downloadStream(TransferState &state, const QString &remotePath,
         qint64 got = 0;
         bool ok = true;
         while (got < size && !m_cancel) {
-            ssize_t n;
-            {
-                QMutexLocker<QRecursiveMutex> guard(lease.lock());
+            // seek+read 合成一次持锁调用：seek 只改 handle 本地 offset，read
+            // 才可能 EAGAIN。fh 是本条流独占的，调用之间放锁不会被串改位置。
+            const ssize_t n = sftpStreamCall(lease.lock(), lease.client(), [&] {
                 libssh2_sftp_seek64(fh, libssh2_uint64_t(offset + got));
-                n = sftpRetryInt(lease.client(), [&] {
-                    return libssh2_sftp_read(fh, buf.data() + got, size_t(size - got));
-                }, &m_cancel);
-            }
+                return libssh2_sftp_read(fh, buf.data() + got, size_t(size - got));
+            }, &m_cancel);
             if (n < 0) {
                 state.setFailed(QStringLiteral("read failed at offset %1: %2")
                                     .arg(offset + got).arg(remotePath));
@@ -757,8 +785,10 @@ void SftpClient::uploadStream(TransferState &state, const QString &localPath,
                               const QString &remotePath)
 {
     QString leaseErr;
-    auto lease = m_transferPool->lease(&leaseErr);
+    auto lease = m_transferPool->lease(&leaseErr, &m_cancel);
     if (!lease.isValid()) {
+        if (m_cancel.load())
+            return; // 已取消：等空闲槽被打断，不算错误
         state.setFailed(leaseErr.isEmpty() ? QStringLiteral("no SFTP connection available")
                                            : leaseErr);
         return;
@@ -796,23 +826,25 @@ void SftpClient::uploadStream(TransferState &state, const QString &localPath,
             break;
 
         bool ok = true;
+        // seek 只改 handle 本地 offset（无网络 I/O）；fh 是本条流独占的，
+        // 与后续写调用之间放锁不会被串改位置。
         {
             QMutexLocker<QRecursiveMutex> guard(lease.lock());
             libssh2_sftp_seek64(fh, libssh2_uint64_t(offset));
-            qint64 written = 0;
-            while (written < chunk.size() && !m_cancel) {
-                ssize_t n = sftpRetryInt(lease.client(), [&] {
-                    return libssh2_sftp_write(fh, chunk.constData() + written,
-                                              size_t(chunk.size() - written));
-                }, &m_cancel);
-                if (n < 0) {
-                    state.setFailed(QStringLiteral("write failed at offset %1: %2")
-                                        .arg(offset).arg(remotePath));
-                    ok = false;
-                    break;
-                }
-                written += n;
+        }
+        qint64 written = 0;
+        while (written < chunk.size() && !m_cancel) {
+            const ssize_t n = sftpStreamCall(lease.lock(), lease.client(), [&] {
+                return libssh2_sftp_write(fh, chunk.constData() + written,
+                                          size_t(chunk.size() - written));
+            }, &m_cancel);
+            if (n < 0) {
+                state.setFailed(QStringLiteral("write failed at offset %1: %2")
+                                    .arg(offset).arg(remotePath));
+                ok = false;
+                break;
             }
+            written += n;
         }
         if (!ok)
             break;

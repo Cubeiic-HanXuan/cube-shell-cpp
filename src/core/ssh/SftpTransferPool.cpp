@@ -21,6 +21,10 @@ namespace {
 constexpr int kCloseChannelRetries = 20;
 constexpr int kCloseChannelRetryMs = 10;
 
+// lease() 等空闲槽的唤醒间隔：每过这么长就醒一次，重查取消标志并重扫一遍槽
+// （防止错过唤醒，也让取消能在有界时间内被看到）。
+constexpr int kLeaseWaitSliceMs = 500;
+
 // 析构路径上抢锁（sessionLock / 槽锁）的最长等待。
 //
 // 抢这把锁只是为了"优雅关闭"SFTP 通道，而优雅关闭本身是可选的：通道内存随
@@ -186,11 +190,29 @@ int SftpTransferPool::activeConnections() const
     return qMax(1, n);
 }
 
+void SftpTransferPool::setCloningEnabled(bool enabled)
+{
+    QMutexLocker locker(&m_lock);
+    m_cloningEnabled = enabled;
+}
+
+bool SftpTransferPool::cloningEnabled() const
+{
+    QMutexLocker locker(&m_lock);
+    return m_cloningEnabled;
+}
+
 bool SftpTransferPool::canParallelize() const
 {
     QMutexLocker locker(&m_lock);
-    return m_primary && m_primary->isAuthReplayable() && m_maxConnections > 1
+    if (m_maxConnections <= 1 || !m_primary || !m_primary->rawSession()
+        || m_primaryAbandoned)
+        return false;
+    // 凭据可重放 → 克隆独立连接并行；不可重放（jms 一次性 token / MFA）→
+    // 主 session 通道多路复用并行。两条路只要一条通就算可并行。
+    const bool canClone = m_cloningEnabled && m_primary->isAuthReplayable()
         && !m_cloneExhausted;
+    return canClone || !m_channelExhausted;
 }
 
 // 主连接槽的连接信息。主 session 与终端 shell 共享，锁是 sessionLock。
@@ -280,104 +302,207 @@ bool SftpTransferPool::spawnClone(Slot &slot, QString *errorOut)
     return true;
 }
 
-SftpTransferPool::Lease SftpTransferPool::lease(QString *errorOut)
+// 在主 session 上多路复用一条独立 SFTP 通道（通道槽）。
+//
+// 凭据不可重放（jms 一次性 token / keyboard-interactive MFA）时克隆不了连接，
+// 但 SSH 协议允许一条连接上复用多条 channel —— 开新通道不需要重新认证，
+// 一次性/动态码凭据的限制天然绕开。通道与 shell、与其它 SFTP 通道并存；
+// 所有 channel 共享 sessionLock，由调用方按逐调用锁纪律交错（见头文件注释）。
+bool SftpTransferPool::spawnPrimaryChannel(Slot &slot)
+{
+    // 调用方已持 m_lock；槽已 append 且占住 inUse，sftp 为空时不会被租走。
+    SshClient *primary = m_primary;
+    if (!primary || !primary->rawSession() || m_primaryAbandoned)
+        return false;
+
+    _LIBSSH2_SFTP *sftp = nullptr;
+    {
+        // openSftpChannel 内有网络往返（EAGAIN 时 waitReadable），先放池锁，
+        // 避免堵住其它线程的 lease()。锁序与全类一致：m_lock → sessionLock。
+        m_lock.unlock();
+        {
+            QMutexLocker<QRecursiveMutex> slock(&primary->sessionLock());
+            sftp = openSftpChannel(primary);
+        }
+        m_lock.lock();
+    }
+    if (!sftp) {
+        qCInfo(sftpPoolLog) << "primary-channel spawn failed (MaxSessions?), "
+                               "falling back to shared channel";
+        m_channelExhausted = true; // 别再每次 lease 都白试一轮
+        return false;
+    }
+
+    slot.isPrimaryChannel = true;
+    slot.sftp = sftp;
+    qCDebug(sftpPoolLog) << "multiplexed SFTP channel on primary session, "
+                            "pool size now" << m_slots.size();
+    return true;
+}
+
+SftpTransferPool::Lease SftpTransferPool::lease(QString *errorOut,
+                                                const std::atomic<bool> *cancel)
 {
     QMutexLocker locker(&m_lock);
 
-    // 1) 已建成且空闲的克隆连接优先（零握手成本）。
-    for (int i = 0; i < m_slots.size(); ++i) {
-        Slot *slot = m_slots[i];
-        if (slot->isPrimary || slot->inUse || !slot->sftp)
-            continue;
-        // 连接可能在空闲期间被服务端断开，用则先验。
-        if (!slot->client || !slot->client->isTransportAlive()) {
-            if (slot->sftp) {
-                closeSftpChannelBounded(slot->client.get(), slot->sftp);
-                slot->sftp = nullptr;
-            }
-            if (slot->client)
-                slot->client->disconnectFromHost();
-            slot->client.reset();
-            slot->lock.reset();
-            continue;
-        }
-        slot->inUse = true;
-        Connection conn;
-        conn.client = slot->client.get();
-        conn.sftp = slot->sftp;
-        conn.lock = slot->lock.get();
-        conn.dedicated = true;
-        return Lease(this, i, conn);
-    }
+    for (;;) {
+        const bool primaryUsable = m_primary && m_primary->rawSession()
+            && !m_primaryAbandoned;
 
-    // 2) 未达上限且允许克隆 -> 新建一条专用连接。
-    const bool cloneAllowed = m_primary && m_primary->isAuthReplayable()
-        && m_maxConnections > 1 && !m_cloneExhausted;
-    if (cloneAllowed && m_slots.size() < m_maxConnections) {
-        auto *slot = new Slot();
-        slot->inUse = true; // 先占住，spawnClone 会短暂解锁池锁
-        m_slots.append(slot);
-        const int index = m_slots.size() - 1;
-        if (spawnClone(*slot, nullptr)) {
+        // 1) 已建成且空闲的克隆连接优先（零握手成本，独立 TCP 最优）。
+        for (int i = 0; i < m_slots.size(); ++i) {
+            Slot *slot = m_slots[i];
+            if (slot->isPrimary || slot->isPrimaryChannel || slot->inUse || !slot->sftp)
+                continue;
+            // 连接可能在空闲期间被服务端断开，用则先验。
+            if (!slot->client || !slot->client->isTransportAlive()) {
+                if (slot->sftp) {
+                    closeSftpChannelBounded(slot->client.get(), slot->sftp);
+                    slot->sftp = nullptr;
+                }
+                if (slot->client)
+                    slot->client->disconnectFromHost();
+                slot->client.reset();
+                slot->lock.reset();
+                continue;
+            }
+            slot->inUse = true;
             Connection conn;
             conn.client = slot->client.get();
             conn.sftp = slot->sftp;
             conn.lock = slot->lock.get();
             conn.dedicated = true;
-            return Lease(this, index, conn);
+            return Lease(this, i, conn);
         }
-        // 建不起来：撤掉这个槽，落到主连接。注意 spawnClone 期间解过锁，
-        // 槽位下标可能已被其它线程的 append 挤动，按指针精确移除。
-        const int actual = m_slots.indexOf(slot);
-        if (actual >= 0)
-            m_slots.remove(actual);
-        delete slot;
-    }
 
-    // 3) 复用一条已建成但正忙的克隆连接（多于连接数的任务在此排队；
-    //    这比压到主连接上好——不会和终端 shell 抢 sessionLock）。
-    for (int i = 0; i < m_slots.size(); ++i) {
-        Slot *slot = m_slots[i];
-        if (slot->isPrimary || !slot->sftp)
-            continue;
-        Connection conn;
-        conn.client = slot->client.get();
-        conn.sftp = slot->sftp;
-        conn.lock = slot->lock.get();
-        conn.dedicated = true;
-        // 不置 inUse：这是共享复用，归还时也不清标志（见 releaseSlot）。
-        return Lease(this, -1, conn);
-    }
+        // 2) 空闲的主 session 通道槽（多路复用，无需重认证）。
+        if (primaryUsable) {
+            for (int i = 0; i < m_slots.size(); ++i) {
+                Slot *slot = m_slots[i];
+                if (!slot->isPrimaryChannel || slot->inUse || !slot->sftp)
+                    continue;
+                slot->inUse = true;
+                Connection conn;
+                conn.client = m_primary;
+                conn.sftp = slot->sftp;
+                conn.lock = &m_primary->sessionLock();
+                conn.dedicated = false;
+                return Lease(this, i, conn);
+            }
+        }
 
-    // 4) 彻底降级：主连接 + sessionLock 串行。
-    Connection conn = primaryConnection(errorOut);
-    if (!conn.isValid())
-        return Lease();
-    return Lease(this, -1, conn);
+        // 3) 未达上限 -> 新建：克隆连接优先，主 session 通道兜底。
+        const bool cloneAllowed = primaryUsable && m_cloningEnabled
+            && m_primary->isAuthReplayable()
+            && m_maxConnections > 1 && !m_cloneExhausted;
+        const bool channelAllowed = primaryUsable && m_maxConnections > 1
+            && !m_channelExhausted;
+        if ((cloneAllowed || channelAllowed) && m_slots.size() < m_maxConnections) {
+            auto *slot = new Slot();
+            slot->inUse = true; // 先占住，spawn* 会短暂解锁池锁
+            m_slots.append(slot);
+            const int index = m_slots.size() - 1;
+            bool ok = false;
+            if (cloneAllowed)
+                ok = spawnClone(*slot, nullptr);
+            // 克隆被拒（一次性 token / MaxSessions）→ 落到主 session 通道。
+            if (!ok && channelAllowed)
+                ok = spawnPrimaryChannel(*slot);
+            if (ok) {
+                Connection conn;
+                if (slot->isPrimaryChannel) {
+                    conn.client = m_primary;
+                    conn.sftp = slot->sftp;
+                    conn.lock = &m_primary->sessionLock();
+                    conn.dedicated = false;
+                } else {
+                    conn.client = slot->client.get();
+                    conn.sftp = slot->sftp;
+                    conn.lock = slot->lock.get();
+                    conn.dedicated = true;
+                }
+                return Lease(this, index, conn);
+            }
+            // 建不起来：撤掉这个槽，落到下面的等待/共享主通道。注意 spawn* 期间
+            // 解过锁，槽位下标可能已被其它线程的 append 挤动，按指针精确移除。
+            const int actual = m_slots.indexOf(slot);
+            if (actual >= 0)
+                m_slots.remove(actual);
+            delete slot;
+        }
+
+        // 4) 共享已建成的克隆连接（多于连接数的任务在此排队）。克隆连接是阻塞
+        //    session：每次 libssh2 调用在槽锁内原子完成、不会有 EAGAIN 半途态，
+        //    两个线程共享同一条通道也不会把 request_id 配对打乱 —— 共享是安全的。
+        for (int i = 0; i < m_slots.size(); ++i) {
+            Slot *slot = m_slots[i];
+            if (slot->isPrimary || slot->isPrimaryChannel || !slot->sftp)
+                continue;
+            Connection conn;
+            conn.client = slot->client.get();
+            conn.sftp = slot->sftp;
+            conn.lock = slot->lock.get();
+            conn.dedicated = true;
+            // 不置 inUse：这是共享复用，归还时也不清标志（见 releaseSlot）。
+            return Lease(this, -1, conn);
+        }
+
+        // 走到这里说明没有可共享的克隆，只能走主 session 的通道。主 session 是
+        // 非阻塞的，逐调用锁纪律下两个线程若共享同一条 SFTP 通道，EAGAIN 半途态
+        // 会把 libssh2 的 request_id 配对打乱而挂死（实测如此）。所以主 session
+        // 的通道一律独占，绝不共享：租不到就等空闲槽。
+
+        // 5) 主连接自己的共享 SFTP 通道（m_primarySftp）作为最后一条可独占的
+        //    通道：借用主连接槽 [0] 的 inUse 标志做互斥，一次只租给一条流。
+        if (primaryUsable && !m_slots.isEmpty() && !m_slots[0]->inUse) {
+            Connection conn = primaryConnection(errorOut);
+            if (!conn.isValid())
+                return Lease(); // 主连接通道也开不出来，errorOut 已填
+            m_slots[0]->inUse = true;
+            return Lease(this, 0, conn);
+        }
+
+        // 6) 所有独占通道都忙：可取消的有限等待，醒了重扫。持锁等
+        //    m_slotFreed（wait 期间放锁），releaseSlot() 归还槽时唤醒。
+        if (cancel && cancel->load())
+            return Lease();
+        if (!primaryUsable) {
+            // 主连接不可用且没有可共享的克隆：无计可施，别死等。
+            if (errorOut)
+                *errorOut = QStringLiteral("SFTP客户端未设置");
+            return Lease();
+        }
+        m_slotFreed.wait(&m_lock, kLeaseWaitSliceMs);
+    }
 }
 
 void SftpTransferPool::releaseSlot(int slot)
 {
     if (slot < 0)
-        return; // 主连接租约 / 共享复用租约：无独占标志可清
+        return; // 共享克隆复用租约：无独占标志可清
     QMutexLocker locker(&m_lock);
     if (slot < m_slots.size())
         m_slots[slot]->inUse = false;
+    m_slotFreed.wakeAll(); // 叫醒 lease() 里等空闲槽的线程
 }
 
-// 后台补足空闲连接。每个任务建一条：spawnClone 内部会短暂释放池锁做网络
+// 后台补足空闲连接/通道。每个任务建一条：spawn* 内部会短暂释放池锁做网络
 // I/O，所以多个预热任务可以真正并行握手（4 条连接的预热 ≈ 1 条的耗时）。
+// 凭据不可克隆时改为预建主 session 的 SFTP 通道（jms 一次性 token / MFA）。
 void SftpTransferPool::prewarm(int count)
 {
     int toSpawn = 0;
     {
         QMutexLocker locker(&m_lock);
-        if (!m_primary || !m_primary->isAuthReplayable() || m_maxConnections <= 1
-            || m_cloneExhausted) {
-            return; // 不能克隆：预热没有意义
-        }
+        const bool primaryUsable = m_primary && m_primary->rawSession()
+            && !m_primaryAbandoned;
+        const bool canClone = primaryUsable && m_cloningEnabled
+            && m_primary->isAuthReplayable() && !m_cloneExhausted;
+        const bool canChannel = primaryUsable && !m_channelExhausted;
+        if (m_maxConnections <= 1 || (!canClone && !canChannel))
+            return; // 既不能克隆也不能开通道：预热没有意义
         const int target = count > 0 ? qMin(count, m_maxConnections) : m_maxConnections;
-        // m_slots 含主连接槽，克隆连接数 = size() - 1。
+        // m_slots 含主连接槽，传输槽数 = size() - 1。
         toSpawn = target - m_slots.size();
     }
     if (toSpawn <= 0)
@@ -389,12 +514,24 @@ void SftpTransferPool::prewarm(int count)
             Slot *slot = nullptr;
             {
                 QMutexLocker locker(&m_lock);
-                if (m_cloneExhausted || m_slots.size() >= m_maxConnections)
+                if (m_slots.size() >= m_maxConnections)
+                    return;
+                const bool canClone = m_primary && m_primary->rawSession()
+                    && !m_primaryAbandoned && m_cloningEnabled
+                    && m_primary->isAuthReplayable() && !m_cloneExhausted;
+                const bool canChannel = m_primary && m_primary->rawSession()
+                    && !m_primaryAbandoned && !m_channelExhausted;
+                if (!canClone && !canChannel)
                     return;
                 slot = new Slot();
-                // 不置 inUse：预热建好的连接应当是空闲可租的。
+                // 不置 inUse：预热建好的连接/通道应当是空闲可租的。
                 m_slots.append(slot);
-                if (!spawnClone(*slot, nullptr)) {
+                bool ok = false;
+                if (canClone)
+                    ok = spawnClone(*slot, nullptr);
+                if (!ok && canChannel)
+                    ok = spawnPrimaryChannel(*slot);
+                if (!ok) {
                     const int actual = m_slots.indexOf(slot);
                     if (actual >= 0)
                         m_slots.remove(actual);
@@ -409,6 +546,9 @@ void SftpTransferPool::shutdownTransferSockets()
 {
     QMutexLocker locker(&m_lock);
     for (Slot *slot : m_slots) {
+        // 只打断池自己拥有的克隆连接。通道槽（!slot->client）与主连接槽共享
+        // 主连接的 socket —— shutdown 它会误杀终端会话；且主 session 是非阻塞
+        // 模式，通道槽上的传输线程走 EAGAIN 循环看取消标志即可退出，无需打断。
         if (slot->isPrimary || !slot->client)
             continue;
         // 不取槽锁：正阻塞在 libssh2 调用里的线程正握着它，取锁会死等。
@@ -422,6 +562,7 @@ void SftpTransferPool::abandonPrimary()
     QMutexLocker locker(&m_lock);
     m_primaryAbandoned = true;
     m_primarySftp = nullptr; // 只丢指针，绝不在死 socket 上做 sftp_shutdown
+    m_slotFreed.wakeAll();   // 让等槽的线程重扫，按 !primaryUsable 退出
 }
 
 void SftpTransferPool::closeAll()
@@ -430,6 +571,26 @@ void SftpTransferPool::closeAll()
     for (Slot *slot : m_slots) {
         if (slot->isPrimary)
             continue;
+        if (slot->isPrimaryChannel) {
+            // 通道槽：只关自己在主 session 上的 SFTP 通道，绝不动主连接本身。
+            // 主连接已死（abandon）时只清指针，不做网络往返（往死 socket 写会崩）。
+            if (slot->sftp && !m_primaryAbandoned && m_primary
+                && m_primary->rawSession()) {
+                // 与克隆槽同理用 tryLock：万一还有线程卡在主 session 的
+                // libssh2 调用里，无限等锁就等于把 UI 线程一起赔进去。
+                if (m_primary->sessionLock().tryLock(kCloseLockTimeoutMs)) {
+                    closeSftpChannelBounded(m_primary, slot->sftp);
+                    m_primary->sessionLock().unlock();
+                } else {
+                    qCWarning(sftpPoolLog) << "sessionLock busy on teardown; "
+                                              "skipping graceful shutdown of "
+                                              "multiplexed SFTP channel";
+                }
+            }
+            slot->sftp = nullptr;
+            slot->inUse = false;
+            continue;
+        }
         // 持槽锁再关：正常路径下调用方已停掉所有传输线程（无未归还租约），
         // 但共享复用租约（lease 第 3 步）不置 inUse，拿锁是廉价的双保险。
         // 同样用 tryLock：万一还有线程卡在这条连接的 libssh2 调用里，
@@ -456,7 +617,11 @@ void SftpTransferPool::closeAll()
         delete m_slots[i];
         m_slots.remove(i);
     }
-    m_cloneExhausted = false; // 重连后允许重新尝试克隆
+    if (!m_slots.isEmpty())
+        m_slots[0]->inUse = false; // 共享主通道槽复位（前置条件：无未归还租约）
+    m_cloneExhausted = false;   // 重连后允许重新尝试克隆
+    m_channelExhausted = false; // 重连后允许重新尝试通道
+    m_slotFreed.wakeAll();      // 状态变了，让等槽的线程重扫（并按取消/无效退出）
 }
 
 } // namespace cubeshell

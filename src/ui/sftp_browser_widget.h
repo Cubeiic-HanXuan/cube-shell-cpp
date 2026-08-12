@@ -25,6 +25,7 @@ class QTreeWidgetItem;
 class QLineEdit;
 class QProgressBar;
 class QLabel;
+class QResizeEvent;
 
 namespace cubeshell {
 
@@ -66,6 +67,10 @@ public:
     // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
     // tabTitle: 用于 tooltip 的标签名，展示完整的“分屏 N · 标签名”。
     void setPaneIndicator(int paneNumber, int totalPanes, const QString &tabTitle);
+
+protected:
+    // 宽度变化后按新宽度重新截断状态栏文本。
+    void resizeEvent(QResizeEvent *event) override;
 
 private slots:
     void onItemDoubleClicked(QTreeWidgetItem *item, int column);
@@ -111,6 +116,9 @@ private:
     // 避免用于不可中断的超长任务。
     void startWorker(QThread *worker);
     void populate(const QString &path, const SftpFileInfoList &entries);
+    // 写底部状态栏：按 label 当前宽度做省略号截断，完整文本放 tooltip，
+    // 避免长错误信息把面板撑宽。所有状态输出统一走这里，不要直接 setText。
+    void setStatusText(const QString &text);
     QString selectedRemotePath() const;
     // 全部选中项的远端路径（已剔除 ".." 条目），供删除等批量操作使用。
     QStringList selectedRemotePaths() const;
@@ -135,6 +143,8 @@ private:
     QTreeWidget *m_tree = nullptr;
     QProgressBar *m_progress = nullptr;
     QLabel *m_status = nullptr;
+    // 状态栏完整文本（未截断），resize 后据此重新截断。
+    QString m_statusFullText;
 
     QString m_cwd = QStringLiteral("/");
     // 该会话经跳板机代理（见 setBastionProxied）。

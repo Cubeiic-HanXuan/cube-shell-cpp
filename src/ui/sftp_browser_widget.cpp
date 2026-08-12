@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -19,6 +20,8 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QResizeEvent>
+#include <QSizePolicy>
 #include <QStyle>
 #include <QThread>
 #include <QTreeWidget>
@@ -128,6 +131,12 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     m_progress->setVisible(false);
     m_status = new QLabel(this);
     m_status->setStyleSheet(QStringLiteral("color: gray;"));
+    // 长文本（如一整段 SFTP 错误信息）会把 label 的 sizeHint 撑得很宽，
+    // 进而撑宽左侧文件面板、挤压右侧终端。水平方向改用 Ignored 策略，
+    // 让 label 只占据布局实际分给它的宽度，超出部分省略号截断，
+    // 完整内容放进 tooltip（见 setStatusText）。
+    m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_status->setMinimumWidth(0);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(2, 2, 2, 2);
@@ -208,13 +217,13 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
         });
         connect(m_sftp, &SftpClient::transferFinished, this, [this](const QString &path, bool ok, const QString &msg) {
             m_progress->setVisible(false);
-            m_status->setText(ok ? tr("已完成：%1").arg(QFileInfo(path).fileName())
+            setStatusText(ok ? tr("已完成：%1").arg(QFileInfo(path).fileName())
                                  : tr("传输失败：%1").arg(msg));
             if (ok)
                 refresh();
         });
         connect(m_sftp, &SftpClient::operationFailed, this, [this](const QString &op, const QString &, const QString &msg) {
-            m_status->setText(tr("%1 失败：%2").arg(op, msg));
+            setStatusText(tr("%1 失败：%2").arg(op, msg));
         });
     }
     if (!m_uploader) {
@@ -235,7 +244,7 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
                     m_activeUploads.remove(fileId);
                     if (m_activeUploads.isEmpty()) {
                         m_progress->setVisible(false);
-                        m_status->setText(tr("上传完成：%1").arg(filename));
+                        setStatusText(tr("上传完成：%1").arg(filename));
                     } else {
                         refreshUploadProgress();
                     }
@@ -248,7 +257,7 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
                         m_progress->setVisible(false);
                     else
                         refreshUploadProgress();
-                    m_status->setText(tr("上传失败：%1（%2）").arg(filename, error));
+                    setStatusText(tr("上传失败：%1（%2）").arg(filename, error));
                 }, Qt::QueuedConnection);
     } else {
         m_uploader->setSshClient(raw);
@@ -299,6 +308,25 @@ void SftpBrowserWidget::setPaneIndicator(int paneNumber, int totalPanes,
     updatePaneBadge(m_paneBadge, paneNumber, totalPanes, tabTitle);
 }
 
+void SftpBrowserWidget::setStatusText(const QString &text)
+{
+    m_statusFullText = text;
+    // 按当前可用宽度做省略号截断；完整文本放 tooltip，鼠标悬停可看全。
+    // 布局尚未给出宽度（构造初期）时先放全文，随后 resizeEvent 会按实际宽度截断。
+    const int w = m_status->width();
+    m_status->setText(w > 0 ? m_status->fontMetrics().elidedText(text, Qt::ElideMiddle, w)
+                            : text);
+    m_status->setToolTip(text);
+}
+
+void SftpBrowserWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // 面板宽度变化（拖动分栏等）后按新宽度重新截断状态栏文本。
+    if (!m_statusFullText.isEmpty())
+        setStatusText(m_statusFullText);
+}
+
 void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
 {
     if (!m_sftp)
@@ -307,7 +335,7 @@ void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
     // 保持一致（均为 m_cwd），依赖 m_cwd 的操作（新建/上传等）不会被误导；
     // 数据就绪后由 populate() 在挂起重绘的状态下一次性原子替换，消除“先空后满”的闪烁。
     // 对应Python: refreshDirs/handle_file_tree_updated（新数据就绪前不动旧树）
-    m_status->setText(tr("正在加载 %1 …").arg(path));
+    setStatusText(tr("正在加载 %1 …").arg(path));
 
     // 陈旧响应防护：每次加载递增序号，回调只接受最新一次请求的结果，
     // 防止快速连续双击时乱序返回的旧目录数据覆盖新目录。
@@ -329,7 +357,7 @@ void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
                     // 回退到 m_cwd（手输无效路径时残留的错误文本会破坏
                     // “路径栏 == m_cwd == 树内容”不变量），状态栏给出目标路径
                     // 与失败原因，避免误认旧内容为目标目录。
-                    m_status->setText(tr("加载 %1 失败：%2").arg(path, errMsg));
+                    setStatusText(tr("加载 %1 失败：%2").arg(path, errMsg));
                     m_pathEdit->setText(m_cwd);
                     return;
                 }
@@ -353,7 +381,7 @@ void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
                     m_pathEdit->setText(m_cwd);
                     showUnavailableNotice();
                 } else
-                    m_status->setText(tr("无法列出目录：%1").arg(errMsg));
+                    setStatusText(tr("无法列出目录：%1").arg(errMsg));
                 return;
             }
             // 代理端连根目录都是空的 ⇒ 它不提供资产文件系统，给出准确说明，
@@ -369,7 +397,7 @@ void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
             m_cwd = path;
             m_pathEdit->setText(m_cwd);
             populate(path, entries);
-            m_status->setText(tr("%1 · %2 项").arg(path).arg(entries.size()));
+            setStatusText(tr("%1 · %2 项").arg(path).arg(entries.size()));
         }, Qt::QueuedConnection);
     });
     startWorker(worker);
@@ -395,7 +423,7 @@ void SftpBrowserWidget::showUnavailableNotice()
                         "文件传输请在 JumpServer 网页端进行。"));
     item->setFlags(Qt::NoItemFlags);   // 不可选中/不可双击，避免当成目录点进去
     m_tree->setUpdatesEnabled(true);
-    m_status->setText(tr("已连接 · SFTP 不可用"));
+    setStatusText(tr("已连接 · SFTP 不可用"));
 }
 
 // 写操作闸门：不可用态下统一给说明，别让用户逐个撞 libssh2 原始错误。
@@ -596,10 +624,10 @@ void SftpBrowserWidget::refreshUploadProgress()
     const int fileCount = m_activeUploads.size();
     const int streams = m_uploader ? m_uploader->activeTransferConnections() : 1;
     if (fileCount > 1) {
-        m_status->setText(tr("正在上传 %1 个文件 … %2%（%3 条并行连接）")
+        setStatusText(tr("正在上传 %1 个文件 … %2%（%3 条并行连接）")
                               .arg(fileCount).arg(percent).arg(streams));
     } else {
-        m_status->setText(tr("正在上传 %1 … %2%（%3 条并行连接）")
+        setStatusText(tr("正在上传 %1 … %2%（%3 条并行连接）")
                               .arg(QFileInfo(m_activeUploads.constBegin().key()).fileName())
                               .arg(percent).arg(streams));
     }
@@ -775,7 +803,7 @@ void SftpBrowserWidget::decompressSelected()
         return;
     }
 
-    m_status->setText(tr("正在解压..."));
+    setStatusText(tr("正在解压..."));
     SshClient *client = m_client.get();
     // 关停标志以共享指针捕获：析构置位后 runCommand 在下一轮读循环退出，
     // 且超时泄漏的线程读到的标志仍有效。
@@ -788,7 +816,7 @@ void SftpBrowserWidget::decompressSelected()
         const bool ok = res.ok() && res.exitCode == 0;
         const QString msg = ok ? QString() : (res.errorMessage.isEmpty() ? res.stderrText : res.errorMessage);
         QMetaObject::invokeMethod(this, [this, ok, msg]() {
-            m_status->setText(ok ? tr("解压任务已完成") : tr("解压失败：%1").arg(msg));
+            setStatusText(ok ? tr("解压任务已完成") : tr("解压失败：%1").arg(msg));
             if (ok)
                 refresh();
         }, Qt::QueuedConnection);
@@ -827,7 +855,7 @@ void SftpBrowserWidget::editSelected()
     if (item && item->data(0, kIsDirRole).toBool())
         return;
 
-    m_status->setText(tr("正在打开 %1 …").arg(remote));
+    setStatusText(tr("正在打开 %1 …").arg(remote));
     SftpClient *sftp = m_sftp;
     QThread *worker = QThread::create([this, sftp, remote]() {
         SshError err;
@@ -836,10 +864,10 @@ void SftpBrowserWidget::editSelected()
         // 回主线程开编辑器（跨线程 → QueuedConnection）。
         QMetaObject::invokeMethod(this, [this, remote, data, errMsg]() {
             if (!errMsg.isEmpty()) {
-                m_status->setText(tr("打开失败：%1").arg(errMsg));
+                setStatusText(tr("打开失败：%1").arg(errMsg));
                 return;
             }
-            m_status->setText(m_cwd);
+            setStatusText(m_cwd);
             auto *editor = new TextEditor(nullptr);
             editor->setAttribute(Qt::WA_DeleteOnClose);
             editor->setFileLabel(remote);
@@ -855,7 +883,7 @@ void SftpBrowserWidget::editSelected()
                             const bool ok = sftp->writeFile(remote, bytes, err);
                             const QString msg = err.message;
                             QMetaObject::invokeMethod(this, [this, remote, ok, msg]() {
-                                m_status->setText(ok ? tr("已保存：%1").arg(remote)
+                                setStatusText(ok ? tr("已保存：%1").arg(remote)
                                                      : tr("保存失败：%1").arg(msg));
                             }, Qt::QueuedConnection);
                         });
@@ -887,7 +915,7 @@ void SftpBrowserWidget::compressSelected()
         cmd = QStringLiteral("tar -czf '%1' -C '%2' '%3'")
                   .arg(joinPath(dir, dlg.fileName()), dir, baseName);
 
-    m_status->setText(tr("正在压缩 %1 …").arg(baseName));
+    setStatusText(tr("正在压缩 %1 …").arg(baseName));
     SshClient *client = m_client.get();
     // 阻塞执行（无信号，线程安全的静态入口）；关停标志接线同 decompressSelected。
     auto shuttingDown = m_shuttingDown;
@@ -899,7 +927,7 @@ void SftpBrowserWidget::compressSelected()
         const bool ok = res.ok() && res.exitCode == 0;
         const QString msg = ok ? QString() : (res.errorMessage.isEmpty() ? res.stderrText : res.errorMessage);
         QMetaObject::invokeMethod(this, [this, ok, msg]() {
-            m_status->setText(ok ? tr("压缩完成") : tr("压缩失败：%1").arg(msg));
+            setStatusText(ok ? tr("压缩完成") : tr("压缩失败：%1").arg(msg));
             if (ok)
                 refresh();
         }, Qt::QueuedConnection);

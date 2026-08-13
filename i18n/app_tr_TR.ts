@@ -241,12 +241,12 @@
         <translation>GLM-4.7 AI Yeteneklerini Yapılandır</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;Dil Ayarları</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;Genel Ayarlar</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>Uygulama Dilini Ayarla</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>Yazı tipi, kodlama, zaman aşımı ve diğer genel ayarlar</translation>
     </message>
     <message>
         <source>&amp;关于</source>

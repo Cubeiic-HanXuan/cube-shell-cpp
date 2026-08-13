@@ -241,12 +241,12 @@
         <translation>กำหนดค่าความสามารถ GLM-4.7 AI</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;การตั้งค่าภาษา</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;การตั้งค่าทั่วไป</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>ตั้งค่าภาษาแอปพลิเคชัน</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>แบบอักษร การเข้ารหัส การหมดเวลา และการตั้งค่าทั่วไปอื่น ๆ</translation>
     </message>
     <message>
         <source>&amp;关于</source>

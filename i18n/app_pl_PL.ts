@@ -241,12 +241,12 @@
         <translation>Konfiguruj możliwości GLM-4.7 AI</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;Ustawienia języka</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;Ustawienia ogólne</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>Ustaw język aplikacji</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>Czcionka, kodowanie, limit czasu i inne ustawienia ogólne</translation>
     </message>
     <message>
         <source>&amp;关于</source>

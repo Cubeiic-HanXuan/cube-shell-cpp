@@ -69,8 +69,8 @@
     <message><source>设置主题</source><translation>Imposta tema</translation></message>
     <message><source>&amp;AI 设置</source><translation>&amp;Impostazioni IA</translation></message>
     <message><source>配置 GLM-4.7 AI 能力</source><translation>Configura funzionalità IA GLM-4.7</translation></message>
-    <message><source>&amp;语言设置</source><translation>&amp;Impostazioni lingua</translation></message>
-    <message><source>设置应用程序语言</source><translation>Imposta lingua applicazione</translation></message>
+    <message><source>&amp;通用设置</source><translation>&amp;Impostazioni generali</translation></message>
+    <message><source>字体、编码、超时等通用设置</source><translation>Carattere, codifica, timeout e altre impostazioni generali</translation></message>
     <message><source>&amp;关于</source><translation>&amp;Info</translation></message>
     <message><source>cubeShell 有关信息</source><translation>Info su cubeShell</translation></message>
     <message><source>&amp;Linux常用命令</source><translation>&amp;Comandi Linux comuni</translation></message>

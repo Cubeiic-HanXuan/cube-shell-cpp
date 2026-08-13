@@ -241,12 +241,12 @@
         <translation>הגדר יכולות GLM-4.7 AI</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;הגדרות שפה</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;הגדרות כלליות</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>הגדר שפת יישום</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>גופן, קידוד, פסק זמן והגדרות כלליות נוספות</translation>
     </message>
     <message>
         <source>&amp;关于</source>

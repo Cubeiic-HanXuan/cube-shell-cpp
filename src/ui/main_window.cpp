@@ -645,7 +645,7 @@ void MainWindow::setupMenus()
     // --- 设置 --- 对应Python: menuBarController 的 setting_menu（L2227 + L2260-2292）
     QMenu *settingsMenu = menuBar()->addMenu(tr("设置"));
     // 主题设置 Shift+Ctrl+T：打开 SettingsDialog（主题 Tab）。
-    QAction *settings = settingsMenu->addAction(tr("&主题设置"), this, &MainWindow::showSettings);
+    QAction *settings = settingsMenu->addAction(tr("&主题设置"), this, [this] { showSettings(0); });
     settings->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+T")));   // 主题设置
     settings->setStatusTip(tr("设置主题"));
     settings->setMenuRole(QAction::PreferencesRole);
@@ -653,9 +653,11 @@ void MainWindow::setupMenus()
     QAction *aiSettings = settingsMenu->addAction(tr("&AI 设置"), this,
                                                  &MainWindow::showAiSettings);
     aiSettings->setStatusTip(tr("配置 GLM-4.7 AI 能力"));
-    QAction *lang = settingsMenu->addAction(tr("&语言设置"), this, &MainWindow::showSettings);
-    lang->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+L")));       // 语言设置
-    lang->setStatusTip(tr("设置应用程序语言"));
+    // 通用设置 Shift+Ctrl+G：同一个 SettingsDialog（通用 Tab），
+    // 内含字体/编码/SSH 超时/回滚行数等，语言设置也在该对话框的语言 Tab。
+    QAction *general = settingsMenu->addAction(tr("&通用设置"), this, [this] { showSettings(2); });
+    general->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+G")));    // 通用设置
+    general->setStatusTip(tr("字体、编码、超时等通用设置"));
     // 平台右键菜单集成（按当前平台只编译/显示对应项）。
     // 对应Python: cube-shell.py L2279-2292（platform.system() 分支）
 #ifdef Q_OS_MACOS
@@ -2762,9 +2764,10 @@ void MainWindow::openNetTab(const TcpSettings &settings)
 // ---------------------------------------------------------------------------
 
 // 对应Python: function/theme.py + cube-shell.py::show_language_settings
-void MainWindow::showSettings()
+void MainWindow::showSettings(int tabIndex)
 {
     SettingsDialog dlg(this);
+    dlg.setCurrentTab(tabIndex);
     connect(&dlg, &SettingsDialog::fontChanged, this,
             [this](const QString &family, int pointSize) {
                 // 即时应用到所有打开的终端。

@@ -241,12 +241,12 @@
         <translation>Configure GLM-4.7 AI Capabilities</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;Language Settings</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;General Settings</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>Set Application Language</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>Font, encoding, timeout and other general settings</translation>
     </message>
     <message>
         <source>&amp;关于</source>

@@ -21,6 +21,9 @@ class SettingsDialog : public QDialog {
 public:
     explicit SettingsDialog(QWidget *parent = nullptr);
 
+    // 打开后选中指定 Tab（0=主题 1=语言 2=通用），供不同菜单入口定位。
+    void setCurrentTab(int index);
+
     // OK：保存并应用（外观即时应用；语言重启后全量生效）。
     void accept() override;
     // Cancel/Esc：撤销主题实时预览，恢复进入对话框时的外观。

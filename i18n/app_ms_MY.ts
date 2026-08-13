@@ -241,12 +241,12 @@
         <translation>Konfigurasi Keupayaan GLM-4.7 AI</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;Tetapan Bahasa</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;Tetapan Umum</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>Tetapkan Bahasa Aplikasi</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>Fon, pengekodan, tamat masa dan tetapan umum lain</translation>
     </message>
     <message>
         <source>&amp;关于</source>

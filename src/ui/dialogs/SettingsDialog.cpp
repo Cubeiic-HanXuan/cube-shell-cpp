@@ -9,6 +9,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QSettings>
+#include <QSizePolicy>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -21,6 +22,26 @@ namespace cubeshell {
 
 // theme.json 中 SSH 超时的键（C++ 侧新增，Python 侧未知键会被原样保留）。
 static const char kSshTimeoutKey[] = "ssh_timeout";
+
+// 表单字段统一最小宽度：各 Tab 里所有输入框/下拉框同宽，
+// 避免长短不一显得杂乱，也给长下拉值留出显示空间。
+constexpr int kFieldMinWidth = 280;
+
+static void unifyFieldWidth(QWidget *w)
+{
+    w->setMinimumWidth(kFieldMinWidth);
+    QSizePolicy sp = w->sizePolicy();
+    sp.setHorizontalPolicy(QSizePolicy::Expanding);
+    w->setSizePolicy(sp);
+}
+
+// 下拉框闭合态对超长值会省略显示，用 tooltip 兜底展示全值。
+static void addFullTextToolTip(QComboBox *combo)
+{
+    QObject::connect(combo, &QComboBox::currentTextChanged, combo,
+                     [combo](const QString &text) { combo->setToolTip(text); });
+    combo->setToolTip(combo->currentText());
+}
 
 // QSettings 键（组织/应用名见 app/main.cpp 的 setOrganizationName）。
 namespace settings_keys {
@@ -38,7 +59,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("设置"));
-    setMinimumSize(460, 380);
+    setMinimumSize(560, 380);
 
     m_tabWidget = new QTabWidget(this);
     m_tabWidget->addTab(createThemeTab(), tr("主题设置"));
@@ -62,6 +83,13 @@ SettingsDialog::SettingsDialog(QWidget *parent)
                 if (current)
                     ThemeManager::applyTheme(qApp, current->data(Qt::UserRole).toString());
             });
+}
+
+// 打开后选中指定 Tab（主题设置入口定位主题页，通用设置入口定位通用页）。
+void SettingsDialog::setCurrentTab(int index)
+{
+    if (index >= 0 && index < m_tabWidget->count())
+        m_tabWidget->setCurrentIndex(index);
 }
 
 // 主题 Tab：可用主题列表 + 实时预览说明。
@@ -99,6 +127,8 @@ QWidget *SettingsDialog::createLanguageTab()
     const auto langs = LanguageManager::supportedLanguages();
     for (const LanguageInfo &info : langs)
         m_language->addItem(QStringLiteral("%1 (%2)").arg(info.nativeName, info.code), info.code);
+    unifyFieldWidth(m_language);
+    addFullTextToolTip(m_language);
     form->addRow(tr("选择应用程序语言"), m_language);
 
     auto *hint = new QLabel(tr("更改语言后需要重启应用程序才能生效"), page);
@@ -117,20 +147,26 @@ QWidget *SettingsDialog::createGeneralTab()
 
     m_fontFamily = new QFontComboBox(page);
     m_fontFamily->setFontFilters(QFontComboBox::MonospacedFonts);
+    unifyFieldWidth(m_fontFamily);
+    addFullTextToolTip(m_fontFamily);
     form->addRow(tr("终端字体"), m_fontFamily);
 
     m_fontSize = new QSpinBox(page);
     m_fontSize->setRange(8, 40);
+    unifyFieldWidth(m_fontSize);
     form->addRow(tr("字体大小:"), m_fontSize);
 
     m_sshTimeout = new QSpinBox(page);
     m_sshTimeout->setRange(5, 600);
     m_sshTimeout->setSuffix(tr(" 秒"));
+    unifyFieldWidth(m_sshTimeout);
     form->addRow(tr("SSH 连接超时："), m_sshTimeout);
 
     m_encoding = new QComboBox(page);
     m_encoding->addItems({QStringLiteral("UTF-8"), QStringLiteral("GBK"),
                           QStringLiteral("GB2312")});
+    unifyFieldWidth(m_encoding);
+    addFullTextToolTip(m_encoding);
     form->addRow(tr("默认终端编码："), m_encoding);
 
     // 回滚行数：决定能往回翻多少输出，也决定「查找」能检索到多大范围。
@@ -141,6 +177,7 @@ QWidget *SettingsDialog::createGeneralTab()
     m_scrollback->setSpecialValueText(tr("不保留"));   // 0
     m_scrollback->setToolTip(tr("终端保留的历史输出行数，也是“查找”能检索的范围。\n"
                                 "行数越大越占内存，排查线上日志建议 10000 以上。"));
+    unifyFieldWidth(m_scrollback);
     form->addRow(tr("终端回滚行数："), m_scrollback);
     return page;
 }

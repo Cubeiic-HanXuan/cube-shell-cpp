@@ -69,8 +69,8 @@
     <message><source>设置主题</source><translation>테마 설정</translation></message>
     <message><source>&amp;AI 设置</source><translation>&amp;AI 설정</translation></message>
     <message><source>配置 GLM-4.7 AI 能力</source><translation>GLM-4.7 AI 기능 구성</translation></message>
-    <message><source>&amp;语言设置</source><translation>&amp;언어 설정</translation></message>
-    <message><source>设置应用程序语言</source><translation>애플리케이션 언어 설정</translation></message>
+    <message><source>&amp;通用设置</source><translation>&amp;일반 설정</translation></message>
+    <message><source>字体、编码、超时等通用设置</source><translation>글꼴, 인코딩, 시간 초과 등 일반 설정</translation></message>
     <message><source>&amp;关于</source><translation>&amp;정보</translation></message>
     <message><source>cubeShell 有关信息</source><translation>cubeShell 정보</translation></message>
     <message><source>&amp;Linux常用命令</source><translation>&amp;자주 쓰는 Linux 명령</translation></message>

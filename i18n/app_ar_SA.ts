@@ -241,12 +241,12 @@
         <translation>تكوين قدرات GLM-4.7 AI</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;إعدادات اللغة</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;الإعدادات العامة</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>تعيين لغة التطبيق</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>الخط والترميز والمهلة وإعدادات عامة أخرى</translation>
     </message>
     <message>
         <source>&amp;关于</source>

@@ -229,7 +229,8 @@ private:
     static QString claudeTabName(const QString &command);
 
     // --- 对话框 ---
-    void showSettings();
+    // tabIndex：打开后选中的 Tab（0=主题 1=语言 2=通用），不同菜单入口定位不同页。
+    void showSettings(int tabIndex = 0);
     // 对应Python: cube-shell.py::show_ai_settings（L2445）
     void showAiSettings();
     void showTunnelManager();

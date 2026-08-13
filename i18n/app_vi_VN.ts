@@ -241,12 +241,12 @@
         <translation>Cấu hình khả năng GLM-4.7 AI</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;Cài đặt ngôn ngữ</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;Cài đặt chung</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>Đặt ngôn ngữ ứng dụng</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>Phông chữ, mã hóa, thời gian chờ và các cài đặt chung khác</translation>
     </message>
     <message>
         <source>&amp;关于</source>

@@ -241,12 +241,12 @@
         <translation>GLM-4.7 AI क्षमताएं कॉन्फ़िगर करें</translation>
     </message>
     <message>
-        <source>&amp;语言设置</source>
-        <translation>&amp;भाषा सेटिंग्स</translation>
+        <source>&amp;通用设置</source>
+        <translation>&amp;सामान्य सेटिंग्स</translation>
     </message>
     <message>
-        <source>设置应用程序语言</source>
-        <translation>एप्लिकेशन भाषा सेट करें</translation>
+        <source>字体、编码、超时等通用设置</source>
+        <translation>फ़ॉन्ट, एन्कोडिंग, टाइमआउट और अन्य सामान्य सेटिंग्स</translation>
     </message>
     <message>
         <source>&amp;关于</source>

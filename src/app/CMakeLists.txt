@@ -15,9 +15,10 @@ qt_add_executable(cube-shell
     # cube_core。ThemeManager::styleSheet() 在资源缺失时会 qWarning 并回退到内置 QSS。
     ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
 
-    # 终端配色方案资源：把 src/qtermwidget/color-schemes/ 编进二进制（前缀
-    # "/color-schemes"，见该 qrc 注释）。鸿蒙 HAP 无可探测的 resources/ 目录，
-    # 主题/右键切主题都依赖这些配色（问题2/3 的根因），必须随二进制分发。
+    # 终端资源：把 src/qtermwidget/color-schemes/ 与 kb-layouts/ 编进二进制
+    #（前缀 "/color-schemes"、"/kb-layouts"，见该 qrc 注释）。鸿蒙 HAP 无可探测
+    # 的 resources/ 目录，主题/右键切主题依赖配色（问题2/3 的根因），方向键等
+    # 特殊键依赖 keytab 键盘翻译表，都必须随二进制分发。
     # 同样挂在可执行目标上，避开静态库里 Q_INIT_RESOURCE 被链接器丢弃的问题。
     ${CMAKE_SOURCE_DIR}/src/qtermwidget/qtermwidget_res.qrc
 )

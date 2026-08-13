@@ -47,6 +47,16 @@ QStringList resourceDirCandidates(const QString &subdir, const char *compileTime
 
 QString getKbLayoutDir()
 {
+    // 1. 编进二进制的 qrc 资源（前缀 "/kb-layouts"，见 qtermwidget_res.qrc）。
+    //    鸿蒙 HAP 无可探测的 resources/ 目录，下面的文件系统探测全落空后只剩
+    //    编译期兜底翻译表（仅 Tab 一键），方向键/Home/Delete/F 键全部失效；
+    //    qrc 是鸿蒙下唯一可靠来源，桌面平台同样用作优先项（与配色方案一致）。
+    const QString qrcDir = QStringLiteral(":/kb-layouts");
+    if (QDir(qrcDir).exists()
+        && !QDir(qrcDir).entryList(QStringList(QStringLiteral("*.keytab"))).isEmpty())
+        return qrcDir + QLatin1Char('/');
+
+    // 2. 文件系统候选：macOS bundle / 可执行旁 resources/ / 编译期源码树。
     const QStringList candidates =
         resourceDirCandidates(QStringLiteral("kb-layouts"), KB_LAYOUT_DIR);
     for (const QString &dir : candidates) {

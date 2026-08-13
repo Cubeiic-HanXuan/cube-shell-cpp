@@ -5,8 +5,6 @@
       目录（问题2「终端主题没加载」的根因），因此不再依赖文件系统探测，改走
       Qt 资源系统。alias 让资源路径严格等于 ":/color-schemes/<Name>.colorscheme"，
       与 src/qtermwidget/tools.cpp 的 qrc 探测前缀对应。
-      注：kb-layouts/default.keytab 仍走原有文件系统逻辑（见 tools.cpp），
-      键盘布局加载在鸿蒙上不受影响，此处不打包。
     -->
     <qresource prefix="/color-schemes">
         <file alias="BlackOnLightYellow.colorscheme">color-schemes/BlackOnLightYellow.colorscheme</file>
@@ -23,5 +21,22 @@
         <file alias="Tango.colorscheme">color-schemes/Tango.colorscheme</file>
         <file alias="Ubuntu.colorscheme">color-schemes/Ubuntu.colorscheme</file>
         <file alias="WhiteOnBlack.colorscheme">color-schemes/WhiteOnBlack.colorscheme</file>
+    </qresource>
+    <!--
+      键盘布局资源：把 src/qtermwidget/kb-layouts/*.keytab 编进二进制。
+      与配色方案同因——鸿蒙 HAP 无可探测的 kb-layouts/ 文件系统目录，文件探测
+      全落空后 KeyboardTranslatorManager 只剩编译期兜底（仅 Tab 一键），方向键/
+      Home/End/Delete/F1-F12 等所有特殊键在鸿蒙终端里全部失效（keytab 找不到
+      条目、可打印字符靠 QKeyEvent::text() 兜底才没一起死）。alias 让资源路径
+      严格等于 ":/kb-layouts/<Name>.keytab"，与 tools.cpp::getKbLayoutDir() 的
+      qrc 探测前缀对应。historic/ 下的复古布局运行期不会被扫描（findTranslators
+      只列顶层 *.keytab），不打包。
+    -->
+    <qresource prefix="/kb-layouts">
+        <file alias="default.keytab">kb-layouts/default.keytab</file>
+        <file alias="linux.keytab">kb-layouts/linux.keytab</file>
+        <file alias="macbook.keytab">kb-layouts/macbook.keytab</file>
+        <file alias="solaris.keytab">kb-layouts/solaris.keytab</file>
+        <file alias="vt420pc.keytab">kb-layouts/vt420pc.keytab</file>
     </qresource>
 </RCC>

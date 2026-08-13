@@ -265,6 +265,26 @@ QString fallbackStyleSheet(ThemeManager::Appearance appearance)
 
 } // namespace
 
+#ifdef CUBESHELL_PLATFORM_OHOS
+namespace {
+
+// HarmonyOS 专用补丁 QSS：修 QComboBox 在鸿蒙上的两个平台缺陷。
+//  1) combobox-popup:0 —— 鸿蒙上 Qt::Popup 不是桌面意义的顶层弹窗，而是依附
+//     主窗口的子窗口语义（见 Qt for HarmonyOS「API 兼容性注意事项」），
+//     QComboBox 默认用 Popup 顶层窗口显示下拉列表，在鸿蒙上根本弹不出来；
+//     该属性置 0 后，下拉列表改用普通 QFrame 子控件画在当前窗口内。
+//  2) min-height 用固定像素 —— qdarktheme 全局 QSS 的 min-height:1.5em 依赖
+//     字体度量，鸿蒙字体系统与桌面差异大（平台限制：默认无等宽字体、度量
+//     不同），闭合态文本被上下裁切只剩中间一截；固定像素高度兜底。
+QString ohosStylePatch()
+{
+    return QStringLiteral(
+        "QComboBox { combobox-popup: 0; min-height: 32px; padding: 2px 8px 2px 8px; }");
+}
+
+} // namespace
+#endif // CUBESHELL_PLATFORM_OHOS
+
 // 对应Python: cube-shell.py::setDarkTheme / setLightTheme
 //（Python 侧 qdarktheme.load_stylesheet ↔ 这里读其导出的 qss 资源，
 // 主色已在导出时通过 custom_colors 注入，无需追加 override）
@@ -272,15 +292,21 @@ QString ThemeManager::styleSheet(Appearance appearance)
 {
     const QString resourcePath = qssResourcePath(appearance);
     const QString baseQss = readQss(resourcePath);
+    QString qss;
     if (baseQss.isEmpty()) {
         // qrc 未编进当前目标（例如只链接 cube_core 的测试可执行文件）时降级，
         // 保证界面仍有完整深/浅色样式。
         qWarning("ThemeManager: qdarktheme resource %s unavailable, "
                  "falling back to built-in stylesheet",
                  qUtf8Printable(resourcePath));
-        return fallbackStyleSheet(appearance);
+        qss = fallbackStyleSheet(appearance);
+    } else {
+        qss = baseQss;
     }
-    return baseQss;
+#ifdef CUBESHELL_PLATFORM_OHOS
+    qss += ohosStylePatch();
+#endif
+    return qss;
 }
 
 // 对应Python: cube-shell.py::setDarkTheme / setLightTheme（qdarktheme 附带的 palette）

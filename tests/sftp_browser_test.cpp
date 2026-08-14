@@ -12,9 +12,13 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QPair>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 
 #include "sftp_browser_widget.h"
 
@@ -111,6 +115,82 @@ static void testDownloadTargetPath()
           == QStringLiteral("/a.log"));
 }
 
+// 拖放上传的目标目录：落在目录条目上进该目录（".." 条目的路径即上级目录），
+// 其余落点（空白/文件条目）进当前目录。
+static void testDropTargetDir()
+{
+    using W = SftpBrowserWidget;
+    // 目录条目 → 该目录
+    CHECK(W::dropTargetDir(QStringLiteral("/var/log"), true, QStringLiteral("/var"))
+          == QStringLiteral("/var/log"));
+    // ".." 条目：kPathRole 已存上级路径、isDir=true，天然覆盖
+    CHECK(W::dropTargetDir(QStringLiteral("/"), true, QStringLiteral("/var"))
+          == QStringLiteral("/"));
+    // 文件条目 → 当前目录
+    CHECK(W::dropTargetDir(QStringLiteral("/var/a.log"), false, QStringLiteral("/var"))
+          == QStringLiteral("/var"));
+    // 空白处（无条目）→ 当前目录
+    CHECK(W::dropTargetDir(QString(), false, QStringLiteral("/data"))
+          == QStringLiteral("/data"));
+}
+
+// 拖入本地路径的任务展开：文件直接映射；文件夹递归且远端路径保留目录结构。
+static void testCollectUploadTasks()
+{
+    using W = SftpBrowserWidget;
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    const QString root = tmp.path();
+
+    // 造结构：root/a.txt、root/dir/b.txt、root/dir/sub/c.txt、root/empty/
+    auto writeFile = [&root](const QString &rel) {
+        const QString path = root + QLatin1Char('/') + rel;
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly) && f.write("x") > 0;
+    };
+    CHECK(writeFile(QStringLiteral("a.txt")));
+    CHECK(writeFile(QStringLiteral("dir/b.txt")));
+    CHECK(writeFile(QStringLiteral("dir/sub/c.txt")));
+    CHECK(QDir().mkpath(root + QStringLiteral("/empty")));
+
+    // 单个文件
+    QList<QPair<QString, QString>> tasks =
+        W::collectUploadTasks(QStringLiteral("/data"), {root + QStringLiteral("/a.txt")});
+    CHECK(tasks.size() == 1);
+    CHECK(tasks.at(0).second == QStringLiteral("/data/a.txt"));
+
+    // 目标目录带尾斜杠不双斜杠；根目标不三斜杠
+    tasks = W::collectUploadTasks(QStringLiteral("/data/"), {root + QStringLiteral("/a.txt")});
+    CHECK(tasks.at(0).second == QStringLiteral("/data/a.txt"));
+    tasks = W::collectUploadTasks(QStringLiteral("/"), {root + QStringLiteral("/a.txt")});
+    CHECK(tasks.at(0).second == QStringLiteral("/a.txt"));
+
+    // 文件夹递归：远端 = 目标目录 + 顶层文件夹名 + 相对路径
+    tasks = W::collectUploadTasks(QStringLiteral("/data"), {root + QStringLiteral("/dir")});
+    CHECK(tasks.size() == 2);
+    QStringList remotes;
+    for (const auto &t : tasks)
+        remotes.append(t.second);
+    CHECK(remotes.contains(QStringLiteral("/data/dir/b.txt")));
+    CHECK(remotes.contains(QStringLiteral("/data/dir/sub/c.txt")));
+
+    // 空文件夹不产生任务
+    tasks = W::collectUploadTasks(QStringLiteral("/data"), {root + QStringLiteral("/empty")});
+    CHECK(tasks.isEmpty());
+
+    // 不存在的路径不产生任务
+    tasks = W::collectUploadTasks(QStringLiteral("/data"),
+                                  {root + QStringLiteral("/no-such")});
+    CHECK(tasks.isEmpty());
+
+    // 混合：文件 + 文件夹
+    tasks = W::collectUploadTasks(QStringLiteral("/data"),
+                                  {root + QStringLiteral("/a.txt"),
+                                   root + QStringLiteral("/dir")});
+    CHECK(tasks.size() == 3);
+}
+
 int main(int argc, char *argv[])
 {
     // 判定函数是静态纯函数，不建任何 widget，因此用 QCoreApplication 就够
@@ -122,6 +202,8 @@ int main(int argc, char *argv[])
     testPlainHostUnaffected();
     testPartitionDownloadSelection();
     testDownloadTargetPath();
+    testDropTargetDir();
+    testCollectUploadTasks();
     qInfo() << (failures == 0 ? "ALL PASS" : "FAILURES") << failures;
     return failures == 0 ? 0 : 1;
 }

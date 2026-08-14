@@ -28,6 +28,7 @@ class QProgressBar;
 class QToolButton;
 class QLabel;
 class QResizeEvent;
+class QDropEvent;
 
 namespace cubeshell {
 
@@ -73,6 +74,16 @@ public:
     // 批量下载的目标本地路径：保存目录 + 远端文件名。抽成静态纯函数便于单测。
     static QString downloadTargetPath(const QString &dir, const QString &remotePath);
 
+    // 拖放上传的目标目录：落在目录条目上进该目录（".." 条目的路径即上级目录，
+    // 天然覆盖），其余落点（空白/文件条目）进当前目录。纯数据签名便于单测。
+    static QString dropTargetDir(const QString &itemPath, bool itemIsDir,
+                                 const QString &cwd);
+    // 把拖入的本地路径展开成 (本地文件, 远端路径) 任务对：文件直接映射；
+    // 文件夹递归遍历，远端 = 目标目录 + 顶层文件夹名 + 相对路径（远端父目录
+    // 由 SftpUploaderCore 上传时自动补建）。抽成静态纯函数便于单测。
+    static QList<QPair<QString, QString>> collectUploadTasks(const QString &targetDir,
+                                                             const QStringList &localPaths);
+
     // 在路径栏左侧显示/隐藏分屏序号徽章（多分屏时避免混淆 SFTP 目录归属）。
     // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
     // tabTitle: 用于 tooltip 的标签名，展示完整的“分屏 N · 标签名”。
@@ -81,6 +92,9 @@ public:
 protected:
     // 宽度变化后按新宽度重新截断状态栏文本。
     void resizeEvent(QResizeEvent *event) override;
+    // 文件树 viewport 的拖放事件（拖拽上传）：视图不接受自己的内部拖放，
+    // 外部 URL 拖放经此过滤进 handleDropEvent。
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
     void onItemDoubleClicked(QTreeWidgetItem *item, int column);
@@ -161,6 +175,10 @@ private:
     QStringList m_downloadFailures;
     void dispatchNextDownload();    // 队列非空则取出首个任务点火
     void refreshDownloadProgress(); // 重算聚合进度并刷新进度条/状态栏
+    // 拖放上传的处理（eventFilter 的 Drop 分支）。
+    void handleDropEvent(QDropEvent *event);
+    // 单个上传任务入队（进度记账 + 分发到线程池），uploadFiles/拖拽共用。
+    void enqueueUpload(const QString &local, const QString &remote);
     // 取消全部在传传输：下载清空批量队列 + cancelTransfer，上传逐文件
     // cancelUpload。已传部分保留（断点续传），重新传输自动继续。
     void cancelTransfers();

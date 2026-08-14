@@ -6,6 +6,9 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDirIterator>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -19,6 +22,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QProgressBar>
 #include <QResizeEvent>
 #include <QSizePolicy>
@@ -27,6 +31,7 @@
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -169,6 +174,13 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeWidget::customContextMenuRequested,
             this, &SftpBrowserWidget::showContextMenu);
+
+    // 拖拽上传：本树不提供内部拖拽（避免误触发内部移动），外部文件拖放
+    // 由 viewport 上的 eventFilter 接管（DragEnter/DragMove/Drop）。
+    // 对应Python: cube-shell.py::MainWindow setAcceptDrops + dropEvent
+    m_tree->setDragDropMode(QAbstractItemView::NoDragDrop);
+    m_tree->viewport()->setAcceptDrops(true);
+    m_tree->viewport()->installEventFilter(this);
 }
 
 SftpBrowserWidget::~SftpBrowserWidget()
@@ -735,16 +747,112 @@ void SftpBrowserWidget::uploadFiles()
     if (blockedByUnavailable(tr("上传文件")))
         return;
     const QStringList files = QFileDialog::getOpenFileNames(this, tr("上传文件"));
-    for (const QString &local : files) {
-        const QString remote = joinPath(m_cwd, QFileInfo(local).fileName());
-        // 分片上传（断点续传）；fileId 用远端路径。
-        // 多文件会被 SftpUploaderCore 的线程池并行分发到不同的传输连接上，
-        // 单个大文件还会再拆成多条流并行 —— 见 SftpTransferPool.h。
-        // 对应Python: sftp_uploader_core.py::upload_file
-        m_activeUploads.insert(remote, UploadProgress{0, QFileInfo(local).size()});
-        m_uploader->uploadFile(remote, local, remote);
-    }
+    for (const QString &local : files)
+        enqueueUpload(local, joinPath(m_cwd, QFileInfo(local).fileName()));
     refreshUploadProgress();
+}
+
+// 单个上传任务入队：进度记账 + 分发到 SftpUploaderCore 线程池。
+// 分片上传（断点续传）；fileId 用远端路径。多文件会被线程池并行分发到不同
+// 传输连接，单个大文件还会再拆成多条流并行 —— 见 SftpTransferPool.h。
+// 对应Python: sftp_uploader_core.py::upload_file
+void SftpBrowserWidget::enqueueUpload(const QString &local, const QString &remote)
+{
+    m_activeUploads.insert(remote, UploadProgress{0, QFileInfo(local).size()});
+    m_uploader->uploadFile(remote, local, remote);
+}
+
+// ---- 拖拽上传 ---------------------------------------------------------------
+
+// 视图自己的 DragEnter/Drop 默认处理只对内部拖放有意义；外部 URL 拖放在
+// eventFilter 里 preempt 掉，统一走 handleDropEvent。
+bool SftpBrowserWidget::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == m_tree->viewport()) {
+        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
+            auto *de = static_cast<QDragMoveEvent *>(event);
+            if (de->mimeData()->hasUrls()) {
+                de->acceptProposedAction();
+                return true;
+            }
+        } else if (event->type() == QEvent::Drop) {
+            handleDropEvent(static_cast<QDropEvent *>(event));
+            return true;
+        }
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
+QString SftpBrowserWidget::dropTargetDir(const QString &itemPath, bool itemIsDir,
+                                         const QString &cwd)
+{
+    // 落在目录条目上进该目录；".." 条目的 kPathRole 即上级路径，天然覆盖。
+    return itemIsDir ? itemPath : cwd;
+}
+
+QList<QPair<QString, QString>>
+SftpBrowserWidget::collectUploadTasks(const QString &targetDir, const QStringList &localPaths)
+{
+    // 目标目录去掉尾斜杠（根 "/" 除外），免得 joinPath 拼出 "//name"。
+    QString base = targetDir;
+    while (base.size() > 1 && base.endsWith(QLatin1Char('/')))
+        base.chop(1);
+    QList<QPair<QString, QString>> tasks;
+    for (const QString &local : localPaths) {
+        if (local.isEmpty())
+            continue;
+        const QFileInfo info(local);
+        if (info.isDir()) {
+            // 文件夹递归：远端 = 目标目录 + 顶层文件夹名 + 相对路径，
+            // 保留目录结构；远端父目录由 SftpUploaderCore 上传时自动补建。
+            const QString topName = info.fileName();
+            const QString basePath = info.absoluteFilePath();
+            QDirIterator it(basePath, QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot,
+                            QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                const QString filePath = it.next();
+                QString rel = filePath.mid(basePath.size() + 1);
+                rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
+                tasks.append({filePath, joinPath(joinPath(base, topName), rel)});
+            }
+        } else if (info.isFile()) {
+            tasks.append({info.absoluteFilePath(), joinPath(base, info.fileName())});
+        }
+    }
+    return tasks;
+}
+
+void SftpBrowserWidget::handleDropEvent(QDropEvent *event)
+{
+    if (!m_uploader)
+        return;
+    if (blockedByUnavailable(tr("上传文件")))
+        return;
+
+    QStringList localPaths;
+    const QList<QUrl> urls = event->mimeData()->urls();
+    localPaths.reserve(urls.size());
+    for (const QUrl &url : urls) {
+        const QString local = url.toLocalFile();
+        if (!local.isEmpty())
+            localPaths.append(local);
+    }
+
+    const QTreeWidgetItem *item = m_tree->itemAt(event->position().toPoint());
+    const QString targetDir = item
+        ? dropTargetDir(item->data(0, kPathRole).toString(),
+                        item->data(0, kIsDirRole).toBool(), m_cwd)
+        : m_cwd;
+
+    const QList<QPair<QString, QString>> tasks = collectUploadTasks(targetDir, localPaths);
+    if (tasks.isEmpty()) {
+        setStatusText(tr("没有可上传的文件"));
+        return;
+    }
+    for (const auto &task : tasks)
+        enqueueUpload(task.first, task.second);
+    refreshUploadProgress();
+    event->acceptProposedAction();
 }
 
 // 下载：支持批量。单选文件保持"另存为"行为不变；多选时选目标文件夹，

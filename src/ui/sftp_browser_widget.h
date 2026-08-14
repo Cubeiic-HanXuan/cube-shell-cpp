@@ -11,6 +11,7 @@
 
 #include <QHash>
 #include <QPointer>
+#include <QQueue>
 #include <QVector>
 #include <QWidget>
 
@@ -62,6 +63,14 @@ public:
     // 只在 path 为根时判定：非根路径列不出来可能只是权限或路径不存在，
     // 不足以推断整条通道不可用。
     static bool sftpLooksUnavailable(bool bastionProxied, const QString &path, int entryCount);
+
+    // 批量下载的选中项拆分：把 (远端路径, 是否目录) 列表分成文件/目录两组
+    // （目录不支持下载，由调用方收集后统一提示，不阻塞文件下载）。
+    // 抽成静态纯函数便于单测。对应Python: downloadFile 对 is_dir 的过滤
+    static void partitionDownloadSelection(const QList<QPair<QString, bool>> &selected,
+                                           QStringList &files, QStringList &dirs);
+    // 批量下载的目标本地路径：保存目录 + 远端文件名。抽成静态纯函数便于单测。
+    static QString downloadTargetPath(const QString &dir, const QString &remotePath);
 
     // 在路径栏左侧显示/隐藏分屏序号徽章（多分屏时避免混淆 SFTP 目录归属）。
     // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
@@ -137,6 +146,20 @@ private:
     };
     QHash<QString, UploadProgress> m_activeUploads;
     void refreshUploadProgress(); // 重算聚合进度并刷新进度条/状态栏
+
+    // 批量下载：多选入队、串行逐文件下载。SftpClient 的 m_cancel 是全局共享
+    // 单标志且每个 download() 入口都会复位它，并发多个下载 worker 下取消语义
+    // 是坏的；单个大文件内部已有多流并行，文件间串行即可。
+    // 取消语义：cancelTransfer() 取消当前在传文件，队列由 UI 侧 clear。
+    struct DownloadTask { QString remote; QString local; };
+    QQueue<DownloadTask> m_downloadQueue;
+    // 在传下载的进度记账（按远端路径），与上传侧 m_activeUploads 同款聚合。
+    QHash<QString, UploadProgress> m_activeDownloads;
+    // 本批已完成的文件数与失败清单，队列排空后一次性汇总汇报。
+    int m_downloadBatchDone = 0;
+    QStringList m_downloadFailures;
+    void dispatchNextDownload();    // 队列非空则取出首个任务点火
+    void refreshDownloadProgress(); // 重算聚合进度并刷新进度条/状态栏
 
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章

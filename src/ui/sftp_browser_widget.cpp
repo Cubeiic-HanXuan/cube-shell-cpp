@@ -210,15 +210,51 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
     SshClient *raw = m_client.get();
     if (!m_sftp) {
         m_sftp = new SftpClient(raw, this);
-        connect(m_sftp, &SftpClient::transferProgress, this, [this](const QString &, qint64 cur, qint64 total) {
-            m_progress->setVisible(true);
-            m_progress->setMaximum(total > 0 ? int(total / 1024) : 0);
-            m_progress->setValue(int(cur / 1024));
+        // 下载进度按远端路径记账后聚合（与上传侧同款），批量下载时多个
+        // transferProgress 才不会把同一个进度条来回拉扯。
+        connect(m_sftp, &SftpClient::transferProgress, this,
+                [this](const QString &path, qint64 cur, qint64 total) {
+            auto it = m_activeDownloads.find(path);
+            if (it == m_activeDownloads.end())
+                return; // 非本面板发起的传输（防御）
+            it->done = cur;
+            it->total = total;
+            refreshDownloadProgress();
         });
-        connect(m_sftp, &SftpClient::transferFinished, this, [this](const QString &path, bool ok, const QString &msg) {
+        connect(m_sftp, &SftpClient::transferFinished, this,
+                [this](const QString &path, bool ok, const QString &msg) {
+            // 之前已处理过本批的任何文件（或队列里还有）都算批量：整批全失败时
+            // 最后一个文件也要走汇总文案，而不是退回单文件的"传输失败"。
+            const bool wasBatch = (m_downloadBatchDone + m_downloadFailures.size()) > 0
+                || !m_downloadQueue.isEmpty();
+            m_activeDownloads.remove(path);
+            if (ok)
+                ++m_downloadBatchDone;
+            else
+                m_downloadFailures.append(QFileInfo(path).fileName());
+            // 队列非空：单个文件失败不卡整批（与 removeSelected 收集失败项同款哲学）。
+            if (!m_downloadQueue.isEmpty()) {
+                dispatchNextDownload();
+                refreshDownloadProgress();
+                return;
+            }
             m_progress->setVisible(false);
-            setStatusText(ok ? tr("已完成：%1").arg(QFileInfo(path).fileName())
+            if (wasBatch) {
+                // 整批结束一次性汇总（镜像 removeSelected 的失败清单风格）。
+                if (m_downloadFailures.isEmpty()) {
+                    setStatusText(tr("已完成 %1 个文件的下载").arg(m_downloadBatchDone));
+                } else {
+                    setStatusText(tr("下载完成：成功 %1 个，失败 %2 个（%3）")
+                                      .arg(m_downloadBatchDone)
+                                      .arg(m_downloadFailures.size())
+                                      .arg(m_downloadFailures.join(QStringLiteral(", "))));
+                }
+                m_downloadFailures.clear();
+                m_downloadBatchDone = 0;
+            } else {
+                setStatusText(ok ? tr("已完成：%1").arg(QFileInfo(path).fileName())
                                  : tr("传输失败：%1").arg(msg));
+            }
             if (ok)
                 refresh();
         });
@@ -274,6 +310,27 @@ QString SftpBrowserWidget::joinPath(const QString &dir, const QString &name)
 {
     if (dir == QLatin1String("/"))
         return QLatin1String("/") + name;
+    return dir + QLatin1Char('/') + name;
+}
+
+// 对应Python: downloadFile 对 is_dir 的过滤（目录不进下载队列）
+void SftpBrowserWidget::partitionDownloadSelection(
+    const QList<QPair<QString, bool>> &selected, QStringList &files, QStringList &dirs)
+{
+    files.clear();
+    dirs.clear();
+    for (const auto &entry : selected) {
+        if (entry.first.isEmpty())
+            continue;
+        (entry.second ? dirs : files).append(entry.first);
+    }
+}
+
+QString SftpBrowserWidget::downloadTargetPath(const QString &dir, const QString &remotePath)
+{
+    const QString name = QFileInfo(remotePath).fileName();
+    if (dir.endsWith(QLatin1Char('/')))
+        return dir + name;
     return dir + QLatin1Char('/') + name;
 }
 
@@ -652,21 +709,96 @@ void SftpBrowserWidget::uploadFiles()
     refreshUploadProgress();
 }
 
+// 下载：支持批量。单选文件保持"另存为"行为不变；多选时选目标文件夹，
+// 入队后串行逐文件下载（队列语义见 .h 的 m_downloadQueue 注释）。
+// 对应Python: downloadFile（多选时逐个下载到所选目录）
 void SftpBrowserWidget::downloadSelected()
 {
-    const QString remote = selectedRemotePath();
-    if (remote.isEmpty())
-        return;
-    QTreeWidgetItem *item = m_tree->currentItem();
-    if (item && item->data(0, kIsDirRole).toBool()) {
-        QMessageBox::information(this, tr("下载文件"), tr("暂不支持下载文件夹。"));
+    QList<QPair<QString, bool>> selected;
+    const QList<QTreeWidgetItem *> items = m_tree->selectedItems();
+    for (QTreeWidgetItem *item : items) {
+        if (item->data(0, kIsUpRole).toBool())
+            continue;
+        const QString p = item->data(0, kPathRole).toString();
+        if (!p.isEmpty())
+            selected.append({p, item->data(0, kIsDirRole).toBool()});
+    }
+    QStringList files, dirs;
+    partitionDownloadSelection(selected, files, dirs);
+    if (files.isEmpty()) {
+        if (!dirs.isEmpty())
+            QMessageBox::information(this, tr("下载文件"), tr("暂不支持下载文件夹。"));
         return;
     }
-    const QString local = QFileDialog::getSaveFileName(this, tr("另存为"), QFileInfo(remote).fileName());
-    if (local.isEmpty())
+    if (!dirs.isEmpty())
+        QMessageBox::information(this, tr("下载文件"),
+                                 tr("暂不支持下载文件夹，已跳过 %1 个文件夹。").arg(dirs.size()));
+
+    if (files.size() == 1 && dirs.isEmpty()) {
+        // 单文件：维持原有"另存为"交互。
+        const QString local = QFileDialog::getSaveFileName(
+            this, tr("另存为"), QFileInfo(files.first()).fileName());
+        if (local.isEmpty())
+            return;
+        m_progress->setVisible(true);
+        m_activeDownloads.insert(files.first(), UploadProgress{0, 0});
+        m_sftp->download(files.first(), local);
         return;
+    }
+
+    // 多文件：选保存文件夹（与本地侧 LocalFileBrowserWidget::downloadSelected 同款对话框）。
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, tr("选择保存文件夹"), QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (dir.isEmpty())
+        return;
+    m_downloadQueue.clear();
+    m_downloadFailures.clear();
+    m_downloadBatchDone = 0;
+    for (const QString &remote : files)
+        m_downloadQueue.enqueue(DownloadTask{remote, downloadTargetPath(dir, remote)});
     m_progress->setVisible(true);
-    m_sftp->download(remote, local);
+    dispatchNextDownload();
+}
+
+// 串行点火下一个下载任务。记账 total 先填 0，首个 transferProgress 会带回真实大小。
+void SftpBrowserWidget::dispatchNextDownload()
+{
+    if (m_downloadQueue.isEmpty())
+        return;
+    const DownloadTask task = m_downloadQueue.dequeue();
+    m_activeDownloads.insert(task.remote, UploadProgress{0, 0});
+    m_sftp->download(task.remote, task.local);
+}
+
+// 与 refreshUploadProgress 同构：按总字节聚合，状态栏显示批量进度。
+void SftpBrowserWidget::refreshDownloadProgress()
+{
+    if (m_activeDownloads.isEmpty()) {
+        if (m_downloadQueue.isEmpty())
+            m_progress->setVisible(false);
+        return;
+    }
+    qint64 done = 0, total = 0;
+    for (const UploadProgress &p : std::as_const(m_activeDownloads)) {
+        done += p.done;
+        total += p.total;
+    }
+    // 队列中未点火的任务大小未知，只按已知部分算百分比（串行下最多一个在传）。
+    m_progress->setVisible(true);
+    m_progress->setMaximum(100);
+    const int percent = total > 0 ? int(qMin<qint64>(100, done * 100 / total)) : 0;
+    m_progress->setValue(percent);
+
+    const int remaining = m_activeDownloads.size() + m_downloadQueue.size();
+    if (remaining > 1) {
+        setStatusText(tr("正在下载 %1 个文件 … %2%")
+                              .arg(remaining).arg(percent));
+    } else {
+        setStatusText(tr("正在下载 %1 … %2%")
+                              .arg(QFileInfo(m_activeDownloads.constBegin().key()).fileName())
+                              .arg(percent));
+    }
 }
 
 // 右键菜单：与 Python 已连接分支逐字对齐（项目、顺序、分隔线）。

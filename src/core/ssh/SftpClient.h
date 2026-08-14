@@ -156,6 +156,9 @@ private:
     // QPointer 随删除自动置空），供析构函数 cancelTransfer 后统一
     // quit()+有限 wait()，避免后台线程访问已删除的 this/m_sftp。
     void startWorker(QThread *worker);
+    // 是否还有在传的 download/upload worker（决定 download/upload 入口能否
+    // 安全复位共享的 m_cancel）。
+    bool hasActiveTransfer() const;
     void doDownload(const QString &remotePath, const QString &localPath);
     void doUpload(const QString &localPath, const QString &remotePath);
     void fail(const QString &op, const QString &path, SshError &error);

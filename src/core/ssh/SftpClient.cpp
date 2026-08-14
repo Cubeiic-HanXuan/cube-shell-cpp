@@ -609,9 +609,21 @@ void SftpClient::startWorker(QThread *worker)
     worker->start();
 }
 
+// 是否还有在传的 download/upload worker。登记表元素被 deleteLater 后只会
+// 置空不移除，所以用 any_of 判活而不是 isEmpty。
+bool SftpClient::hasActiveTransfer() const
+{
+    return std::any_of(m_workers.begin(), m_workers.end(),
+                       [](const QPointer<QThread> &w) { return !w.isNull(); });
+}
+
 void SftpClient::download(const QString &remotePath, const QString &localPath)
 {
-    m_cancel = false;
+    // 仅在没有在传传输时复位 cancel：A 传输刚被取消、B 紧跟着点火时不该把
+    // A 尚未走完退出路径的取消标志抹掉（否则 A 末尾的 m_cancel 检查判空，
+    // 会把取消以失败告终上报）。
+    if (!hasActiveTransfer())
+        m_cancel = false;
     // Run the blocking transfer on a worker thread; report via queued signals.
     QThread *worker = QThread::create([this, remotePath, localPath] {
         doDownload(remotePath, localPath);
@@ -621,7 +633,8 @@ void SftpClient::download(const QString &remotePath, const QString &localPath)
 
 void SftpClient::upload(const QString &localPath, const QString &remotePath)
 {
-    m_cancel = false;
+    if (!hasActiveTransfer())
+        m_cancel = false;
     QThread *worker = QThread::create([this, localPath, remotePath] {
         doUpload(localPath, remotePath);
     });
@@ -700,6 +713,17 @@ void SftpClient::runStreams(int streams, const std::function<void()> &body)
     }
 }
 
+// 传输流真实失败时组装带底层错误码的诊断信息。必须在 sftpStreamCall 刚
+// 返回、session 错误状态还"热"时持 lease 锁读取（与 fillSftpError 的调用
+// 纪律一致），否则并发的其它调用会把 last-error 覆盖掉。
+static QString streamErrorDetail(SftpTransferPool::Lease &lease, const QString &context)
+{
+    QMutexLocker<QRecursiveMutex> guard(lease.lock());
+    SshError err;
+    fillSftpError(lease.sftp(), lease.client(), err, context);
+    return QStringLiteral("%1 [sftp_err=%2]").arg(err.message).arg(err.code);
+}
+
 // 下载的一条流：租一条独立连接，开一次读 handle，循环领分片。
 // 每条流各开一个本地 QFile 句柄写自己的区间（QFile 非线程安全不能共享；
 // 区间互不重叠，并发 pwrite 安全）。
@@ -732,6 +756,9 @@ void SftpClient::downloadStream(TransferState &state, const QString &remotePath,
         }, &m_cancel);
     }
     if (!fh) {
+        // cancel 置位时 sftpRetryPtr 带 NULL 哨兵返回，这是取消不是打开失败。
+        if (m_cancel.load())
+            return;
         state.setFailed(QStringLiteral("open for read failed: %1").arg(remotePath));
         return;
     }
@@ -751,8 +778,15 @@ void SftpClient::downloadStream(TransferState &state, const QString &remotePath,
                 return libssh2_sftp_read(fh, buf.data() + got, size_t(size - got));
             }, &m_cancel);
             if (n < 0) {
-                state.setFailed(QStringLiteral("read failed at offset %1: %2")
-                                    .arg(offset + got).arg(remotePath));
+                // cancel 置位时 sftpStreamCall 带 EAGAIN 哨兵返回（见该函数注释），
+                // 这是取消不是读错误：不 setFailed，交给 doDownload 末尾的
+                // m_cancel 检查报 "cancelled"。否则并发传输间共享 m_cancel 的
+                // 竞态会把 "read failed at offset 0" 当成真实失败糊给用户。
+                if (n == LIBSSH2_ERROR_EAGAIN && m_cancel.load())
+                    break;
+                state.setFailed(streamErrorDetail(lease,
+                    QStringLiteral("read failed at offset %1: %2")
+                        .arg(offset + got).arg(remotePath)));
                 ok = false;
                 break;
             }
@@ -811,6 +845,9 @@ void SftpClient::uploadStream(TransferState &state, const QString &localPath,
         }, &m_cancel);
     }
     if (!fh) {
+        // cancel 置位时 sftpRetryPtr 带 NULL 哨兵返回，这是取消不是打开失败。
+        if (m_cancel.load())
+            return;
         state.setFailed(QStringLiteral("open for write failed: %1").arg(remotePath));
         return;
     }
@@ -839,8 +876,12 @@ void SftpClient::uploadStream(TransferState &state, const QString &localPath,
                                           size_t(chunk.size() - written));
             }, &m_cancel);
             if (n < 0) {
-                state.setFailed(QStringLiteral("write failed at offset %1: %2")
-                                    .arg(offset).arg(remotePath));
+                // 同 downloadStream：cancel 置位时的 EAGAIN 哨兵是取消不是写错误。
+                if (n == LIBSSH2_ERROR_EAGAIN && m_cancel.load())
+                    break;
+                state.setFailed(streamErrorDetail(lease,
+                    QStringLiteral("write failed at offset %1: %2")
+                        .arg(offset).arg(remotePath)));
                 ok = false;
                 break;
             }

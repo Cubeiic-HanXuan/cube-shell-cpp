@@ -364,6 +364,9 @@ Q_SIGNALS:
     // Ctrl/Cmd+滚轮缩放后的新字号 — 供上层同步到主题配置。
     // 对应Python: cube-shell.py::zoom_in/zoom_out 中 util.THEME['font_size'] 的更新
     void fontSizeChanged(int pointSize);
+    // 右键菜单切换终端配色后的新方案名 — 供上层持久化并广播到其它已打开终端。
+    // 对应Python: cube-shell.py::apply_theme 中 util.THEME['terminal_theme'] 的更新
+    void colorSchemeChanged(const QString &name);
 
 protected:
     // 对应 Python resizeEvent()。

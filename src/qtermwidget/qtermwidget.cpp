@@ -1335,8 +1335,11 @@ void QTermWidget::showContextMenu(const QPoint &pos)
     const QStringList schemes = availableColorSchemes();
     for (const QString &name : schemes) {
         QAction *schemeAction = themeMenu->addAction(name);
-        connect(schemeAction, &QAction::triggered, this,
-                [this, name] { setColorScheme(name); });
+        connect(schemeAction, &QAction::triggered, this, [this, name] {
+            setColorScheme(name);
+            // 通知上层持久化到 theme.json（否则重启后还原）并同步其它终端。
+            Q_EMIT colorSchemeChanged(name);
+        });
     }
 
     menu.addSeparator();

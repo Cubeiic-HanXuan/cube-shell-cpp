@@ -16,6 +16,7 @@
 #include "config/GlobalState.h"
 
 #include "terminal_command_suggest.h"
+#include "terminal_theme_util.h"
 
 namespace cubeshell {
 
@@ -38,6 +39,9 @@ SshTerminalWidget::SshTerminalWidget(const DeviceEntry &device, QWidget *parent)
             [](int size) { GlobalState::instance().setFontSize(size); });
     // 从 theme.json 读取终端配色方案(对应 Python current_theme_name)
     m_term->setColorScheme(GlobalState::instance().terminalTheme());
+    // 右键菜单切换配色后：持久化到 theme.json 并同步到所有已打开终端。
+    connect(m_term, &QTermWidget::colorSchemeChanged, this,
+            [this](const QString &name) { applyTerminalThemeEverywhere(name, this); });
     // 回滚缓冲行数（同时决定“查找”能检索到多久以前的输出）。
     m_term->setHistorySize(GlobalState::instance().scrollbackLines());
     m_term->setScrollBarPosition(ScrollBarRight);

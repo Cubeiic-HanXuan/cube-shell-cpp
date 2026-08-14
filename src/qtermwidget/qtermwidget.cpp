@@ -1296,7 +1296,14 @@ void QTermWidget::showContextMenu(const QPoint &pos)
     QAction *pasteAction =
         menu.addAction(QIcon(QStringLiteral(":/paste.png")), QStringLiteral("粘贴"));
     pasteAction->setIconVisibleInMenu(true);
-    pasteAction->setEnabled(!QApplication::clipboard()->text().isEmpty());
+    bool canPaste = !QApplication::clipboard()->text().isEmpty();
+#ifdef CUBESHELL_PLATFORM_OHOS
+    // 鸿蒙系统粘贴板读取被 READ_PASTEBOARD 拒，text() 恒为空会把粘贴灰掉；
+    // 还要看进程内镜像（应用内复制的内容）。
+    if (!canPaste)
+        canPaste = !TerminalDisplay::internalClipboardText().isEmpty();
+#endif
+    pasteAction->setEnabled(canPaste);
     connect(pasteAction, &QAction::triggered, this, &QTermWidget::pasteClipboard);
 
     menu.addSeparator();

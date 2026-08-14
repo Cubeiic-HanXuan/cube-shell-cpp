@@ -71,6 +71,8 @@ private:
     void rebuildTree();
     // 按当前 m_fontSize 重设已有节点的字体（不重建树，保留展开状态）。
     void applyFonts();
+    // 让树图标尺寸随 m_fontSize 走（鸿蒙高密度屏默认样式图标偏小的修复）。
+    void updateIconSize();
     // 对应Python: _create_new_group / _rename_group / _delete_group
     void createGroup();
     void renameGroup(const QString &oldName);

@@ -314,6 +314,15 @@ public slots:
     // 对应C++: void pasteSelection()
     void pasteSelection();
 
+#ifdef CUBESHELL_PLATFORM_OHOS
+    // 鸿蒙：系统粘贴板的「读」被 READ_PASTEBOARD（受限 ACL 权限）拒绝，普通应用
+    // 声明了也拿不到；但「写」(SetData) 是放行的。因此复制时在本进程留一份镜像，
+    // 粘贴/右键菜单在系统读不到内容时回退到这份镜像，保证「应用内复制→粘贴」可用。
+    // 跨应用粘贴（从别的 App 复制贴进终端）仍受鸿蒙权限限制，此镜像帮不上。
+    static QString internalClipboardText();
+    static void setInternalClipboardText(const QString &text);
+#endif
+
     // 对应C++: void setSelection(const QString&)
     void setSelection(const QString &text);
     // 对应C++: void selectionChanged()

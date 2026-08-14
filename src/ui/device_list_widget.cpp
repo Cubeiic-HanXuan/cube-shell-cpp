@@ -99,6 +99,11 @@ DeviceListWidget::DeviceListWidget(QWidget *parent)
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     // 优化左侧图标显示间距。对应Python: treeWidget 的 item padding-left
     m_tree->setStyleSheet(QStringLiteral("QTreeWidget::item { padding-left: 5px; }"));
+    // 显式设置图标尺寸（随字号走）。鸿蒙高分屏上若不设，树会取样式默认的
+    // PM_SmallIconSize——该值依赖平台主题的密度换算，而鸿蒙平台插件的密度/DPI
+    // 上报有缺陷，解析得偏小，这就是设备列表图标「特别小」的根因。显式给逻辑像素
+    // 尺寸后由 Qt 按 devicePixelRatio 正确放大（与左侧工具栏 setIconSize(24) 同理）。
+    updateIconSize();
 
     m_status = new QLabel(this);
     m_status->setStyleSheet(QStringLiteral("color: gray;"));
@@ -310,6 +315,15 @@ void DeviceListWidget::applyFonts()
         for (int j = 0; j < root->childCount(); ++j)
             root->child(j)->setFont(0, deviceFont(m_fontSize));
     }
+    updateIconSize();
+}
+
+// 图标边长随字号走：pt → 逻辑像素按 ×96/72（14pt ≈ 19px）。显式尺寸在鸿蒙高密度
+// 屏上能被正确放大，避免样式默认小图标在鸿蒙上解析偏小（见构造函数注释）。
+void DeviceListWidget::updateIconSize()
+{
+    const int edge = qRound(m_fontSize * 96.0 / 72.0);
+    m_tree->setIconSize(QSize(edge, edge));
 }
 
 void DeviceListWidget::onItemActivated(QTreeWidgetItem *item, int /*column*/)

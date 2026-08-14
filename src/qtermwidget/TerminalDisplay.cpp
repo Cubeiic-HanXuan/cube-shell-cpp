@@ -2193,9 +2193,31 @@ void TerminalDisplay::copyClipboard()
         return;
 
     const QString text = _screenWindow->selectedText(_preserveLineBreaks);
-    if (!text.isEmpty())
+    if (!text.isEmpty()) {
         QApplication::clipboard()->setText(text);
+#ifdef CUBESHELL_PLATFORM_OHOS
+        // 系统粘贴板读不回（READ_PASTEBOARD 被拒），复制时同步留一份进程内镜像，
+        // 供粘贴回退用（见 internalClipboardText）。
+        setInternalClipboardText(text);
+#endif
+    }
 }
+
+#ifdef CUBESHELL_PLATFORM_OHOS
+// 进程内剪贴板镜像（仅鸿蒙用）。
+static QString g_ohosInternalClipboard;
+
+QString TerminalDisplay::internalClipboardText()
+{
+    return g_ohosInternalClipboard;
+}
+
+void TerminalDisplay::setInternalClipboardText(const QString &text)
+{
+    g_ohosInternalClipboard = text;
+}
+#endif
+
 
 void TerminalDisplay::pasteClipboard()
 {
@@ -2215,6 +2237,12 @@ void TerminalDisplay::_emitSelection(bool useSelection, bool appendReturn)
     const QClipboard::Mode mode = useSelection ? QClipboard::Selection : QClipboard::Clipboard;
     QString text = QApplication::clipboard()->text(mode);
 
+#ifdef CUBESHELL_PLATFORM_OHOS
+    // 系统粘贴板读取被 READ_PASTEBOARD 拒绝而返回空时，回退到进程内镜像，
+    // 让「应用内复制→粘贴」可用。系统能读到（如未来拿到权限）则优先用系统的。
+    if (text.isEmpty() && !useSelection)
+        text = internalClipboardText();
+#endif
     if (text.isEmpty())
         return;
 
@@ -2958,6 +2986,24 @@ void TerminalDisplay::leaveEvent(QEvent *event)
 
 void TerminalDisplay::keyPressEvent(QKeyEvent *event)
 {
+#ifdef CUBESHELL_PLATFORM_OHOS
+    // 鸿蒙 PC：菜单栏快捷键在某些焦点/平台路径下可能不触发 ShortcutOverride→shortcut，
+    // 这里在终端侧直接兜底处理复制/粘贴，不依赖菜单 shortcut。覆盖 Ctrl+Shift+C/V
+    // 与 Ctrl+Insert / Shift+Insert 两套常见终端组合键。只有菜单快捷键没消费该键时
+    // keyPressEvent 才会被调到，因此桌面端零影响、也不会与菜单复制重复触发。
+    // 修饰键用掩码判断（== 精确匹配会被鸿蒙 QPA 可能附加的 Keypad 等标志挡掉）。
+    const Qt::KeyboardModifiers mods = event->modifiers();
+    const bool ctrlShift = (mods & Qt::ControlModifier) && (mods & Qt::ShiftModifier)
+                           && !(mods & Qt::AltModifier) && !(mods & Qt::MetaModifier);
+    const bool ctrlOnly  = (mods & Qt::ControlModifier) && !(mods & Qt::ShiftModifier)
+                           && !(mods & Qt::AltModifier) && !(mods & Qt::MetaModifier);
+    const bool shiftOnly = (mods & Qt::ShiftModifier) && !(mods & Qt::ControlModifier)
+                           && !(mods & Qt::AltModifier) && !(mods & Qt::MetaModifier);
+    if (ctrlShift && event->key() == Qt::Key_C) { copyClipboard();  event->accept(); return; }
+    if (ctrlShift && event->key() == Qt::Key_V) { pasteClipboard(); event->accept(); return; }
+    if (ctrlOnly  && event->key() == Qt::Key_Insert) { copyClipboard();  event->accept(); return; }
+    if (shiftOnly && event->key() == Qt::Key_Insert) { pasteClipboard(); event->accept(); return; }
+#endif
     emit keyPressedSignal(event, false);
     event->accept();
 }

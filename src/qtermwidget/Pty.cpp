@@ -57,6 +57,14 @@ int Pty::start(const QString &program, const QStringList &programArguments, cons
     // 工具据此启用全保真渲染），与 Python 版 kptyprocess.py 对齐。
     setEnv(QStringLiteral("COLORTERM"), QStringLiteral("truecolor"), true);
 
+#ifdef CUBESHELL_PLATFORM_OHOS
+    // 鸿蒙沙箱：继承来的默认 PATH 含 /usr/local/bin、/usr/bin 等不可访问目录。
+    // sh 做 PATH 搜索时一碰到不可访问目录就整体放弃——裸命令报 "inaccessible or
+    // not found"，但绝对路径（如 /bin/ls）却能正常跑。覆盖为只含可访问目录的
+    // 干净 PATH，让裸命令（ls/cat/cp…）能直接解析到。
+    setEnv(QStringLiteral("PATH"), QStringLiteral("/system/bin:/bin"), true);
+#endif
+
     // 对应C++: setUseUtmp(addToUtmp)
     setUseUtmp(addToUtmp);
 

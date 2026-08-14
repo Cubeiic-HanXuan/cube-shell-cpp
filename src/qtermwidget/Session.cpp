@@ -666,8 +666,20 @@ void Session::run()
     environment << backgroundColorHint;
 
     const int result = _shellProcess->start(exec, arguments, environment, windowId(), _addToUtmp);
-    if (result < 0)
+    if (result < 0) {
+        // 起本地 shell 失败（如无可用 shell 二进制、或运行时沙箱拦截 fork/exec）。
+        // 不能留下一个空白死标签——往 emulation 写一行明确提示，让用户知道发生了什么。
+        qWarning("Session::run(): 本地 shell 启动失败 (program=%s, result=%d)",
+                 qPrintable(exec), result);
+        if (_emulation) {
+            const QString msg = tr("\r\n[无法创建本机终端：shell 启动失败 (%1)]\r\n"
+                                   "[当前平台可能不允许应用 fork/exec 本地进程]\r\n")
+                                    .arg(exec);
+            const QByteArray utf8 = msg.toUtf8();
+            _emulation->receiveData(utf8.constData(), utf8.size());
+        }
         return;
+    }
 
     // 对应C++: _shellProcess->setWriteable(false);
     _shellProcess->setWriteable(false);

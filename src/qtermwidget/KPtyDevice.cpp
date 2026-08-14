@@ -216,15 +216,26 @@ bool KPtyDevicePrivate::_k_canRead()
     KPtyDevice *q = q_ptr;
     int readBytes = 0;
 
-    int available;
+    int available = 0;
+    bool sizeKnown = true;
     if (::ioctl(q->masterFd(), PTY_BYTES_AVAILABLE, &available) == -1) {
-        qCWarning(qtermwidgetLogger) << "KPtyDevice: ioctl(PTY_BYTES_AVAILABLE) failed:" << ::strerror(errno);
-        return false;
+        // 鸿蒙 OHOS 沙箱用 seccomp 过滤 pty master 上的 FIONREAD → EPERM
+        // （也可能是不支持该 ioctl 的平台 → ENOTTY/ENOSYS）。此时 readNotifier
+        // 既然已触发，fd 就是可读的——不能因探测不到字节数就放弃读（否则终端空白）。
+        // 回退为按固定块大小直接 read()：pty 的 read 有数据即返回、不会等满缓冲区，
+        // 后续 read() 返回 0 仍走下面的 EOF 分支，逻辑闭环。
+        if (errno == EPERM || errno == EACCES || errno == ENOTTY || errno == ENOSYS) {
+            sizeKnown = false;
+            available = 4096;
+        } else {
+            qCWarning(qtermwidgetLogger) << "KPtyDevice: ioctl(PTY_BYTES_AVAILABLE) failed:" << ::strerror(errno);
+            return false;
+        }
     }
 
 #ifdef Q_OS_SOLARIS
     // A 0-byte read on Solaris returns the 0-byte STREAMS message.
-    if (!available) {
+    if (sizeKnown && !available) {
         char c;
         if (!NO_INTR(::read(q->masterFd(), &c, 0))) {
             if (readNotifier)
@@ -235,7 +246,7 @@ bool KPtyDevicePrivate::_k_canRead()
         return true;
     }
 #else
-    if (!available) {
+    if (sizeKnown && !available) {
         if (readNotifier)
             readNotifier->setEnabled(false);
         Q_EMIT q->readEof();

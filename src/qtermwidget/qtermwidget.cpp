@@ -104,6 +104,27 @@ struct TermWidgetImpl {
             const QString sysRoot = qEnvironmentVariable("SYSTEMROOT", QStringLiteral("C:\\Windows"));
             shellProgram = sysRoot + QStringLiteral("\\System32\\cmd.exe");
         }
+#elif defined(CUBESHELL_PLATFORM_OHOS)
+        // 鸿蒙PC: 无 /bin/bash。按候选顺序取第一个「存在且可执行」的 shell——
+        // $SHELL 优先,回退到系统常见 sh。全不匹配则回退 /system/bin/sh,
+        // 交给 Session::run() 里已有的存在性检查再兜底。
+        {
+            QStringList candidates;
+            const QByteArray shellEnv = qgetenv("SHELL");
+            if (!shellEnv.isEmpty())
+                candidates << QString::fromLocal8Bit(shellEnv);
+            candidates << QStringLiteral("/system/bin/sh")
+                       << QStringLiteral("/bin/sh")
+                       << QStringLiteral("/bin/mksh");
+            for (const QString &c : candidates) {
+                if (!c.isEmpty() && QFileInfo::exists(c) && QFileInfo(c).isExecutable()) {
+                    shellProgram = c;
+                    break;
+                }
+            }
+            if (shellProgram.isEmpty())
+                shellProgram = QStringLiteral("/system/bin/sh");
+        }
 #else
         // Unix: 优先使用环境变量 SHELL。
         const QByteArray shellEnv = qgetenv("SHELL");

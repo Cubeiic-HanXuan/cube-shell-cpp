@@ -17,7 +17,11 @@
 #include <unistd.h>
 
 #if defined(Q_OS_LINUX)
-#  include <pty.h>          // openpty, forkpty
+    // 本目录自带 Pty.h：#include <pty.h> 在大小写不敏感文件系统（如 macOS 宿主
+    // 交叉编译鸿蒙，-I 指到本目录）上会被误解析成它，拿不到声明 openpty 的系统头。
+    // openpty 是稳定的 glibc/musl ABI，这里直接 extern 声明，绕开头文件大小写冲突。
+    // （struct termios / struct winsize 已由上面的 <termios.h>/<sys/ioctl.h> 提供。）
+    extern "C" int openpty(int *, int *, char *, const struct termios *, const struct winsize *);
 #elif defined(Q_OS_MAC) || defined(Q_OS_FREEBSD) || defined(Q_OS_BSD4)
 #  include <util.h>         // openpty
 #elif defined(Q_OS_UNIX)

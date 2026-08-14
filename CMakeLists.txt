@@ -48,27 +48,35 @@ endif()
 # ---------------------------------------------------------------------------
 # 见 docs/鸿蒙PC适配方案.md。
 #
-# 鸿蒙PC 虽是桌面形态（键鼠/窗口/菜单，Qt Widgets 主场），但应用模型与手机相同：
-# HAP 包 + 沙箱，因而三类能力在系统层面就不存在，只能整体裁剪：
-#   1. 无本地 shell —— 拿不到 forkpty/posix_openpt，本地终端标签页不可实现；
-#      SSH/串口终端不受影响（走 Session::runEmptyPTY() + 手动接管 emulation
-#      字节流，即 SerialBridge 已验证的模式），qtermwidget 渲染能力 100% 保留。
-#   2. 禁止 exec 子进程 —— QProcess 全线不可用，frp/docker CLI/claude CLI
-#      等「起本地进程」的功能失去载体。
-#   3. Qt 模块子集 —— 官方 Qt for OpenHarmony 不含 QtSerialPort，
-#      QtMultimedia 支持不完整。
+# 鸿蒙PC 虽是桌面形态（键鼠/窗口/菜单，Qt Widgets 主场），应用模型与手机相同：
+# HAP 包 + 沙箱。但「无本地 shell / 禁止 exec 子进程」是按手机沙箱下的旧论断，
+# 鸿蒙PC 不成立——本机 NDK/Qt 实测：musl libc 导出 openpty/forkpty/posix_openpt/
+# fork/execve/setsid/login_tty/waitpid，Qt6Core.so 导入 fork/execve/vfork/waitpid
+# 且未定义 QT_NO_PROCESS，QProcess 的 Unix 后端真实编译进去了。故本地终端默认放开。
+#
+# 仍需裁剪的能力：
+#   1. Qt 模块子集 —— 官方 Qt for OpenHarmony 不含 QtSerialPort，
+#      QtMultimedia 支持不完整（语音输入保持裁剪）。
+#   2. 本地子进程工具集（LOCALPROC）—— frp/docker CLI/claude CLI 等依赖的
+#      二进制尚未为鸿蒙交叉编译，缺载体，保持裁剪（本地终端不在此列，单独放开）。
 #
 # 落地约束：本开关**默认 OFF**，且所有裁剪都收敛在下面这一个 if() 内。
 # 桌面三平台（macOS/Windows/Linux）不传 -DCUBESHELL_PLATFORM_OHOS=ON 时，
 # 此段整体不执行，源码路径与编译产物与适配前逐字节一致。
 option(CUBESHELL_PLATFORM_OHOS "Build for HarmonyOS PC (OpenHarmony, aarch64-linux-ohos)" OFF)
 
-# 三个新开关的默认值随平台走：桌面 ON（保持现状），鸿蒙 OFF（能力不存在）。
-# 用变量做默认值而非事后 FORCE，是为了让 `cmake -LH` 展示的值就是真实生效值，
-# 同时保留使用者显式覆盖的余地（例如二期串口/RDP 补齐后单独打开）。
+# 三个能力开关的默认值随平台走。用变量做默认值而非事后 FORCE，是为了让
+# `cmake -LH` 展示的值就是真实生效值，同时保留使用者显式覆盖的余地。
+#
+# 鸿蒙下三分化：
+#   * LOCALPTY（本地终端）—— 鸿蒙PC 实测可行（forkpty/QProcess 可用），默认 ON；
+#   * VOICE（无 QtMultimedia）与 LOCALPROC（frp/docker/claude 二进制未移植）—— 仍 OFF。
+# 桌面三平台全部 ON（保持现状）。
 if(CUBESHELL_PLATFORM_OHOS)
+    set(CUBESHELL_LOCALPTY_DEFAULT ON)
     set(CUBESHELL_LOCAL_CAP_DEFAULT OFF)
 else()
+    set(CUBESHELL_LOCALPTY_DEFAULT ON)
     set(CUBESHELL_LOCAL_CAP_DEFAULT ON)
 endif()
 
@@ -76,7 +84,7 @@ endif()
 # OFF 时 qtermwidget 只保留远程数据源（SSH/串口）的渲染路径。
 option(CUBESHELL_WITH_LOCALPTY
     "Build the local shell terminal backend (forkpty / ConPty)"
-    ${CUBESHELL_LOCAL_CAP_DEFAULT})
+    ${CUBESHELL_LOCALPTY_DEFAULT})
 
 # 语音输入（core/ai/VoiceInput，QAudioSource 采集 + HTTP 识别）。
 # OFF 时不再需要 Qt6::Multimedia，find_package 也随之跳过。
@@ -104,7 +112,7 @@ if(CUBESHELL_PLATFORM_OHOS)
         "RDP is unavailable on HarmonyOS (FreeRDP not ported yet)" FORCE)
 
     message(STATUS "cube-shell: 目标平台为鸿蒙PC（OpenHarmony）——"
-                   "已裁剪 本地终端/串口/RDP/语音/本地子进程工具")
+                   "已裁剪 串口/RDP/语音/本地子进程工具；本地终端默认开启")
 endif()
 
 # ---------------------------------------------------------------------------

@@ -39,7 +39,7 @@ concurrency:
 env:
   QT_VERSION: '6.9.1'
   # 应用自身版本号（打包文件名用），与 Qt 版本无关；发版时手动改这里
-  APP_VERSION: '3.2.1'
+  APP_VERSION: '3.3.0'
   VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
 jobs:

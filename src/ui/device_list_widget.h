@@ -44,6 +44,9 @@ public:
     // 对应Python: 连接后 treeWidget 改展示远程文件树，复选框行固定在底部
     void setBrowserMode(bool on);
 
+    // 设置设备列表字号（分组/设备节点），即时重设已有节点字体，不重建树。
+    void setFontSize(int pointSize);
+
 signals:
     // User double-clicked a device; the main window opens an SSH tab.
     void activated(const cubeshell::DeviceEntry &device);
@@ -66,6 +69,8 @@ private slots:
 private:
     // Rebuild the tree from m_devices + GroupManager::groupedDevices().
     void rebuildTree();
+    // 按当前 m_fontSize 重设已有节点的字体（不重建树，保留展开状态）。
+    void applyFonts();
     // 对应Python: _create_new_group / _rename_group / _delete_group
     void createGroup();
     void renameGroup(const QString &oldName);
@@ -78,6 +83,7 @@ private:
 
     GroupManager m_groups;              // groups.json（与 Python 侧共用格式）
     QList<DeviceEntry> m_devices;       // cache for rebuildTree()
+    int m_fontSize = 0;                 // 设备列表字号（构造时从 GlobalState 读）
 
     // 防抖：抑制双击时 itemActivated + itemDoubleClicked 双触发。
     // 对应Python: cd() 中 is_connecting_lock + _last_connect_attempt_ts 节流

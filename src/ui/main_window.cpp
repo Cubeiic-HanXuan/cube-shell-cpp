@@ -174,6 +174,19 @@ QString windowsTerminalTabStyle()
         .arg(bar, active, hover, textActive, textIdle);
 }
 
+// OHOS 为触屏设备：菜单项上显示快捷键文本（如 “主题设置  Ctrl+Shift+T”）
+// 既是视觉噪音也没有键盘可用，统一不在菜单 QAction 上设置快捷键；
+// 桌面平台（macOS/Windows/Linux）行为保持不变。
+void setMenuShortcut(QAction *action, const QKeySequence &key)
+{
+#ifndef CUBESHELL_PLATFORM_OHOS
+    action->setShortcut(key);
+#else
+    Q_UNUSED(action);
+    Q_UNUSED(key);
+#endif
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -423,17 +436,17 @@ void MainWindow::setupMenus()
     // --- 文件 ---
     QMenu *fileMenu = menuBar()->addMenu(tr("文件"));
     QAction *addDev = fileMenu->addAction(tr("&新增配置"), this, &MainWindow::addDevice);
-    addDev->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+A")));   // 新增配置
+    setMenuShortcut(addDev, QKeySequence(QStringLiteral("Shift+Ctrl+A")));   // 新增配置
     addDev->setStatusTip(tr("添加配置"));
     QAction *addTun = fileMenu->addAction(tr("&新增SSH隧道"), this, &MainWindow::addTunnel);
-    addTun->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+S")));   // 新增SSH隧道
+    setMenuShortcut(addTun, QKeySequence(QStringLiteral("Shift+Ctrl+S")));   // 新增SSH隧道
     addTun->setStatusTip(tr("新增SSH隧道"));
     fileMenu->addSeparator();
     QAction *expDev = fileMenu->addAction(tr("&导出设备配置"), this, &MainWindow::exportDevices);
-    expDev->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+E")));   // 导出设备配置
+    setMenuShortcut(expDev, QKeySequence(QStringLiteral("Shift+Ctrl+E")));   // 导出设备配置
     expDev->setStatusTip(tr("导出设备配置"));
     QAction *impDev = fileMenu->addAction(tr("&导入设备配置"), this, &MainWindow::importDevices);
-    impDev->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+I")));   // 导入设备配置
+    setMenuShortcut(impDev, QKeySequence(QStringLiteral("Shift+Ctrl+I")));   // 导入设备配置
     impDev->setStatusTip(tr("导入设备配置"));
     fileMenu->addSeparator();
     QAction *openCfg = fileMenu->addAction(tr("打开 config.dat…"));
@@ -455,16 +468,16 @@ void MainWindow::setupMenus()
     });
     fileMenu->addSeparator();
     QAction *quit = fileMenu->addAction(tr("退出"));
-    quit->setShortcut(QKeySequence::Quit);
+    setMenuShortcut(quit, QKeySequence::Quit);
     connect(quit, &QAction::triggered, this, &QWidget::close);
 
     // --- 编辑（作用于当前终端） ---
     QMenu *editMenu = menuBar()->addMenu(tr("编辑"));
     QAction *copy = editMenu->addAction(tr("复制"));
 #ifdef Q_OS_MACOS
-    copy->setShortcut(QKeySequence::Copy);
+    setMenuShortcut(copy, QKeySequence::Copy);
 #else
-    copy->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+    setMenuShortcut(copy, QKeySequence(QStringLiteral("Ctrl+Shift+C")));
 #endif
     connect(copy, &QAction::triggered, this, [this]() {
         QWidget *w = activeTabWidget() ? activeTabWidget()->currentWidget() : nullptr;
@@ -476,9 +489,9 @@ void MainWindow::setupMenus()
     });
     QAction *paste = editMenu->addAction(tr("粘贴"));
 #ifdef Q_OS_MACOS
-    paste->setShortcut(QKeySequence::Paste);
+    setMenuShortcut(paste, QKeySequence::Paste);
 #else
-    paste->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+V")));
+    setMenuShortcut(paste, QKeySequence(QStringLiteral("Ctrl+Shift+V")));
 #endif
     connect(paste, &QAction::triggered, this, [this]() {
         QWidget *w = activeTabWidget() ? activeTabWidget()->currentWidget() : nullptr;
@@ -494,11 +507,11 @@ void MainWindow::setupMenus()
     // --- 查找（终端内容检索：排查线上问题时按关键字定位日志）---
     QAction *find = editMenu->addAction(tr("查找"));
 #ifdef Q_OS_MACOS
-    find->setShortcut(QKeySequence::Find);                              // Cmd+F
+    setMenuShortcut(find, QKeySequence::Find);                              // Cmd+F
 #else
     // 非 macOS 不能用 Ctrl+F：readline(emacs 模式) 的 forward-char、vim 的翻页
     // 都占着它，抢过来会把终端里的常用操作弄坏。跟复制/粘贴一样加 Shift。
-    find->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+    setMenuShortcut(find, QKeySequence(QStringLiteral("Ctrl+Shift+F")));
 #endif
     connect(find, &QAction::triggered, this, [this]() {
         if (QTermWidget *term = currentTerminal()) {
@@ -514,8 +527,8 @@ void MainWindow::setupMenus()
     QAction *findPrev = editMenu->addAction(tr("查找上一个"));
 #ifdef Q_OS_MACOS
     // macOS 上 Cmd 组合键不会下发给终端，可以安全占用。
-    findNext->setShortcut(QKeySequence::FindNext);                      // Cmd+G
-    findPrev->setShortcut(QKeySequence::FindPrevious);                  // Cmd+Shift+G
+    setMenuShortcut(findNext, QKeySequence::FindNext);                      // Cmd+G
+    setMenuShortcut(findPrev, QKeySequence::FindPrevious);                  // Cmd+Shift+G
 #else
     // 其他平台 Qt 的 FindNext/FindPrevious 默认是 F3/Shift+F3，而 F3 被 mc 之类
     // 的终端程序占用，全局抢走会影响正常使用。这里只留菜单项；搜索栏内部仍支持
@@ -543,21 +556,21 @@ void MainWindow::setupMenus()
         if (tabs)
             splitTab(tabs, tabs->currentIndex(), Qt::Horizontal);
     });
-    splitH->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+D")));
+    setMenuShortcut(splitH, QKeySequence(QStringLiteral("Ctrl+Shift+D")));
     QAction *splitV = viewMenu->addAction(tr("垂直分屏"), this, [this]() {
         QTabWidget *tabs = activeTabWidget();
         if (tabs)
             splitTab(tabs, tabs->currentIndex(), Qt::Vertical);
     });
-    splitV->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+    setMenuShortcut(splitV, QKeySequence(QStringLiteral("Ctrl+Shift+E")));
     viewMenu->addSeparator();
     // 分屏之间切换焦点 + 尺寸/合并管理。
     QAction *nextPane = viewMenu->addAction(tr("下一个分屏"), this,
                                             [this]() { focusNextPane(1); });
-    nextPane->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+Right")));
+    setMenuShortcut(nextPane, QKeySequence(QStringLiteral("Ctrl+Alt+Right")));
     QAction *prevPane = viewMenu->addAction(tr("上一个分屏"), this,
                                             [this]() { focusNextPane(-1); });
-    prevPane->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+Left")));
+    setMenuShortcut(prevPane, QKeySequence(QStringLiteral("Ctrl+Alt+Left")));
     QAction *closePane = viewMenu->addAction(tr("关闭当前分屏"), this, [this]() {
         QTabWidget *tabs = activeTabWidget();
         if (!tabs || m_panes.count() <= 1)
@@ -576,7 +589,7 @@ void MainWindow::setupMenus()
         pruneEmptyPanes();
         first->setFocus();
     });
-    closePane->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+W")));
+    setMenuShortcut(closePane, QKeySequence(QStringLiteral("Ctrl+Shift+W")));
     viewMenu->addAction(tr("均分所有分屏"), this, [this]() {
         // 递归均分整棵 splitter 树。
         std::function<void(QSplitter *)> equalizeTree = [&](QSplitter *sp) {
@@ -594,7 +607,7 @@ void MainWindow::setupMenus()
     QMenu *termMenu = menuBar()->addMenu(tr("终端"));
 #ifdef CUBESHELL_WITH_LOCALPTY
     QAction *newTerm = termMenu->addAction(tr("新建本机终端"), this, &MainWindow::openLocalTerminal);
-    newTerm->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+    setMenuShortcut(newTerm, QKeySequence(QStringLiteral("Ctrl+T")));
 #endif
 #ifdef CUBESHELL_WITH_RDP
     // 新建空白 RDP 面板，连接参数由用户在表单中填写后点“连接”。
@@ -627,12 +640,12 @@ void MainWindow::setupMenus()
         openNetTab(dlg.settings());
     });
     QAction *closeTab = termMenu->addAction(tr("关闭标签页"), this, &MainWindow::closeCurrentTab);
-    closeTab->setShortcut(QKeySequence(QStringLiteral("Ctrl+W")));
+    setMenuShortcut(closeTab, QKeySequence(QStringLiteral("Ctrl+W")));
     termMenu->addSeparator();
     QAction *next = termMenu->addAction(tr("下一个标签页"), this, &MainWindow::nextTab);
-    next->setShortcut(QKeySequence(QStringLiteral("Ctrl+Tab")));
+    setMenuShortcut(next, QKeySequence(QStringLiteral("Ctrl+Tab")));
     QAction *prev = termMenu->addAction(tr("上一个标签页"), this, &MainWindow::prevTab);
-    prev->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+Tab")));
+    setMenuShortcut(prev, QKeySequence(QStringLiteral("Ctrl+Shift+Tab")));
 
     // --- 工具 ---
     QMenu *toolsMenu = menuBar()->addMenu(tr("工具"));
@@ -647,7 +660,7 @@ void MainWindow::setupMenus()
     QMenu *settingsMenu = menuBar()->addMenu(tr("设置"));
     // 主题设置 Shift+Ctrl+T：打开 SettingsDialog（主题 Tab）。
     QAction *settings = settingsMenu->addAction(tr("&主题设置"), this, [this] { showSettings(0); });
-    settings->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+T")));   // 主题设置
+    setMenuShortcut(settings, QKeySequence(QStringLiteral("Shift+Ctrl+T")));   // 主题设置
     settings->setStatusTip(tr("设置主题"));
     settings->setMenuRole(QAction::PreferencesRole);
     // AI 设置（无快捷键）。对应Python: cube-shell.py L2267-2270
@@ -657,7 +670,7 @@ void MainWindow::setupMenus()
     // 通用设置 Shift+Ctrl+G：同一个 SettingsDialog（通用 Tab），
     // 内含字体/编码/SSH 超时/回滚行数等，语言设置也在该对话框的语言 Tab。
     QAction *general = settingsMenu->addAction(tr("&通用设置"), this, [this] { showSettings(2); });
-    general->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+G")));    // 通用设置
+    setMenuShortcut(general, QKeySequence(QStringLiteral("Shift+Ctrl+G")));    // 通用设置
     general->setStatusTip(tr("字体、编码、超时等通用设置"));
     // 平台右键菜单集成（按当前平台只编译/显示对应项）。
     // 对应Python: cube-shell.py L2279-2292（platform.system() 分支）
@@ -677,19 +690,19 @@ void MainWindow::setupMenus()
     // --- 帮助 ---
     QMenu *helpMenu = menuBar()->addMenu(tr("帮助"));
     QAction *about = helpMenu->addAction(tr("&关于"), this, &MainWindow::showAbout);
-    about->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+B")));
+    setMenuShortcut(about, QKeySequence(QStringLiteral("Shift+Ctrl+B")));
     about->setStatusTip(tr("cubeShell 有关信息"));
     about->setMenuRole(QAction::NoRole);    // 对应Python: about_action.setMenuRole(NoRole)
     QAction *update = helpMenu->addAction(tr("&检查更新"), this, &MainWindow::checkForUpdates);
-    update->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+U")));
+    setMenuShortcut(update, QKeySequence(QStringLiteral("Shift+Ctrl+U")));
     update->setStatusTip(tr("检查并安装 cube-shell 最新版本"));
     update->setMenuRole(QAction::NoRole);
     // 对应Python: linux_action（Linux常用命令 Shift+Ctrl+P，L2319-2324）
     QAction *linuxCmds = helpMenu->addAction(tr("&Linux常用命令"), this, &MainWindow::showLinuxCommands);
-    linuxCmds->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+P")));
+    setMenuShortcut(linuxCmds, QKeySequence(QStringLiteral("Shift+Ctrl+P")));
     linuxCmds->setStatusTip(tr("最常用的Linux命令查找"));
     QAction *help = helpMenu->addAction(tr("&帮助"));
-    help->setShortcut(QKeySequence(QStringLiteral("Shift+Ctrl+H")));
+    setMenuShortcut(help, QKeySequence(QStringLiteral("Shift+Ctrl+H")));
     help->setStatusTip(tr("cubeShell使用说明"));
     connect(help, &QAction::triggered, this, []() {
         QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/BestZYQ/cube-shell")));
@@ -2792,6 +2805,12 @@ void MainWindow::showSettings(int tabIndex)
                 const QList<QTermWidget *> terms = findChildren<QTermWidget *>();
                 for (QTermWidget *t : terms)
                     t->setTerminalFont(font);
+            });
+    // 设备列表字号即时应用（不重建树，保留展开状态）。
+    connect(&dlg, &SettingsDialog::deviceListFontSizeChanged, this,
+            [this](int pointSize) {
+                if (m_deviceList)
+                    m_deviceList->setFontSize(pointSize);
             });
     // 切换 dark/light 后重建标签页 QSS（颜色按新主题取值），无需重启。
     connect(&dlg, &SettingsDialog::appearanceChanged, this, [this](const QString &) {

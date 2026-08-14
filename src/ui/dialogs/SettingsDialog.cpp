@@ -49,6 +49,7 @@ static const char kTheme[]      = "settings/theme";
 static const char kLanguage[]   = "settings/language";
 static const char kFontFamily[] = "settings/font_family";
 static const char kFontSize[]   = "settings/font_size";
+static const char kDeviceListFontSize[] = "settings/device_list_font_size";
 static const char kSshTimeout[] = "settings/ssh_timeout";
 static const char kEncoding[]   = "settings/terminal_encoding";
 static const char kScrollback[] = "settings/scrollback_lines";
@@ -154,7 +155,13 @@ QWidget *SettingsDialog::createGeneralTab()
     m_fontSize = new QSpinBox(page);
     m_fontSize->setRange(8, 40);
     unifyFieldWidth(m_fontSize);
-    form->addRow(tr("字体大小:"), m_fontSize);
+    form->addRow(tr("终端字体大小:"), m_fontSize);
+
+    // 设备列表（左侧分组/设备树）字号，与终端字号相互独立。
+    m_deviceListFontSize = new QSpinBox(page);
+    m_deviceListFontSize->setRange(8, 40);
+    unifyFieldWidth(m_deviceListFontSize);
+    form->addRow(tr("设备列表字体大小:"), m_deviceListFontSize);
 
     m_sshTimeout = new QSpinBox(page);
     m_sshTimeout->setRange(5, 600);
@@ -210,6 +217,8 @@ void SettingsDialog::loadCurrentSettings()
     if (!family.isEmpty())
         m_fontFamily->setCurrentFont(QFont(family));
     m_fontSize->setValue(qs.value(settings_keys::kFontSize, state.fontSize()).toInt());
+    m_deviceListFontSize->setValue(
+        qs.value(settings_keys::kDeviceListFontSize, state.deviceListFontSize()).toInt());
 
     m_sshTimeout->setValue(qs.value(
         settings_keys::kSshTimeout,
@@ -253,6 +262,10 @@ void SettingsDialog::accept()
     const bool fontDirty = family != state.fontFamily() || size != state.fontSize();
     state.setFont(family, size);
 
+    const int deviceListSize = m_deviceListFontSize->value();
+    const bool deviceListFontDirty = deviceListSize != state.deviceListFontSize();
+    state.setDeviceListFontSize(deviceListSize);
+
     QJsonObject theme = state.theme();
     theme[QLatin1String(kSshTimeoutKey)] = m_sshTimeout->value();
     state.setTheme(theme);
@@ -266,6 +279,7 @@ void SettingsDialog::accept()
     qs.setValue(settings_keys::kLanguage, m_language->currentData().toString());
     qs.setValue(settings_keys::kFontFamily, family);
     qs.setValue(settings_keys::kFontSize, size);
+    qs.setValue(settings_keys::kDeviceListFontSize, deviceListSize);
     qs.setValue(settings_keys::kSshTimeout, m_sshTimeout->value());
     qs.setValue(settings_keys::kEncoding, m_encoding->currentText());
     qs.setValue(settings_keys::kScrollback, scrollback);
@@ -279,6 +293,8 @@ void SettingsDialog::accept()
         emit appearanceChanged(appearance);
     if (fontDirty)
         emit fontChanged(family, size);
+    if (deviceListFontDirty)
+        emit deviceListFontSizeChanged(deviceListSize);
     if (scrollbackDirty)
         emit scrollbackLinesChanged(scrollback);
 

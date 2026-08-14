@@ -14,6 +14,8 @@
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
+#include "config/GlobalState.h"
+
 namespace cubeshell {
 
 // Item payload roles. 对应Python: item.setData(0, Qt.UserRole, "group"/"device")
@@ -25,30 +27,24 @@ static const QLatin1String kTypeDevice("device");
 
 namespace {
 
-// 分组节点字体：粗体，macOS 下 15pt，其它平台 14pt。
+// 分组节点字体：粗体。字号来自设置（缺省 macOS 15pt，其它平台 14pt）。
 // 对应Python: refreshConf::_make_group_font
-QFont groupFont()
+QFont groupFont(int pointSize)
 {
     QFont f;
-#ifdef Q_OS_MACOS
-    f.setPointSize(15);
-#else
-    f.setPointSize(14);
-#endif
+    f.setPointSize(pointSize);
     f.setBold(true);
     return f;
 }
 
-// 设备节点字体：macOS 下 15pt 粗体，其它平台 14pt 常规。
+// 设备节点字体：macOS 下加粗，其它平台常规。字号来自设置。
 // 对应Python: refreshConf::_make_device_font
-QFont deviceFont()
+QFont deviceFont(int pointSize)
 {
     QFont f;
+    f.setPointSize(pointSize);
 #ifdef Q_OS_MACOS
-    f.setPointSize(15);
     f.setBold(true);
-#else
-    f.setPointSize(14);
 #endif
     return f;
 }
@@ -86,6 +82,9 @@ QString deviceTooltip(const DeviceEntry &d)
 DeviceListWidget::DeviceListWidget(QWidget *parent)
     : QWidget(parent)
 {
+    // 设备列表字号：持久化在 theme.json（GlobalState），与设置对话框共享。
+    m_fontSize = GlobalState::instance().deviceListFontSize();
+
     // 单列树 + "设备列表" 表头，与 Python 侧完全一致。
     // 对应Python: ui/main.py::treeWidget + refreshConf
     m_tree = new QTreeWidget(this);
@@ -261,7 +260,7 @@ void DeviceListWidget::rebuildTree()
         const bool ungrouped = (g.group == GroupManager::kUngrouped);
         auto *root = new QTreeWidgetItem(m_tree);
         root->setText(0, ungrouped ? tr("未分组") : g.group);
-        root->setFont(0, groupFont());
+        root->setFont(0, groupFont(m_fontSize));
         // 分组用系统文件夹图标。对应Python: style().standardIcon(SP_DirIcon)
         root->setIcon(0, style()->standardIcon(QStyle::SP_DirIcon));
         root->setData(0, kNameRole, g.group);
@@ -272,7 +271,7 @@ void DeviceListWidget::rebuildTree()
                 continue;
             auto *item = new QTreeWidgetItem(root);
             item->setText(0, d->name);
-            item->setFont(0, deviceFont());
+            item->setFont(0, deviceFont(m_fontSize));
             // 对应Python: cube-shell.py:3966-3994 — RDP 设备用 Windows 图标，
             // Serial 设备用 icons8-serial-48.png，SSH 设备用 icons8-ssh-48.png
             // Telnet/TCP 各有自己的图标；两者必须排在 SSH 兜底分支之前判断。
@@ -292,6 +291,25 @@ void DeviceListWidget::rebuildTree()
         }
     }
     m_tree->expandAll();
+}
+
+// 设置字号并即时重设已有节点字体。不重建树，避免收起用户已展开的分组。
+void DeviceListWidget::setFontSize(int pointSize)
+{
+    if (pointSize <= 0 || pointSize == m_fontSize)
+        return;
+    m_fontSize = pointSize;
+    applyFonts();
+}
+
+void DeviceListWidget::applyFonts()
+{
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *root = m_tree->topLevelItem(i);
+        root->setFont(0, groupFont(m_fontSize));
+        for (int j = 0; j < root->childCount(); ++j)
+            root->child(j)->setFont(0, deviceFont(m_fontSize));
+    }
 }
 
 void DeviceListWidget::onItemActivated(QTreeWidgetItem *item, int /*column*/)

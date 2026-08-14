@@ -247,4 +247,19 @@ void GlobalState::setScrollbackLines(int lines)
     m_theme.insert(QStringLiteral("scrollback_lines"), lines);
 }
 
+// C++ 侧新增键；缺省回退平台默认（macOS 15，其它 14），与设备列表历史硬编码一致。
+int GlobalState::deviceListFontSize() const
+{
+#ifdef Q_OS_MACOS
+    return m_theme.value(QStringLiteral("device_list_font_size")).toInt(15);
+#else
+    return m_theme.value(QStringLiteral("device_list_font_size")).toInt(14);
+#endif
+}
+
+void GlobalState::setDeviceListFontSize(int pointSize)
+{
+    m_theme.insert(QStringLiteral("device_list_font_size"), pointSize);
+}
+
 } // namespace cubeshell

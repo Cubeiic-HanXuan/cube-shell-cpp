@@ -39,6 +39,8 @@ signals:
     void appearanceChanged(const QString &appearance);
     // 字体设置已修改（family, pointSize），终端可即时应用。
     void fontChanged(const QString &family, int pointSize);
+    // 设备列表字号已修改，设备列表可即时应用。
+    void deviceListFontSizeChanged(int pointSize);
     // 回滚行数已修改，已打开的终端可即时应用（setHistorySize）。
     void scrollbackLinesChanged(int lines);
 
@@ -53,6 +55,7 @@ private:
     QComboBox *m_language = nullptr;      // LanguageManager 支持列表
     QFontComboBox *m_fontFamily = nullptr;
     QSpinBox *m_fontSize = nullptr;
+    QSpinBox *m_deviceListFontSize = nullptr; // 设备列表字号
     QSpinBox *m_sshTimeout = nullptr;     // 秒
     QComboBox *m_encoding = nullptr;      // UTF-8 / GBK / GB2312
     QSpinBox *m_scrollback = nullptr;     // 终端回滚行数（搜索可检索的范围）

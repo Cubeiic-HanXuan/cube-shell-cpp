@@ -133,6 +133,12 @@ public:
     int scrollbackLines() const;
     void setScrollbackLines(int lines);
 
+    // 设备列表字号 (theme.json 的 "device_list_font_size")。
+    // C++ 侧新增键；Python 版读不到该键时按自己的默认走，互不影响。
+    // 默认值与设备列表历史硬编码一致（macOS 15，其它平台 14）。
+    int deviceListFontSize() const;
+    void setDeviceListFontSize(int pointSize);
+
 private:
     GlobalState() = default;
 

@@ -23,6 +23,9 @@ set(CORE_SOURCES
     net/TelnetProtocol.cpp      # RFC 854/855 IAC 选项协商状态机
     net/TcpBridge.cpp           # TCP/Telnet 字节流 ↔ qtermwidget Session
 
+    # --- 连接探测 ---
+    ConnectionTester.cpp        # 「添加设备」对话框的测试连接（SSH/TCP/Telnet/RDP/Serial）
+
     # --- config / persistence ---
     config/PickleReader.cpp     # minimal pickle reader for config.dat
     config/DeviceConfigStore.cpp # device config (read pickle / write JSON)

@@ -14,16 +14,22 @@
 
 #include <QDialog>
 
+#include <functional>
+
 #include "config/DeviceConfigStore.h"
 
 class QCheckBox;
-class QLineEdit;
 class QComboBox;
+class QDialogButtonBox;
+class QLabel;
+class QLineEdit;
 class QFormLayout;
 class QPushButton;
 class QStackedWidget;
 
 namespace cubeshell {
+
+class ConnectionTester;
 
 class AddDeviceDialog : public QDialog {
     Q_OBJECT
@@ -49,14 +55,23 @@ public:
     // ——否则迁移一完成，所有 RDP 设备都会因为密码框是空的而无法保存。
     void setHasStoredPassword(bool has);
 
+    // 注入「按 id 取已存密码」的回调（由持有 DeviceConfigStore 的 MainWindow 提供）。
+    // 测试连接时用：编辑既有设备、密码框留空（"留空则不修改"）的情况下，
+    // 得拿钥匙串里的真实密码去测，否则会误报认证失败。新建设备无需设置。
+    void setPasswordResolver(std::function<QString(const QString &deviceId)> resolver);
+
     void accept() override;
 
 private slots:
     void onAuthMethodChanged(int index);
     void onBrowseKey();
+    void onTestConnection();
+    void onTestFinished(bool ok, const QString &message);
 
 private:
     bool validate(QString *err) const;
+    // 测试进行中/结束时的按钮与状态条切换（testing=true 进入探测态）。
+    void setTestingUi(bool testing);
 
     // 当前选中的协议值（"ssh" | "rdp" | "serial" | "telnet" | "tcp"）。
     // 一律取 currentData() 而非 currentText()：显示文本是给人看的，一旦有人
@@ -127,6 +142,13 @@ private:
     QComboBox *m_termType = nullptr;        // Telnet TERMINAL-TYPE 上报值
     QCheckBox *m_negotiate = nullptr;       // Telnet IAC 选项协商
     QCheckBox *m_autoLogin = nullptr;       // Telnet 自动登录
+
+    // --- 测试连接 ---
+    QDialogButtonBox *m_buttonBox = nullptr; // OK/Cancel，探测期间禁用 OK
+    QPushButton *m_testButton = nullptr;     // 「测试连接」/ 探测中变为「取消」
+    QLabel *m_testStatus = nullptr;          // 行内结果反馈（绿✓/红✗）
+    ConnectionTester *m_tester = nullptr;
+    std::function<QString(const QString &)> m_passwordResolver;
 };
 
 } // namespace cubeshell

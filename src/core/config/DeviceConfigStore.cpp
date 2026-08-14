@@ -184,6 +184,14 @@ bool DeviceConfigStore::hasPassword(const QString &id) const
     return !m_secrets.value(id).isEmpty();
 }
 
+QString DeviceConfigStore::resolvedPassword(const QString &id) const
+{
+    if (id.isEmpty())
+        return QString();
+    ensureSecretsLoaded();
+    return m_secrets.value(id);
+}
+
 void DeviceConfigStore::setPassword(const QString &id, const QString &password)
 {
     if (id.isEmpty())

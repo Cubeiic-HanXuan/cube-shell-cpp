@@ -172,6 +172,20 @@ target_link_libraries(channel_multiplex_test PRIVATE
     cube_core
 )
 
+# 「测试连接」后台探测：本地 QTcpServer 验证 TCP 可达/不可达、SSH refused、
+# 重入闸门（无外部依赖；SSH 成功路径可选，由 CUBESSH_* 环境变量驱动）。
+qt_add_executable(connection_tester_test
+    connection_tester_test.cpp
+)
+target_include_directories(connection_tester_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(connection_tester_test PRIVATE
+    Qt6::Core
+    Qt6::Network
+    cube_core
+)
+
 # UrlHandler / BastionClient unit test (pure logic, no network).
 qt_add_executable(url_dispatch_test
     url_dispatch_test.cpp
@@ -444,6 +458,7 @@ add_test(NAME sse_parser_test COMMAND sse_parser_test)
 add_test(NAME safety_checker_test COMMAND safety_checker_test)
 add_test(NAME sensitive_masker_test COMMAND sensitive_masker_test)
 add_test(NAME compose_yaml_test COMMAND compose_yaml_test)
+add_test(NAME connection_tester_test COMMAND connection_tester_test)
 if(CUBESHELL_WITH_LOCALPROC)
     add_test(NAME docker_manager_test COMMAND docker_manager_test)
     add_test(NAME frp_installer_test COMMAND frp_installer_test)

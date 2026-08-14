@@ -1575,6 +1575,8 @@ bool MainWindow::saveDevices()
 void MainWindow::addDevice()
 {
     AddDeviceDialog dlg(this);
+    // 测试连接用：新建设备密码就在表单里，这个回调通常返回空，仅为统一接口。
+    dlg.setPasswordResolver([this](const QString &id) { return m_store.resolvedPassword(id); });
     if (dlg.exec() != QDialog::Accepted)
         return;
     // 新建设备：dlg.device() 已在构造时分配好 id，密码随条目带进来，
@@ -1598,6 +1600,8 @@ void MainWindow::editDevice(const QString &name)
     // 钥匙串里已有密码时，密码框允许留空（校验放行、占位符提示）。
     // 不告诉对话框这件事，迁移一完成所有 RDP 设备就都保存不了了。
     dlg.setHasStoredPassword(m_store.hasPassword(old.id));
+    // 测试连接用：编辑态密码框可能留空（"留空则不修改"），按 id 取钥匙串里的真实密码。
+    dlg.setPasswordResolver([this](const QString &id) { return m_store.resolvedPassword(id); });
     if (dlg.exec() != QDialog::Accepted)
         return;
 

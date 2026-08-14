@@ -15,6 +15,7 @@
 #include <QHBoxLayout>
 
 #include "dialogs/NetConnectDialog.h"      // netcombo 辅助函数（无条件可用）
+#include "ConnectionTester.h"             // 测试连接后台探测
 #ifdef CUBESHELL_WITH_SERIAL
 #include "dialogs/SerialConnectDialog.h"   // serialcombo 辅助函数
 #endif
@@ -237,11 +238,26 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
         label->setMinimumWidth(labelWidth);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    m_buttonBox = buttons;
     connect(buttons, &QDialogButtonBox::accepted, this, &AddDeviceDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
+    // --- 测试连接（左对齐的 ActionRole 按钮 + 行内结果条） ---
+    // ActionRole 不触发 accept/reject，点它不会关对话框。结果走行内 label
+    //（绿✓/红✗）而不是弹窗：探测是轻量反馈，不该打断填表。
+    m_tester = new ConnectionTester(this);
+    m_testButton = new QPushButton(tr("测试连接"), this);
+    buttons->addButton(m_testButton, QDialogButtonBox::ActionRole);
+    m_testStatus = new QLabel(this);
+    m_testStatus->setWordWrap(true);
+    m_testStatus->setVisible(false);   // 只在有结果/进行中时占位
+
+    connect(m_testButton, &QPushButton::clicked, this, &AddDeviceDialog::onTestConnection);
+    connect(m_tester, &ConnectionTester::finished, this, &AddDeviceDialog::onTestFinished);
+
     auto *layout = new QVBoxLayout(this);
     layout->addLayout(form);
+    layout->addWidget(m_testStatus);
     layout->addWidget(buttons);
 
     connect(m_authMethod, &QComboBox::currentIndexChanged,
@@ -322,6 +338,78 @@ void AddDeviceDialog::setHasStoredPassword(bool has)
     m_hasStoredPassword = has;
     if (has && m_password->text().isEmpty())
         m_password->setPlaceholderText(tr("已保存，留空则不修改"));
+}
+
+void AddDeviceDialog::setPasswordResolver(std::function<QString(const QString &)> resolver)
+{
+    m_passwordResolver = std::move(resolver);
+}
+
+void AddDeviceDialog::onTestConnection()
+{
+    // 探测中再点 = 取消。cancel() 不发 finished()，这里自己收尾 UI。
+    if (m_tester->isRunning()) {
+        m_tester->cancel();
+        setTestingUi(false);
+        m_testStatus->setText(tr("已取消测试"));
+        m_testStatus->setStyleSheet(QString());
+        m_testStatus->setVisible(true);
+        return;
+    }
+
+    // 先过与「保存」同一套必填校验：主机为空之类的低级错误不必真发连接。
+    QString err;
+    if (!validate(&err)) {
+        QMessageBox::warning(this, tr("配置不完整"), err);
+        return;
+    }
+
+    DeviceEntry e = device();
+    // 编辑既有设备且密码框留空时，device() 带出的是空密码（语义是"没改"），
+    // 得拿钥匙串里的真实密码去测，否则一改端口再测就误报认证失败。
+    if (e.password.isEmpty() && !e.usesKey() && m_passwordResolver)
+        e.password = m_passwordResolver(e.id);
+
+    setTestingUi(true);
+    m_testStatus->setText(tr("正在测试连接…"));
+    m_testStatus->setStyleSheet(QString());
+    m_testStatus->setVisible(true);
+
+    bool started;
+#ifdef CUBESHELL_WITH_SERIAL
+    if (e.isSerial()) {
+        started = m_tester->testSerial(serialSettingsFromDevice(e));
+    } else
+#endif
+    if (e.isSsh()) {
+        started = m_tester->testSsh(e);
+    } else {
+        // telnet / tcp / rdp：只做 host:port 的可达性探测。
+        started = m_tester->testTcp(e);
+    }
+    // 串口是同步 open，finished 可能已在本调用内回报完（onTestFinished 已把
+    // UI 复位）；started=false 是理论兜底（m_running 闸门），同样复位。
+    if (!started)
+        setTestingUi(false);
+}
+
+void AddDeviceDialog::onTestFinished(bool ok, const QString &message)
+{
+    setTestingUi(false);
+    m_testStatus->setText((ok ? tr("✓ ") : tr("✗ ")) + message);
+    m_testStatus->setStyleSheet(ok ? QStringLiteral("color: #1a7f37;")
+                                   : QStringLiteral("color: #cf222e;"));
+    m_testStatus->setToolTip(message);
+    m_testStatus->setVisible(true);
+}
+
+void AddDeviceDialog::setTestingUi(bool testing)
+{
+    m_testButton->setText(testing ? tr("取消") : tr("测试连接"));
+    // 探测期间禁用 OK（接受一个还没验过的配置容易误存），但保留 Cancel：
+    // 用户随时能关对话框，m_tester 随对话框析构安全收尾（worker detach）。
+    if (QPushButton *ok = m_buttonBox->button(QDialogButtonBox::Ok))
+        ok->setEnabled(!testing);
 }
 
 DeviceEntry AddDeviceDialog::device() const

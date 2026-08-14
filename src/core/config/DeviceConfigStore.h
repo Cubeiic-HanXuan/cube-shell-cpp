@@ -149,6 +149,11 @@ public:
     // 该 id 是否存有密码。用于「编辑时不必重输密码」——只问在不在，不取值。
     bool hasPassword(const QString &id) const;
 
+    // 按 id 取密码，必要时先从钥匙串加载（与 resolved() 同一套加载语义）。
+    // 找不到 / 未存返回空串。用途：编辑设备时「测试连接」要用真实凭据，
+    // 而密码框此时是空的（占位符"留空则不修改"），调用方只有 id 没有 name。
+    QString resolvedPassword(const QString &id) const;
+
     // 显式设置/清除密码（空串即清除）。要落盘还得调 flushSecrets()。
     void setPassword(const QString &id, const QString &password);
 

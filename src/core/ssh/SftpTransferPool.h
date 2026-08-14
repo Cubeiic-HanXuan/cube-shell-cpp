@@ -163,6 +163,11 @@ public:
     // count <= 0 表示按 maxConnections() 补满。
     void prewarm(int count = 0);
 
+    // 有界等待预热任务结束；false = 超时仍在跑。预热任务捕获本池 this，
+    // 没退完就析构是 UAF——调用方（~SftpClient / ~SftpUploaderCore）应在
+    // 拆池前调用，超时就泄漏整池而不是冻住 UI 线程无限等。
+    bool waitPrewarmDone(int timeoutMs);
+
     // 关闭所有克隆连接与主 session 通道槽（主连接本身不动）。断连/换连接时调用。
     // 前置条件：调用时不得有未归还的租约（调用方需先停掉所有传输线程；
     // 传输线程可能阻塞在 socket 上，先调 shutdownTransferSockets() 打断）。

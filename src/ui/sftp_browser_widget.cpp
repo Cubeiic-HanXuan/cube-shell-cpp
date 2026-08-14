@@ -24,6 +24,7 @@
 #include <QSizePolicy>
 #include <QStyle>
 #include <QThread>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -129,6 +130,15 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
 
     m_progress = new QProgressBar(this);
     m_progress->setVisible(false);
+    // 进度条旁的取消按钮：下载（含批量队列）走上层 m_sftp->cancelTransfer()，
+    // 上传走 m_uploader->cancelUpload()。取消即"暂停"——断点续传已内建，
+    // 半成品文件保留，重新传输自动从断点继续。
+    m_cancelBtn = new QToolButton(this);
+    m_cancelBtn->setText(QStringLiteral("×"));
+    m_cancelBtn->setToolTip(tr("取消传输（已传部分保留，可断点续传）"));
+    m_cancelBtn->setAutoRaise(true);
+    m_cancelBtn->setVisible(false);
+    connect(m_cancelBtn, &QToolButton::clicked, this, &SftpBrowserWidget::cancelTransfers);
     m_status = new QLabel(this);
     m_status->setStyleSheet(QStringLiteral("color: gray;"));
     // 长文本（如一整段 SFTP 错误信息）会把 label 的 sizeHint 撑得很宽，
@@ -143,7 +153,13 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     layout->setSpacing(0);
     layout->addWidget(pathBar);
     layout->addWidget(m_tree, 1);
-    layout->addWidget(m_progress);
+    // 进度条 + 取消按钮一行：按钮仅在传输进行中可见（updateCancelButton）。
+    auto *progressRow = new QHBoxLayout();
+    progressRow->setContentsMargins(0, 0, 0, 0);
+    progressRow->setSpacing(4);
+    progressRow->addWidget(m_progress, 1);
+    progressRow->addWidget(m_cancelBtn);
+    layout->addLayout(progressRow);
     layout->addWidget(m_status);
 
     connect(m_pathEdit, &QLineEdit::returnPressed, this, &SftpBrowserWidget::onPathEdited);
@@ -158,15 +174,22 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
 SftpBrowserWidget::~SftpBrowserWidget()
 {
     // 取消协作：先置关停标志（压缩/解压的 runCommand 在下一轮读循环退出），
-    // 再 cancelTransfer（SftpClient 同步操作的 EAGAIN 重试循环与传输分块
-    // 循环都检查 m_cancel，listdir/read/write 等能尽快退出）。
+    // 再 beginTeardown（SftpClient 同步操作的 EAGAIN 重试循环看 m_teardown、
+    // 传输分块循环看 m_cancel，listdir/read/write 等都能尽快退出）。
     m_shuttingDown->store(true);
     if (m_sftp)
-        m_sftp->cancelTransfer();
+        m_sftp->beginTeardown();
     // 有限等待：先于子对象（m_sftp 等）被 ~QObject 删除前，等待仍在运行的
     // 自建 worker 线程结束，避免后台线程对已删除 SftpClient 的 use-after-free。
     // 已正常结束的线程经 deleteLater 销毁后 QPointer 自动置空，此处跳过。
+    //
+    // 传输 worker（download/upload）登记在 SftpClient 自己的表里、捕获裸
+    // this，也必须在这里 join：~SftpClient 的兜底只是泄漏连接池，对象本身
+    // 仍会被 ~QObject 回收，worker 事后 emit/lease 就是 UAF。把它的 join
+    // 结果并入 joinTimedOut，超时走下面的 setParent(nullptr) 整体泄漏。
     bool joinTimedOut = false;
+    if (m_sftp && !m_sftp->joinTransferWorkers(kWorkerJoinTimeoutMs))
+        joinTimedOut = true;
     for (const QPointer<QThread> &worker : std::as_const(m_workers)) {
         if (worker) {
             worker->quit();
@@ -227,10 +250,12 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
             // 最后一个文件也要走汇总文案，而不是退回单文件的"传输失败"。
             const bool wasBatch = (m_downloadBatchDone + m_downloadFailures.size()) > 0
                 || !m_downloadQueue.isEmpty();
+            // 用户主动取消（cancelTransfer 的收尾消息）不算失败。
+            const bool cancelled = !ok && msg == QLatin1String("cancelled");
             m_activeDownloads.remove(path);
             if (ok)
                 ++m_downloadBatchDone;
-            else
+            else if (!cancelled)
                 m_downloadFailures.append(QFileInfo(path).fileName());
             // 队列非空：单个文件失败不卡整批（与 removeSelected 收集失败项同款哲学）。
             if (!m_downloadQueue.isEmpty()) {
@@ -239,7 +264,11 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
                 return;
             }
             m_progress->setVisible(false);
-            if (wasBatch) {
+            if (cancelled) {
+                setStatusText(m_downloadBatchDone > 0
+                                  ? tr("下载已取消（已完成 %1 个文件）").arg(m_downloadBatchDone)
+                                  : tr("已取消：%1").arg(QFileInfo(path).fileName()));
+            } else if (wasBatch) {
                 // 整批结束一次性汇总（镜像 removeSelected 的失败清单风格）。
                 if (m_downloadFailures.isEmpty()) {
                     setStatusText(tr("已完成 %1 个文件的下载").arg(m_downloadBatchDone));
@@ -249,12 +278,13 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
                                       .arg(m_downloadFailures.size())
                                       .arg(m_downloadFailures.join(QStringLiteral(", "))));
                 }
-                m_downloadFailures.clear();
-                m_downloadBatchDone = 0;
             } else {
                 setStatusText(ok ? tr("已完成：%1").arg(QFileInfo(path).fileName())
                                  : tr("传输失败：%1").arg(msg));
             }
+            m_downloadFailures.clear();
+            m_downloadBatchDone = 0;
+            updateCancelButton();
             if (ok)
                 refresh();
         });
@@ -284,6 +314,7 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
                     } else {
                         refreshUploadProgress();
                     }
+                    updateCancelButton();
                     refresh();
                 }, Qt::QueuedConnection);
         connect(m_uploader, &SftpUploaderCore::uploadFailed, this,
@@ -293,7 +324,12 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
                         m_progress->setVisible(false);
                     else
                         refreshUploadProgress();
-                    setStatusText(tr("上传失败：%1（%2）").arg(filename, error));
+                    // 用户主动取消不算失败（cancelUpload 的收尾错误是"上传已取消"）。
+                    if (error.contains(QStringLiteral("已取消")))
+                        setStatusText(tr("已取消上传：%1").arg(filename));
+                    else
+                        setStatusText(tr("上传失败：%1（%2）").arg(filename, error));
+                    updateCancelButton();
                 }, Qt::QueuedConnection);
     } else {
         m_uploader->setSshClient(raw);
@@ -666,6 +702,7 @@ void SftpBrowserWidget::refreshUploadProgress()
 {
     if (m_activeUploads.isEmpty()) {
         m_progress->setVisible(false);
+        updateCancelButton();
         return;
     }
     qint64 done = 0, total = 0;
@@ -688,6 +725,7 @@ void SftpBrowserWidget::refreshUploadProgress()
                               .arg(QFileInfo(m_activeUploads.constBegin().key()).fileName())
                               .arg(percent).arg(streams));
     }
+    updateCancelButton();
 }
 
 void SftpBrowserWidget::uploadFiles()
@@ -742,6 +780,7 @@ void SftpBrowserWidget::downloadSelected()
             return;
         m_progress->setVisible(true);
         m_activeDownloads.insert(files.first(), UploadProgress{0, 0});
+        updateCancelButton();
         m_sftp->download(files.first(), local);
         return;
     }
@@ -768,6 +807,7 @@ void SftpBrowserWidget::dispatchNextDownload()
         return;
     const DownloadTask task = m_downloadQueue.dequeue();
     m_activeDownloads.insert(task.remote, UploadProgress{0, 0});
+    updateCancelButton();
     m_sftp->download(task.remote, task.local);
 }
 
@@ -777,6 +817,7 @@ void SftpBrowserWidget::refreshDownloadProgress()
     if (m_activeDownloads.isEmpty()) {
         if (m_downloadQueue.isEmpty())
             m_progress->setVisible(false);
+        updateCancelButton();
         return;
     }
     qint64 done = 0, total = 0;
@@ -799,6 +840,32 @@ void SftpBrowserWidget::refreshDownloadProgress()
                               .arg(QFileInfo(m_activeDownloads.constBegin().key()).fileName())
                               .arg(percent));
     }
+}
+
+void SftpBrowserWidget::updateCancelButton()
+{
+    if (!m_cancelBtn)
+        return;
+    m_cancelBtn->setVisible(!m_activeUploads.isEmpty()
+                            || !m_activeDownloads.isEmpty()
+                            || !m_downloadQueue.isEmpty());
+}
+
+// 取消全部在传传输。取消即"暂停"：下载/上传都支持断点续传，半成品文件
+// 保留，重新传输自动从断点继续。
+void SftpBrowserWidget::cancelTransfers()
+{
+    // 下载：清空批量队列（整批取消），再取消当前在传文件。
+    m_downloadQueue.clear();
+    if (m_sftp)
+        m_sftp->cancelTransfer();
+    // 上传：逐文件取消（已入队的跳过、在传的分片边界停止）。
+    if (m_uploader) {
+        const QList<QString> ids = m_activeUploads.keys();
+        for (const QString &fileId : ids)
+            m_uploader->cancelUpload(fileId);
+    }
+    updateCancelButton();
 }
 
 // 右键菜单：与 Python 已连接分支逐字对齐（项目、顺序、分隔线）。

@@ -118,6 +118,7 @@ bool SshClient::connectToHost(SshPromptCallback promptCallback, SshError &error)
         return false;
     }
     m_sock = sock;
+    m_socketShutdown = false; // 新 socket 就绪，清除可能残留的 shutdown 标记
 
 #ifdef Q_OS_MACOS
     // Prevent SIGPIPE on this socket: macOS has no MSG_NOSIGNAL, so per-socket
@@ -474,6 +475,9 @@ void SshClient::shutdownSocket()
 #else
     ::shutdown(static_cast<int>(m_sock), SHUT_RDWR);
 #endif
+    // 标记传输已死：isTransportAlive 据此返回 false，连接池不会把这条
+    // 连接再租出去（取消下载后立刻重新下载踩到的就是这个）。
+    m_socketShutdown = true;
 }
 
 void SshClient::disconnectFromHost()
@@ -651,6 +655,10 @@ void SshClient::freeChannel(_LIBSSH2_CHANNEL *channel)
 
 bool SshClient::isTransportAlive() const
 {
+    // socket 已被 shutdown（取消传输/关标签页）：authenticated 标志仍是真，
+    // 但传输已经死了，必须报死——否则连接池会把死连接租出去。
+    if (m_socketShutdown.load())
+        return false;
     QMutexLocker locker(&const_cast<SshClient *>(this)->m_sessionMutex);
     if (!m_session)
         return false;

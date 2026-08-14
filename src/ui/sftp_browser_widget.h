@@ -25,6 +25,7 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QLineEdit;
 class QProgressBar;
+class QToolButton;
 class QLabel;
 class QResizeEvent;
 
@@ -160,11 +161,18 @@ private:
     QStringList m_downloadFailures;
     void dispatchNextDownload();    // 队列非空则取出首个任务点火
     void refreshDownloadProgress(); // 重算聚合进度并刷新进度条/状态栏
+    // 取消全部在传传输：下载清空批量队列 + cancelTransfer，上传逐文件
+    // cancelUpload。已传部分保留（断点续传），重新传输自动继续。
+    void cancelTransfers();
+    // 有在传传输时显示取消按钮，空闲时隐藏。所有改变 m_activeUploads /
+    // m_activeDownloads / m_downloadQueue 的路径末尾都要调。
+    void updateCancelButton();
 
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章
     QTreeWidget *m_tree = nullptr;
     QProgressBar *m_progress = nullptr;
+    QToolButton *m_cancelBtn = nullptr;
     QLabel *m_status = nullptr;
     // 状态栏完整文本（未截断），resize 后据此重新截断。
     QString m_statusFullText;

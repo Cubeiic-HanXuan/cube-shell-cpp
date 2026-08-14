@@ -15,6 +15,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
 #include <functional>
 
 #include <QMutex>
@@ -205,6 +206,10 @@ private:
     bool m_authReplayable = false;
 
     qintptr m_sock = -1;
+    // socket 已被 shutdownSocket() 打断（取消传输/关标签页）。isTransportAlive
+    // 必须把它算进去——libssh2_userauth_authenticated 只是本地标志，socket
+    // 死了它仍为真，连接池据此会把死连接继续租出去（open 必失败）。
+    std::atomic<bool> m_socketShutdown{false};
     _LIBSSH2_SESSION *m_session = nullptr;
     _LIBSSH2_CHANNEL *m_channel = nullptr;
     QRecursiveMutex m_sessionMutex; // serializes all libssh2 calls on m_session

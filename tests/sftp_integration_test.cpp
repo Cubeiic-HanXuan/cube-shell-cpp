@@ -169,10 +169,66 @@ int main(int argc, char *argv[])
             qWarning() << "restart download failed:" << msg2;
         CHECK(ok2);
 
+        // 续传正确性：取消留下的 .part + 位图必须续传出完整内容。
+        // 钉住的是这条真实故障：预分配让残件尺寸等于远端大小，重下直接
+        // "already downloaded" 跳过，用户拿到一个中间是空洞的全尺寸坏文件。
+        // （若竞态下首次已下完，则走 "already downloaded" 分支，内容校验同样过。）
+        bool ok3 = false;
+        QString msg3;
+        QEventLoop loop3;
+        QObject::connect(&sftp, &SftpClient::transferFinished, &loop3,
+                         [&loop3, &ok3, &msg3](const QString &, bool success,
+                                               const QString &m) {
+            ok3 = success;
+            msg3 = m;
+            loop3.quit();
+        });
+        sftp.download(base + QStringLiteral("/sftp_dir/dl_big.bin"),
+                      tmp.path() + QStringLiteral("/dl_big.bin"));
+        loop3.exec();
+        if (!ok3)
+            qWarning() << "resume download failed:" << msg3;
+        CHECK(ok3);
+        QFile bigFile(tmp.path() + QStringLiteral("/dl_big.bin"));
+        CHECK(bigFile.open(QIODevice::ReadOnly) && bigFile.readAll() == big);
+        // 完工后临时文件与位图必须已清掉
+        CHECK(!QFile::exists(tmp.path() + QStringLiteral("/dl_big.bin.part")));
+        CHECK(!QFile::exists(tmp.path() + QStringLiteral("/dl_big.bin.part.meta")));
+
         // 现场清理（best-effort）
         for (const QString &name : dlNames)
             sftp.remove(base + QStringLiteral("/sftp_dir/") + name, &err);
         sftp.remove(base + QStringLiteral("/sftp_dir/dl_big.bin"), &err);
+    }
+
+    // --- 析构安全回归：下载进行中销毁 SftpClient 不得崩溃/冻住 ---------------
+    // 钉住关标签页路径：~SftpClient 的 cancelTransfer + join 必须在 worker 仍
+    // 持有裸 this 时安全收敛（超时则走连接池泄漏兜底，绝不能 UAF）。
+    {
+        const QByteArray big2 = QByteArray(1024 * 1024, 'y').repeated(64); // 64MB
+        CHECK(sftp.writeFile(base + QStringLiteral("/sftp_dir/dl_teardown.bin"), big2, err));
+
+        auto *sftp2 = new SftpClient(&client); // 无父对象，手动销毁
+        SshError err2;
+        CHECK(sftp2->open(err2));
+        QEventLoop loop;
+        QObject::connect(sftp2, &SftpClient::transferProgress, &loop,
+                         [&loop, &sftp2](const QString &, qint64, qint64) {
+            // 首个进度到达 = 传输已在跑：直接销毁（与关标签页同款路径）。
+            // sender 的信号投递是 queued，此处 emission 已返回，delete 安全；
+            // 进程不崩、不冻住即通过。
+            delete sftp2;
+            sftp2 = nullptr;
+            loop.quit();
+        });
+        sftp2->download(base + QStringLiteral("/sftp_dir/dl_teardown.bin"),
+                        tmp.path() + QStringLiteral("/dl_teardown.bin"));
+        // localhost 上 64MB 可能秒完、竞态下进度信号先到 finished：兜底退出。
+        QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+        loop.exec();
+        delete sftp2; // 竞态下已完成、没走进度回调时在这里销毁
+        sftp.remove(base + QStringLiteral("/sftp_dir/dl_teardown.bin"), &err);
+        qInfo() << "teardown-during-download survived";
     }
 
     qInfo() << (failures == 0 ? "SFTP ALL PASS" : "SFTP FAILURES") << failures;

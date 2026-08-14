@@ -138,6 +138,16 @@ public:
     void upload(const QString &localPath, const QString &remotePath);
     // Request cancellation of the in-flight transfer.
     void cancelTransfer();
+    // 析构/关标签页路径的停机信号：取消在传传输 + 让同步元数据操作
+    // （listdir/stat/readFile 等）的 EAGAIN 重试循环尽快退出。
+    // 与 cancelTransfer 的区别：用户点"取消"只停传输，面板还要继续浏览，
+    // 同步操作不能跟着失效（否则取消一次下载后 listdir 永远报 Would block）。
+    void beginTeardown();
+    // 有限等待所有在传 download/upload worker 结束；false = 有超时逃逸，
+    // 由调用方决定兜底（析构走泄漏，见 .cpp）。供 ~SftpBrowserWidget 在
+    // ~QObject 删子对象前调用——传输 worker 捕获裸 this，没退干净就不能
+    // 让本对象析构。
+    bool joinTransferWorkers(int timeoutMs);
 
 signals:
     void operationFailed(const QString &op, const QString &path, const QString &message);
@@ -180,10 +190,14 @@ private:
     std::unique_ptr<SftpTransferPool> m_transferPool;
     // socket 已关（abandon() 置位）后，close() 只清指针、不做网络往返。
     bool m_abandoned = false;
-    // Set from the UI thread, read on workers — checked by the transfer chunk
-    // loops AND the EAGAIN retry loops of the synchronous operations, so
-    // cancelTransfer() also aborts a listdir/read/write stuck on retries.
+    // 传输取消标志：cancelTransfer() 置位，download/upload worker 的分块循环、
+    // EAGAIN 重试循环与连接池等槽都检查它。用户可主动触发（取消按钮），
+    // 下一次 download/upload 入口在无在传 worker 时复位。
     std::atomic<bool> m_cancel{false};
+    // 停机标志：仅 beginTeardown()（析构/关标签页）置位，永不复位。
+    // 同步元数据操作的 EAGAIN 重试循环只看它——用户取消传输不该让面板
+    // 后续的 listdir/opendir 跟着失败（会报 Would block）。
+    std::atomic<bool> m_teardown{false};
     // 仍可能在运行的 download/upload worker 登记表（元素被 deleteLater 后自动置空）。
     QVector<QPointer<QThread>> m_workers;
 };

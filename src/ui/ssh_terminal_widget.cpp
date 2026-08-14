@@ -1,5 +1,6 @@
 #include "ssh_terminal_widget.h"
 
+#include <QDebug>
 #include <QFontDatabase>
 #include <QInputDialog>
 #include <QLineEdit>
@@ -56,11 +57,32 @@ SshTerminalWidget::SshTerminalWidget(const DeviceEntry &device, QWidget *parent)
     layout->addWidget(m_term);
 }
 
+// 析构时等待连接 worker 退出的上限：m_pendingClient->shutdownSocket() 之后
+// 在途握手/认证会立刻带错误返回，正常远小于此值。超时兑底不阻塞 UI——
+// worker 的回跳全部有 QPointer 守卫，逃逸后摸到的是空指针而不是悬垂 this。
+static constexpr int kConnectWorkerJoinTimeoutMs = 5000;
+
 SshTerminalWidget::~SshTerminalWidget()
 {
+    // 停机标志最先置位：worker 的 MFA 回调（BlockingQueuedConnection）看到它
+    // 直接返回空应答，不会往正在析构的 UI 线程上死等。
+    m_teardown = true;
+    // 打断仍在进行的连接（connectToHost 可能正阻塞在 TCP/SSH 握手上），
+    // 否则下面的 join 要等满网络超时。
+    if (m_pendingClient)
+        m_pendingClient->shutdownSocket();
     // Stop the bridge's read thread and close the channel before teardown.
     if (m_bridge)
         m_bridge->stop();
+    // 有限等待连接 worker：它可能还在 connectToHost/openShell 里，而它的
+    // 回跳 lambda 捕获的是本组件（QPointer 守卫）。等干净了再走 ~QObject，
+    // 杜绝"worker 事后 invokeMethod 悬垂 this"的 SIGSEGV。
+    if (m_connectWorker) {
+        m_connectWorker->quit();
+        if (!m_connectWorker->wait(kConnectWorkerJoinTimeoutMs))
+            qWarning() << "SshTerminalWidget: connect worker did not finish within"
+                       << kConnectWorkerJoinTimeoutMs << "ms";
+    }
 }
 
 void SshTerminalWidget::connectToHost()
@@ -86,35 +108,61 @@ void SshTerminalWidget::connectToHost()
     // thread, but it must show a dialog on the UI thread. We bounce through the
     // widget with a BlockingQueuedConnection (the worker is blocked in connect
     // anyway, so this is safe).
-    SshPromptCallback promptCb = [this](const QString &prompt, bool echo) -> QString {
-        if (QThread::currentThread() == this->thread()) {
+    //
+    // 全程 QPointer 守卫 + m_teardown 短路：组件析构后（关标签页）回调直接
+    // 返回空应答让认证失败、连接中止——绝不能对悬垂 this 调 thread()/
+    // BlockingQueuedConnection（后者还会和析构里的 join 互相死等）。
+    QPointer<SshTerminalWidget> self(this);
+    SshPromptCallback promptCb = [self](const QString &prompt, bool echo) -> QString {
+        if (!self || self->m_teardown)
+            return QString();
+        if (QThread::currentThread() == self->thread()) {
             QString resp;
-            promptForMfa(prompt, echo, resp);
+            self->promptForMfa(prompt, echo, resp);
             return resp;
         }
         QString resp;
         // Fire and forget the actual dialog call; run it on the UI thread and wait.
-        QMetaObject::invokeMethod(this, [this, prompt, echo, &resp]() {
-            promptForMfa(prompt, echo, resp);
+        QMetaObject::invokeMethod(self, [self, prompt, echo, &resp]() {
+            if (self && !self->m_teardown)
+                self->promptForMfa(prompt, echo, resp);
         }, Qt::BlockingQueuedConnection);
         return resp;
     };
 
-    QThread *worker = QThread::create([this, client, promptCb, device]() {
+    // 登记在途连接，供析构时打断握手（见 ~SshTerminalWidget）。
+    m_pendingClient = client;
+
+    // worker 全程用 QPointer 回跳：组件可能（关标签页）先于连接完成析构，
+    // 裸 this 的 invokeMethod 会直接 SIGSEGV（崩溃报告实录）。
+    QThread *worker = QThread::create([self, client, promptCb]() {
         SshError err;
         if (!client->connectToHost(promptCb, err)) {
-            QMetaObject::invokeMethod(this, [this, msg = err.message]() {
-                emit connectionFailed(msg);
-            }, Qt::QueuedConnection);
+            if (self) {
+                QMetaObject::invokeMethod(self, [self, msg = err.message]() {
+                    if (self) {
+                        self->m_pendingClient.reset();
+                        emit self->connectionFailed(msg);
+                    }
+                }, Qt::QueuedConnection);
+            }
             return;
         }
+        // 连接成功但组件已没了：client 随 lambda 销毁，不再回跳。
+        if (!self)
+            return;
 
         // Open the pty shell at the terminal's current size.
-        const QSize sz = m_term->session() ? m_term->session()->size() : QSize(80, 24);
+        const QSize sz = self->m_term->session() ? self->m_term->session()->size() : QSize(80, 24);
         if (!client->openShell("xterm-256color", sz.width(), sz.height(), err)) {
-            QMetaObject::invokeMethod(this, [this, msg = err.message]() {
-                emit connectionFailed(msg);
-            }, Qt::QueuedConnection);
+            if (self) {
+                QMetaObject::invokeMethod(self, [self, msg = err.message]() {
+                    if (self) {
+                        self->m_pendingClient.reset();
+                        emit self->connectionFailed(msg);
+                    }
+                }, Qt::QueuedConnection);
+            }
             return;
         }
 
@@ -133,19 +181,23 @@ void SshTerminalWidget::connectToHost()
         // 异常的根因，必须让它根本不进历史。
         client->writeChannel(SshBridge::shellHookCommand());
 
-        QMetaObject::invokeMethod(this, [this, client]() {
-            m_client = client;   // take ownership (unique_ptr from shared copy)
-            m_bridge = new SshBridge(m_term->session(), m_client.get(), this);
-            connect(m_bridge, &SshBridge::channelClosed, this, &SshTerminalWidget::onDisconnected);
-            connect(m_bridge, &SshBridge::shellMfaPromptDetected, this, &SshTerminalWidget::onMfaPrompt);
+        QMetaObject::invokeMethod(self, [self, client]() {
+            if (!self)
+                return;
+            self->m_pendingClient.reset();
+            self->m_client = client;   // take ownership (unique_ptr from shared copy)
+            self->m_bridge = new SshBridge(self->m_term->session(), self->m_client.get(), self);
+            connect(self->m_bridge, &SshBridge::channelClosed, self, &SshTerminalWidget::onDisconnected);
+            connect(self->m_bridge, &SshBridge::shellMfaPromptDetected, self, &SshTerminalWidget::onMfaPrompt);
             // cwdChanged 从读线程发射 → 显式 QueuedConnection 切回 UI 线程。
-            connect(m_bridge, &SshBridge::cwdChanged,
-                    this, &SshTerminalWidget::cwdChanged, Qt::QueuedConnection);
-            m_bridge->start();
+            connect(self->m_bridge, &SshBridge::cwdChanged,
+                    self, &SshTerminalWidget::cwdChanged, Qt::QueuedConnection);
+            self->m_bridge->start();
             // Hook already injected on the worker thread above — do NOT inject again.
-            emit connected();
+            emit self->connected();
         }, Qt::QueuedConnection);
     });
+    m_connectWorker = worker;
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     worker->start();
 }

@@ -6,7 +6,9 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QBitArray>
 #include <QLoggingCategory>
+#include <QtEndian>
 #include <QMutexLocker>
 #include <QRecursiveMutex>
 #include <QThread>
@@ -55,26 +57,51 @@ SftpClient::SftpClient(SshClient *client, QObject *parent)
 
 SftpClient::~SftpClient()
 {
-    // 取消协作：置 m_cancel 使 doDownload/doUpload 的分块循环与各同步操作的
-    // EAGAIN 重试循环尽快退出，再有限等待自建传输线程结束，
+    // 停机：置 m_teardown 使各同步操作的 EAGAIN 重试循环退出，置 m_cancel
+    // 使 doDownload/doUpload 的分块循环退出，再有限等待自建传输线程结束，
     // 避免后台线程访问已删除的 this/m_sftp（与 SftpBrowserWidget 同款模式）。
-    cancelTransfer();
+    beginTeardown();
+    if (!joinTransferWorkers(kWorkerJoinTimeoutMs)) {
+        // 超时兜底：worker 仍在用 m_transferPool，照常被 reset 就是 UAF。
+        // 有意泄漏连接池（fd 随进程退出回收），宁可漏内存也不崩。
+        // 正常路径到不了这里：~SftpBrowserWidget 已先 join 过一遍，
+        // 超时会把本对象整体 setParent(nullptr) 泄漏，不会进析构。
+        qCWarning(sftpLog) << "transfer workers outlived join timeout;"
+                              " leaking transfer pool to avoid UAF";
+        (void)m_transferPool.release();
+    } else if (!m_transferPool->waitPrewarmDone(kWorkerJoinTimeoutMs)) {
+        // 预热任务握着 pool 的 this 在后台建连接，无限等会冻住 UI 线程
+        //（关闭标签页/退出程序）。超时泄漏整池（照搬 SftpUploaderCore 的哲学）。
+        qCWarning(sftpLog) << "prewarm did not finish in time; leaking transfer pool";
+        (void)m_transferPool.release();
+    } else {
+        // 传输连接池必须在 close() 之前拆掉：它持有自己的克隆连接和 SFTP 通道，
+        // 需要在 m_client 仍有效时正常 shutdown。abandon() 情形下 closeAll()
+        // 已经先被调用过，这里只剩释放对象。
+        m_transferPool.reset();
+    }
+    close();
+}
+
+// 有限等待所有在传 download/upload worker 结束；返回 false 表示有超时逃逸。
+// 超时兑底从简仅告警：调用方决定兜底策略（~SftpClient 泄漏连接池；
+// ~SftpBrowserWidget 整体泄漏本对象）。
+bool SftpClient::joinTransferWorkers(int timeoutMs)
+{
+    bool allDone = true;
     for (const QPointer<QThread> &worker : std::as_const(m_workers)) {
         if (worker) {
             worker->quit();
-            // cancel 生效快（每个分块/重试迭代都检查），一般不会超时；
-            // 超时兑底从简仅告警：m_sftp 是裸句柄非子 QObject，无父子关系可脱钩。
-            if (!worker->wait(kWorkerJoinTimeoutMs))
+            // cancel 生效快（每个分块/重试迭代都检查），一般不会超时。
+            if (!worker->wait(timeoutMs)) {
                 qCWarning(sftpLog) << "transfer worker did not finish within"
-                                   << kWorkerJoinTimeoutMs << "ms";
+                                   << timeoutMs << "ms";
+                allDone = false;
+            }
         }
     }
     m_workers.clear();
-    // 传输连接池必须在 close() 之前拆掉：它持有自己的克隆连接和 SFTP 通道，
-    // 需要在 m_client 仍有效时正常 shutdown。abandon() 情形下 closeAll()
-    // 已经先被调用过，这里只剩释放对象。
-    m_transferPool.reset();
-    close();
+    return allDone;
 }
 
 // Fill the last-error for the current SFTP subsystem. Falls back to the
@@ -313,7 +340,7 @@ SftpFileInfoList SftpClient::listdirAttr(const QString &path, SshError &error)
 
     _LIBSSH2_SFTP_HANDLE *dir = sftpRetryPtr(m_client, [&] {
         return libssh2_sftp_opendir(m_sftp, p.constData());
-    }, &m_cancel);
+    }, &m_teardown);
     if (!dir) {
         fillSftpError(m_sftp, m_client, error, QStringLiteral("opendir failed: %1").arg(path));
         return out;
@@ -326,7 +353,7 @@ SftpFileInfoList SftpClient::listdirAttr(const QString &path, SshError &error)
         int n = sftpRetryInt(m_client, [&] {
             return libssh2_sftp_readdir_ex(dir, nameBuf, sizeof(nameBuf),
                                            longBuf, sizeof(longBuf), &attrs);
-        }, &m_cancel);
+        }, &m_teardown);
         if (n <= 0)
             break; // 0 == end of directory, <0 == error
         const QString name = QString::fromUtf8(nameBuf, n);
@@ -337,7 +364,7 @@ SftpFileInfoList SftpClient::listdirAttr(const QString &path, SshError &error)
         out.append(info);
     }
 
-    sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(dir); }, &m_cancel);
+    sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(dir); }, &m_teardown);
     return out;
 }
 
@@ -364,14 +391,14 @@ bool SftpClient::stat(const QString &path, SftpFileInfo &info, SshError &error)
 {
     if (!ensureOpen(error))
         return false;
-    return doStat(m_client, m_sftp, path, LIBSSH2_SFTP_STAT, info, error, &m_cancel);
+    return doStat(m_client, m_sftp, path, LIBSSH2_SFTP_STAT, info, error, &m_teardown);
 }
 
 bool SftpClient::lstat(const QString &path, SftpFileInfo &info, SshError &error)
 {
     if (!ensureOpen(error))
         return false;
-    return doStat(m_client, m_sftp, path, LIBSSH2_SFTP_LSTAT, info, error, &m_cancel);
+    return doStat(m_client, m_sftp, path, LIBSSH2_SFTP_LSTAT, info, error, &m_teardown);
 }
 
 bool SftpClient::exists(const QString &path)
@@ -422,7 +449,7 @@ bool SftpClient::rmdir(const QString &path, SshError *error)
     const QByteArray p = path.toUtf8();
     int rc = sftpRetryInt(m_client, [&] {
         return libssh2_sftp_rmdir_ex(m_sftp, p.constData(), p.size());
-    }, &m_cancel);
+    }, &m_teardown);
     if (rc != 0) {
         fillSftpError(m_sftp, m_client, err, QStringLiteral("rmdir failed: %1").arg(path));
         return false;
@@ -440,7 +467,7 @@ bool SftpClient::remove(const QString &path, SshError *error)
     const QByteArray p = path.toUtf8();
     int rc = sftpRetryInt(m_client, [&] {
         return libssh2_sftp_unlink_ex(m_sftp, p.constData(), p.size());
-    }, &m_cancel);
+    }, &m_teardown);
     if (rc != 0) {
         fillSftpError(m_sftp, m_client, err, QStringLiteral("remove failed: %1").arg(path));
         return false;
@@ -532,7 +559,7 @@ QByteArray SftpClient::readFile(const QString &remotePath, SshError &error)
     _LIBSSH2_SFTP_HANDLE *fh = sftpRetryPtr(m_client, [&] {
         return libssh2_sftp_open_ex(m_sftp, p.constData(), p.size(),
                                     LIBSSH2_FXF_READ, 0, LIBSSH2_SFTP_OPENFILE);
-    }, &m_cancel);
+    }, &m_teardown);
     if (!fh) {
         fillSftpError(m_sftp, m_client, error, QStringLiteral("open for read failed: %1").arg(remotePath));
         return result;
@@ -541,12 +568,12 @@ QByteArray SftpClient::readFile(const QString &remotePath, SshError &error)
         char buf[kChunkSize];
         ssize_t n = sftpRetryInt(m_client, [&] {
             return libssh2_sftp_read(fh, buf, sizeof(buf));
-        }, &m_cancel);
+        }, &m_teardown);
         if (n <= 0)
             break;
         result.append(buf, int(n));
     }
-    sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(fh); }, &m_cancel);
+    sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(fh); }, &m_teardown);
     return result;
 }
 
@@ -560,7 +587,7 @@ bool SftpClient::writeFile(const QString &remotePath, const QByteArray &data, Ss
         return libssh2_sftp_open_ex(m_sftp, p.constData(), p.size(),
                                     LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
                                     0644, LIBSSH2_SFTP_OPENFILE);
-    }, &m_cancel);
+    }, &m_teardown);
     if (!fh) {
         fillSftpError(m_sftp, m_client, error, QStringLiteral("open for write failed: %1").arg(remotePath));
         return false;
@@ -570,7 +597,7 @@ bool SftpClient::writeFile(const QString &remotePath, const QByteArray &data, Ss
     while (written < data.size()) {
         ssize_t n = sftpRetryInt(m_client, [&] {
             return libssh2_sftp_write(fh, data.constData() + written, size_t(data.size() - written));
-        }, &m_cancel);
+        }, &m_teardown);
         if (n < 0) {
             fillSftpError(m_sftp, m_client, error, QStringLiteral("write failed: %1").arg(remotePath));
             ok = false;
@@ -578,7 +605,7 @@ bool SftpClient::writeFile(const QString &remotePath, const QByteArray &data, Ss
         }
         written += n;
     }
-    sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(fh); }, &m_cancel);
+    sftpRetryInt(m_client, [&] { return libssh2_sftp_close_handle(fh); }, &m_teardown);
     return ok;
 }
 
@@ -597,6 +624,13 @@ void SftpClient::cancelTransfer()
     // TCP 超时。打断它们的 socket，让调用立刻带错误返回，取消才是即时的。
     if (m_transferPool)
         m_transferPool->shutdownTransferSockets();
+}
+
+void SftpClient::beginTeardown()
+{
+    // 先置停机标志（同步操作的 EAGAIN 重试循环下一轮就退出），再取消传输。
+    m_teardown = true;
+    cancelTransfer();
 }
 
 // 登记并启动传输 worker 线程：finished 后 deleteLater，QPointer 随删除自动置空；
@@ -646,14 +680,21 @@ void SftpClient::upload(const QString &localPath, const QString &remotePath)
 // 流多干活，整体收敛到"最慢流只多干一个分片"的时间。
 struct SftpClient::TransferState {
     QMutex lock;
-    qint64 nextOffset = 0;   // 下一个待领分片的起点
-    qint64 endOffset = 0;    // 传输区间末尾（不含）
+    qint64 nextOffset = 0;   // 下一个待领分片的起点（上传用）
+    qint64 endOffset = 0;    // 传输区间末尾（不含）（上传用）
     qint64 total = 0;        // 进度分母
     bool failed = false;
     QString error;
     std::atomic<qint64> done{0};
 
-    // 领取下一个分片；返回 false 表示领完了（或已失败）。
+    // 下载专用：分片位图。多流并行下各分片完成顺序不定，残件里可能有
+    // 未写入的空洞——"完成与否"只能按整片记账，绝不能靠文件大小猜。
+    qint64 fileSize = 0;          // 目标文件总大小
+    int numChunks = 0;            // 分片总数
+    int nextChunk = 0;            // 下一个待领分片下标
+    QBitArray completedChunks;    // 已完成整片（续传跳过）
+
+    // 领取下一个分片；返回 false 表示领完了（或已失败）。（上传用）
     bool takeNext(qint64 &offsetOut, qint64 &sizeOut)
     {
         QMutexLocker locker(&lock);
@@ -663,6 +704,41 @@ struct SftpClient::TransferState {
         sizeOut = qMin(kTransferChunkSize, endOffset - nextOffset);
         nextOffset += sizeOut;
         return true;
+    }
+
+    // 领取下一个未完成分片，跳过位图里已完成的（断点续传）。（下载用）
+    bool takeNextChunk(qint64 &offsetOut, qint64 &sizeOut)
+    {
+        QMutexLocker locker(&lock);
+        if (failed)
+            return false;
+        while (nextChunk < numChunks && completedChunks.testBit(nextChunk))
+            ++nextChunk;
+        if (nextChunk >= numChunks)
+            return false;
+        offsetOut = qint64(nextChunk) * kTransferChunkSize;
+        sizeOut = qMin(kTransferChunkSize, fileSize - offsetOut);
+        ++nextChunk;
+        return true;
+    }
+
+    // 整片写完后记账。部分完成的分片不计——续传时整片重下并覆盖原区间，
+    // 内容一致，不会产生混排。
+    void markChunkDone(qint64 offset, qint64 bytes)
+    {
+        QMutexLocker locker(&lock);
+        const int idx = int(offset / kTransferChunkSize);
+        if (idx < 0 || idx >= numChunks || completedChunks.testBit(idx))
+            return;
+        completedChunks.setBit(idx);
+        done.fetch_add(bytes);
+    }
+
+    // 全部分片完成才算下载完成（0 字节文件没有分片，直接算完成）。
+    bool isComplete()
+    {
+        QMutexLocker locker(&lock);
+        return numChunks == 0 || completedChunks.count(true) == numChunks;
     }
 
     void setFailed(const QString &message)
@@ -766,15 +842,25 @@ void SftpClient::downloadStream(TransferState &state, const QString &remotePath,
     QByteArray buf;
     buf.resize(int(kTransferChunkSize));
     qint64 offset = 0, size = 0;
-    while (!m_cancel && state.takeNext(offset, size)) {
+    while (!m_cancel && state.takeNextChunk(offset, size)) {
         // 一个分片可能要多次 read 才读满（服务端每次返回量有上限）。
+        // seek 只改 handle 本地 offset、无网络 I/O，每个分片定位一次即可
+        // （成功的 read 会自动推进句柄位置）。绝不能把它放进 EAGAIN 重试的
+        // lambda 里重放：seek 会 flush 句柄的 packetlist 并重置 offset，而
+        // sftp_read 的状态机（read_state 每个 SFTP 通道一份）还没走完就被
+        // 拦腰重置，下一轮 read 必报 "sftp_read() internal error"
+        // （sftp_err=0，纯客户端态错乱）——这正是非阻塞主 session 通道上
+        // 偶发 "read failed at offset 0" 的根因。
+        {
+            QMutexLocker<QRecursiveMutex> guard(lease.lock());
+            libssh2_sftp_seek64(fh, libssh2_uint64_t(offset));
+        }
         qint64 got = 0;
         bool ok = true;
         while (got < size && !m_cancel) {
-            // seek+read 合成一次持锁调用：seek 只改 handle 本地 offset，read
-            // 才可能 EAGAIN。fh 是本条流独占的，调用之间放锁不会被串改位置。
+            // fh 是本条流独占的，EAGAIN 重试按非阻塞 API 约定原样重发同一
+            // 调用（同一轮内 buf 位置与长度不变，满足"同参重试"要求）。
             const ssize_t n = sftpStreamCall(lease.lock(), lease.client(), [&] {
-                libssh2_sftp_seek64(fh, libssh2_uint64_t(offset + got));
                 return libssh2_sftp_read(fh, buf.data() + got, size_t(size - got));
             }, &m_cancel);
             if (n < 0) {
@@ -801,11 +887,15 @@ void SftpClient::downloadStream(TransferState &state, const QString &remotePath,
                 state.setFailed(QStringLiteral("local write failed at offset %1").arg(offset));
                 break;
             }
-            state.done.fetch_add(got);
+            // 只有整片写完才记账：部分写入的分片续传时会整片重下并覆盖
+            // 原区间（内容一致），不能按字节累加进 done。
+            if (got == size)
+                state.markChunkDone(offset, got);
             emit transferProgress(remotePath, state.done.load(), state.total);
         }
         if (got < size)
-            break; // EOF
+            break; // 提前 EOF（远端被截短）：分片不计完成，doDownload 末尾的
+                   // isComplete 检查会把这次传输判失败而不是装成功
     }
     out.flush();
     out.close();
@@ -915,10 +1005,10 @@ void SftpClient::doDownload(const QString &remotePath, const QString &localPath)
     }
     const qint64 remoteSize = info.size;
 
-    qint64 localSize = 0;
-    if (QFile::exists(localPath))
-        localSize = QFileInfo(localPath).size();
-    if (localSize >= remoteSize) {
+    // "已下载"判定只看最终文件：下载全程写入 .part 临时文件，全部分片完成
+    // 才改名过来——最终文件存在且尺寸够就是完整的。绝不能看 .part 的大小：
+    // 多流并行下它是按需扩展的稀疏文件，尺寸够不代表中间没有空洞。
+    if (QFile::exists(localPath) && QFileInfo(localPath).size() >= remoteSize) {
         qCDebug(sftpLog) << "download: already complete" << remotePath;
         emit transferFinished(remotePath, true, QStringLiteral("already downloaded"));
         return;
@@ -929,39 +1019,98 @@ void SftpClient::doDownload(const QString &remotePath, const QString &localPath)
         return;
     }
 
-    // 并行写要求本地文件先有完整长度（各流 seek 到自己的区间写）。
-    {
-        QFile out(localPath);
-        if (!out.open(QIODevice::ReadWrite)) {
-            emit transferFinished(remotePath, false,
-                                  QStringLiteral("cannot open local file: %1").arg(localPath));
-            return;
-        }
-        if (!out.resize(remoteSize)) {
-            emit transferFinished(remotePath, false,
-                                  QStringLiteral("cannot preallocate local file: %1").arg(localPath));
-            return;
-        }
-    }
+    const QString tempPath = localPath + QStringLiteral(".part");
+    const QString metaPath = tempPath + QStringLiteral(".meta");
 
     TransferState state;
-    state.nextOffset = localSize; // 断点续传：从本地已有长度接着下
-    state.endOffset = remoteSize;
     state.total = remoteSize;
-    state.done.store(localSize);
+    state.fileSize = remoteSize;
+    state.numChunks = int((remoteSize + kTransferChunkSize - 1) / kTransferChunkSize);
+    state.completedChunks.resize(state.numChunks);
 
-    const int streams = planStreamCount(remoteSize - localSize);
+    // 续传位图：魔数 + 大端远端尺寸 + 每分片 1 bit。与远端尺寸绑定——
+    // 远端文件变了（尺寸不同）整份残件作废重下。
+    const int bitmapSize = (state.numChunks + 7) / 8;
+    const auto saveMeta = [&state, remoteSize, bitmapSize](const QString &path) {
+        QByteArray out;
+        out.append("CSDLPART", 8);
+        const quint64 be = qToBigEndian(quint64(remoteSize));
+        out.append(reinterpret_cast<const char *>(&be), sizeof(be));
+        QByteArray bitmap(bitmapSize, '\0');
+        {
+            QMutexLocker locker(&state.lock);
+            for (int i = 0; i < state.numChunks; ++i)
+                if (state.completedChunks.testBit(i))
+                    bitmap[i / 8] = char(quint8(bitmap[i / 8]) | (1u << (i % 8)));
+        }
+        out.append(bitmap);
+        QFile f(path);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            f.write(out);
+    };
+    const auto loadMeta = [&state, remoteSize, bitmapSize](const QString &path) -> bool {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            return false;
+        const QByteArray data = f.readAll();
+        if (data.size() != 8 + 8 + bitmapSize || !data.startsWith("CSDLPART"))
+            return false;
+        quint64 be = 0;
+        std::memcpy(&be, data.constData() + 8, sizeof(be));
+        if (qFromBigEndian(be) != quint64(remoteSize))
+            return false;
+        qint64 doneBytes = 0;
+        for (int i = 0; i < state.numChunks; ++i) {
+            if (quint8(data[8 + 8 + i / 8]) & (1u << (i % 8))) {
+                state.completedChunks.setBit(i);
+                doneBytes += qMin(kTransferChunkSize,
+                                  remoteSize - qint64(i) * kTransferChunkSize);
+            }
+        }
+        state.done.store(doneBytes);
+        return true;
+    };
+
+    // 有残件但没有效位图：内容不可信（不知道哪些区间真的写完了），删除重下。
+    if (QFile::exists(tempPath) && !loadMeta(metaPath)) {
+        QFile::remove(tempPath);
+        QFile::remove(metaPath);
+    }
+
+    const qint64 remaining = remoteSize - state.done.load();
+    const int streams = planStreamCount(remaining);
     qCDebug(sftpLog) << "download" << remotePath << "size" << remoteSize
-                     << "streams" << streams;
-    runStreams(streams, [this, &state, remotePath, localPath] {
-        downloadStream(state, remotePath, localPath);
-    });
+                     << "resumed" << state.done.load() << "streams" << streams;
+    if (remaining > 0) {
+        runStreams(streams, [this, &state, remotePath, tempPath] {
+            downloadStream(state, remotePath, tempPath);
+        });
+    }
 
+    // 未完工（取消/失败/远端被截短）：把已完成分片的位图落盘，下次接着传。
     if (m_cancel) {
+        saveMeta(metaPath);
         emit transferFinished(remotePath, false, QStringLiteral("cancelled"));
     } else if (state.hasFailed()) {
+        saveMeta(metaPath);
         emit transferFinished(remotePath, false, state.error);
+    } else if (!state.isComplete()) {
+        // 远端文件在传输中被截短：不装成功，位图留给下次续传。
+        saveMeta(metaPath);
+        emit transferFinished(remotePath, false,
+                              QStringLiteral("incomplete download (remote truncated?): %1")
+                                  .arg(remotePath));
     } else {
+        // 完工：改名覆盖到最终路径（rename 遇已存在目标会失败，先删），
+        // 用户此刻才能看到这个文件——此前它不存在，不存在"大小已满却没下完"。
+        QFile::remove(localPath);
+        if (!QFile::rename(tempPath, localPath)) {
+            saveMeta(metaPath); // 位图已是全完成，下次进来直接改名
+            emit transferFinished(remotePath, false,
+                                  QStringLiteral("cannot move into place: %1").arg(localPath));
+            return;
+        }
+        QFile::remove(metaPath);
         emit transferFinished(remotePath, true, QString());
     }
 }

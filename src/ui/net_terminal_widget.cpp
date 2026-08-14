@@ -22,6 +22,7 @@
 #include "config/GlobalState.h"
 
 #include "dialogs/NetConnectDialog.h"   // netcombo 辅助函数
+#include "terminal_theme_util.h"
 
 namespace cubeshell {
 
@@ -107,6 +108,9 @@ NetTerminalWidget::NetTerminalWidget(const QString &mode, QWidget *parent)
     connect(m_term, &QTermWidget::fontSizeChanged, this,
             [](int size) { GlobalState::instance().setFontSize(size); });
     m_term->setColorScheme(GlobalState::instance().terminalTheme());
+    // 右键菜单切换配色后：持久化到 theme.json 并同步到所有已打开终端。
+    connect(m_term, &QTermWidget::colorSchemeChanged, this,
+            [this](const QString &name) { applyTerminalThemeEverywhere(name, this); });
     // 回滚缓冲行数（同时决定“查找”能检索到多久以前的输出）。
     m_term->setHistorySize(GlobalState::instance().scrollbackLines());
     m_term->setScrollBarPosition(ScrollBarRight);

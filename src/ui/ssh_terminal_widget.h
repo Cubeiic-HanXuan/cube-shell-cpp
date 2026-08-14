@@ -11,14 +11,17 @@
 // blocking during connect); the SshBridge then runs the read loop on its own
 // thread and pushes bytes into the terminal via queued signals.
 
+#include <QPointer>
 #include <QWidget>
 
+#include <atomic>
 #include <memory>
 #include <utility>
 
 #include "config/DeviceConfigStore.h"
 
 class QTermWidget;
+class QThread;
 
 namespace cubeshell {
 
@@ -73,6 +76,15 @@ private:
     SshBridge *m_bridge = nullptr;         // child QObject
 
     bool m_started = false;
+
+    // 连接中的 client/worker 登记：连接 worker 跑在后台，组件可能（关标签页）
+    // 先于连接完成析构。worker 全程用 QPointer 回跳 UI；析构时凭
+    // m_pendingClient 打断在途握手、有限等待 worker 退出。
+    std::shared_ptr<SshClient> m_pendingClient;
+    QPointer<QThread> m_connectWorker;
+    // 停机标志：析构最先置位，MFA 回调（BlockingQueuedConnection）据此
+    // 直接返回空应答而不是往正在析构的 UI 线程上死等。
+    std::atomic<bool> m_teardown{false};
 };
 
 } // namespace cubeshell

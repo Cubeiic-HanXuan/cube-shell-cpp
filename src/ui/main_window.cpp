@@ -98,6 +98,7 @@
 #endif
 
 #include "qtermwidget.h"
+#include "terminal_theme_util.h"
 
 namespace cubeshell {
 
@@ -1719,6 +1720,15 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
     QWidget *w = tabs->widget(index);
     if (w && w == m_homePage)
         return;   // 首页常驻，不可关闭
+    // 先断底层 socket 再安排销毁：左侧 SFTP 浏览器的 deleteLater 先于 tab 执行，
+    // 其析构要取消并 join 传输线程。socket 还活着时，走主 session 通道的传输流
+    // 只能靠 EAGAIN 轮询看取消标志（每轮最长 5s），可能打穿 join 预算、
+    // 逼得析构走泄漏兜底。shutdownSocket 幂等（~SshSessionTab 会再调一次），
+    // 且只做 ::shutdown(fd)，与仍在跑的终端读循环并发安全。
+    if (auto *session = qobject_cast<SshSessionTab *>(w)) {
+        if (session->terminal() && session->terminal()->sshClient())
+            session->terminal()->sshClient()->shutdownSocket();
+    }
     // 先清理左侧挂接的文件浏览器（已 reparent 到 m_browserStack，
     // 不会随 tab 页销毁）。先于 tab 销毁，保证 SftpClient 早于 SshClient 析构。
     if (QWidget *browser = m_tabBrowsers.take(w)) {
@@ -2376,6 +2386,9 @@ QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
     term->setTerminalFont(font);
     // 从 theme.json 读取终端配色方案(对应 Python current_theme_name)
     term->setColorScheme(GlobalState::instance().terminalTheme());
+    // 右键菜单切换配色后：持久化到 theme.json 并同步到所有已打开终端。
+    connect(term, &QTermWidget::colorSchemeChanged, this,
+            [this](const QString &name) { applyTerminalThemeEverywhere(name, this); });
     // 回滚缓冲行数（同时决定“查找”能检索到多久以前的输出）。
     term->setHistorySize(GlobalState::instance().scrollbackLines());
     // 右键菜单"AI" → 切换 AI 助手面板。

@@ -392,16 +392,35 @@ SftpTransferPool::Lease SftpTransferPool::lease(QString *errorOut,
         }
 
         // 3) 未达上限 -> 新建：克隆连接优先，主 session 通道兜底。
+        //    优先回收步骤 1 清理出来的空槽（死连接只清空不摘除——摘除会让
+        //    在野租约持有的槽位下标错位）。否则取消传输把全部克隆 socket
+        //    打断后，池子会被空槽占满、再也建不出新克隆。
         const bool cloneAllowed = primaryUsable && m_cloningEnabled
             && m_primary->isAuthReplayable()
             && m_maxConnections > 1 && !m_cloneExhausted;
         const bool channelAllowed = primaryUsable && m_maxConnections > 1
             && !m_channelExhausted;
-        if ((cloneAllowed || channelAllowed) && m_slots.size() < m_maxConnections) {
-            auto *slot = new Slot();
-            slot->inUse = true; // 先占住，spawn* 会短暂解锁池锁
-            m_slots.append(slot);
-            const int index = m_slots.size() - 1;
+        Slot *emptySlot = nullptr;
+        for (Slot *s : m_slots) {
+            if (!s->isPrimary && !s->isPrimaryChannel && !s->inUse
+                && !s->sftp && !s->client) {
+                emptySlot = s;
+                break;
+            }
+        }
+        if ((cloneAllowed || channelAllowed)
+            && (emptySlot || m_slots.size() < m_maxConnections)) {
+            Slot *slot = emptySlot;
+            int index = -1;
+            if (slot) {
+                slot->inUse = true; // 先占住，spawn* 会短暂解锁池锁
+                index = int(m_slots.indexOf(slot));
+            } else {
+                slot = new Slot();
+                slot->inUse = true; // 先占住，spawn* 会短暂解锁池锁
+                m_slots.append(slot);
+                index = m_slots.size() - 1;
+            }
             bool ok = false;
             if (cloneAllowed)
                 ok = spawnClone(*slot, nullptr);
@@ -425,10 +444,16 @@ SftpTransferPool::Lease SftpTransferPool::lease(QString *errorOut,
             }
             // 建不起来：撤掉这个槽，落到下面的等待/共享主通道。注意 spawn* 期间
             // 解过锁，槽位下标可能已被其它线程的 append 挤动，按指针精确移除。
+            // 回收槽不 delete（它是既有空槽）：只还原占用标志。
             const int actual = m_slots.indexOf(slot);
-            if (actual >= 0)
-                m_slots.remove(actual);
-            delete slot;
+            if (slot == emptySlot) {
+                if (actual >= 0)
+                    slot->inUse = false;
+            } else {
+                if (actual >= 0)
+                    m_slots.remove(actual);
+                delete slot;
+            }
         }
 
         // 4) 共享已建成的克隆连接（多于连接数的任务在此排队）。克隆连接是阻塞
@@ -437,6 +462,10 @@ SftpTransferPool::Lease SftpTransferPool::lease(QString *errorOut,
         for (int i = 0; i < m_slots.size(); ++i) {
             Slot *slot = m_slots[i];
             if (slot->isPrimary || slot->isPrimaryChannel || !slot->sftp)
+                continue;
+            // 被 shutdownTransferSockets 打断的连接（取消传输后）不能共享出租，
+            // 租出去 open 必失败——留给步骤 1 清理、步骤 3 回收。
+            if (!slot->client || !slot->client->isTransportAlive())
                 continue;
             Connection conn;
             conn.client = slot->client.get();
@@ -540,6 +569,11 @@ void SftpTransferPool::prewarm(int count)
             }
         });
     }
+}
+
+bool SftpTransferPool::waitPrewarmDone(int timeoutMs)
+{
+    return m_prewarmPool.waitForDone(timeoutMs);
 }
 
 void SftpTransferPool::shutdownTransferSockets()

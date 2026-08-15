@@ -86,6 +86,10 @@ TerminalCommandSuggest::TerminalCommandSuggest(QTermWidget *term,
     if (auto *display = m_term->terminalDisplay())
         display->installEventFilter(this);
 
+    // 问题2修复：弹窗被 reparent 到主窗口，不随 Tab 页面自动隐藏；
+    // 监听终端控件自身的 Hide 事件（切换 Tab/关闭页面时触发）以收回弹窗。
+    m_term->installEventFilter(this);
+
     // 对应Python: self.termKeyPressed.connect(self._on_term_key_pressed) (L7342)
     connect(m_term, &QTermWidget::termKeyPressed,
             this, &TerminalCommandSuggest::onTermKeyPressed);
@@ -101,6 +105,16 @@ TerminalCommandSuggest::~TerminalCommandSuggest()
 // 对应Python: SSHQTermWidget.eventFilter KeyPress 分支 (L7418-7445)
 bool TerminalCommandSuggest::eventFilter(QObject *obj, QEvent *event)
 {
+    // 问题2修复：终端所在 Tab 被切走/隐藏时收回弹窗（弹窗挂在主窗口上，
+    // 不会随 Tab 页面一起隐藏）；同时停掉待触发的防抖定时器避免再次弹出。
+    // HideToParent 处理终端被嵌套在容器内、由祖先隐藏连带触发的情况。
+    if (obj == m_term && (event->type() == QEvent::Hide
+                          || event->type() == QEvent::HideToParent)) {
+        m_timer->stop();
+        hideSuggestions();
+        return false;   // 不消费事件，让终端正常处理隐藏
+    }
+
     if (obj == m_term->terminalDisplay() && event->type() == QEvent::KeyPress
         && m_popup && m_popup->isVisible()) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
@@ -412,6 +426,21 @@ void TerminalCommandSuggest::showSuggestionsMenu()
                           : display->mapToGlobal(rect.bottomLeft());
         // 增加 6px 垂直偏移，避免弹窗紧贴光标 (L8022-8023)
         p.setY(p.y() + 6);
+
+        // 问题1修复：光标在终端底部时，下方空间不足以容纳弹窗，
+        // 改为翻到光标上方弹出；同时做水平方向防溢出，保证弹窗完整可见。
+        if (parent) {
+            const int popupH = m_popup->height();
+            const int popupW = m_popup->width();
+            if (p.y() + popupH > parent->height()) {
+                const QPoint above = display->mapTo(parent, rect.topLeft());
+                p.setY(qMax(0, above.y() - popupH - 2));
+            }
+            if (p.x() + popupW > parent->width())
+                p.setX(qMax(0, parent->width() - popupW));
+            if (p.x() < 0)
+                p.setX(0);
+        }
         m_popup->popupAt(p);
     } else {
         // 光标矩形不可用时回退到鼠标位置 (L8025-8031)

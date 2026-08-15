@@ -91,6 +91,16 @@ void refreshLaunchServices()
     QProcess::execute(lsregister, {QStringLiteral("-f"), bundle});
 }
 
+// 当前 bundle 是否带代码签名（含 ad-hoc）。凡经 CMake POST_BUILD / 打包流程产出的
+// bundle 都已签名，Contents/_CodeSignature 存在即视为已签名。
+bool bundleIsSigned()
+{
+    const QString bundle = bundlePath();
+    if (bundle.isEmpty())
+        return false;
+    return QFileInfo::exists(bundle + QStringLiteral("/Contents/_CodeSignature"));
+}
+
 // Info.plist 的 CFBundleURLTypes 里是否已声明 scheme。XML plist 直接做文本
 // 探测（CMake/PlistBuddy 均产出 XML 格式）。
 bool plistContainsScheme(const QString &plist, const QString &scheme)
@@ -125,6 +135,19 @@ bool registerMac(const QStringList &schemes)
     if (plist.isEmpty())
         return false; // 裸可执行文件无法承载 CFBundleURLTypes
 
+    // 已签名 bundle 绝不能改写 Info.plist：任何改动都会破坏代码签名封印，
+    // securityd 随之判定签名无效，钥匙串 SecItemAdd/Update 返回
+    // errSecInvalidInfoPlist（-25267，「Info.plist无效（plist或签名已被修改）」），
+    // 设备密码无法迁入系统钥匙串，且每次启动都重写、每次都失败。签名包的
+    // URL Scheme 必须在构建期由 packaging/Info.plist.in 声明齐全——缺了只告警，
+    // 不改写。（这正是「钥匙串迁入失败」反复出现的根因。）
+    if (bundleIsSigned()) {
+        if (!isRegisteredMac(schemes))
+            qWarning("[CubeShell] bundle 已签名，跳过运行时改写 Info.plist；"
+                     "缺失的 URL Scheme 请改到 packaging/Info.plist.in 里声明。");
+        return isRegisteredMac(schemes);
+    }
+
     bool changed = false;
     for (const QString &scheme : schemes) {
         if (plistContainsScheme(plist, scheme))
@@ -154,6 +177,13 @@ bool unregisterMac(const QStringList &schemes)
     const QString plist = bundleInfoPlistPath();
     if (plist.isEmpty())
         return true; // 无 bundle 即无注册，视为成功
+
+    // 与 registerMac 同理：已签名 bundle 删除 URL 条目同样会改写 Info.plist、
+    // 破坏代码签名封印。签名包的 scheme 集合应在构建期定死，运行时不做增删。
+    if (bundleIsSigned()) {
+        qWarning("[CubeShell] bundle 已签名，跳过运行时改写 Info.plist（注销 scheme）。");
+        return true;
+    }
 
     // 逐个扫描 CFBundleURLTypes 条目，命中 scheme 则整条删除后重扫
     //（删除会使后续索引前移）。

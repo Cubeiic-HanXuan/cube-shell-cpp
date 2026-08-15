@@ -4,8 +4,8 @@
     Info.plist.in — CMake configure_file 模板（macOS .app bundle）。
 
     由 cpp/CMakeLists.txt 通过 MACOSX_BUNDLE_INFO_PLIST 属性套用，@VAR@ 占位符
-    在配置期展开。核心作用是声明 CFBundleURLTypes（jms / ssh / cubeshell），
-    使系统把这三个 URL Scheme 关联到本 .app —— 即 macOS 的 URL Scheme 注册路径
+    在配置期展开。核心作用是声明 CFBundleURLTypes（jms / ssh / cubeshell / telnet），
+    使系统把这些 URL Scheme 关联到本 .app —— 即 macOS 的 URL Scheme 注册路径
     （对应 core/url_dispatch/url_scheme_register.py 里 Darwin 分支"由 Info.plist
     处理"的说明，以及 conf/macos_url_scheme.plist 的内容）。
 
@@ -77,6 +77,20 @@
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>cubeshell</string>
+            </array>
+        </dict>
+        <!-- telnet 必须在此声明：UrlSchemeRegistrar::defaultSchemes() 含 telnet，
+             若构建期缺失，运行时 registerMac 会用 PlistBuddy 改写本 plist 补 scheme，
+             从而破坏代码签名封印 → 钥匙串 SecItemAdd 报 errSecInvalidInfoPlist。
+             在此写全可让运行时 isRegisteredMac 直接命中、不再触碰 plist。 -->
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>CubeShell Telnet Protocol</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>telnet</string>
             </array>
         </dict>
     </array>

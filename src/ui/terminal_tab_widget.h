@@ -43,9 +43,13 @@ private:
 
 // 让 "+" 按钮始终紧跟最后一个标签的标签组件。
 //
-// QTabWidget::setCornerWidget 会把控件钉在最右侧，标签少时留下大片空隙；
-// 这里改为按最后一个标签的矩形定位，并限制标签栏最大宽度，确保标签溢出
-// 时 QTabBar 自带的滚动按钮不会被遮挡。
+// QTabWidget::setCornerWidget 会把控件钉在最右侧，标签少时 "+" 离最后标签很远；
+// 这里改为按最后一个标签的矩形定位悬浮 "+"。但标签溢出（出现 QTabBar 自带的
+// 滚动按钮）时，悬浮 "+" 会压住滚动按钮 —— 因此用 tabBar->setMaximumWidth 把
+// 标签栏收窄，在右侧预留一块不含滚动按钮的区域：溢出时 "+" 固定到该预留位，
+// 未溢出时仍跟随最后一个标签。
+// （注：本平台实测 QTabWidget 的角落控件不会挤窄标签栏 —— 角落控件被排到窗口
+//   右缘之外；只有 setMaximumWidth 能真正收窄标签栏、把滚动按钮限制在预留区左侧。）
 // 对应Python: ui/terminal_tab_widget.py::TerminalTabWidget
 class TerminalTabWidget : public QTabWidget {
     Q_OBJECT
@@ -66,9 +70,15 @@ protected:
 private:
     void schedulePosition();
     void positionNewTerminalButton();
+    // 标签是否已溢出（QTabBar 自带的滚动按钮已显示）。
+    bool tabsOverflow() const;
 
     static constexpr int kButtonWidth = 28;
+    // 跟随最后标签时 "+" 与标签的间隙。
     static constexpr int kButtonGap = 1;
+    // 溢出时 QTabBar 滚动按钮（在标签栏最右缘）与角落 "+" 之间的间隙，
+    // 要足够大才不显得两者重合。
+    static constexpr int kScrollGap = 12;
 
     QToolButton *m_newButton = nullptr;
     bool m_positionPending = false;

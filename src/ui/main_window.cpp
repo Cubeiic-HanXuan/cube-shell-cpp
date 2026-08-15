@@ -120,18 +120,21 @@ QString windowsTerminalTabStyle()
     QString hover;      // 非激活标签 hover 抬升色（介于栏与激活之间）
     QString textActive; // 激活标签文字
     QString textIdle;   // 非激活标签文字
+    QString textDisabled; // 滚动按钮到尽头（不可再切换）时的箭头色
     if (light) {
         bar = QStringLiteral("#F8F9FA");
         active = QStringLiteral("#FFFFFF");
         hover = QStringLiteral("#ECECEC");
         textActive = QStringLiteral("#1F2123");
         textIdle = QStringLiteral("#5F6368");
+        textDisabled = QStringLiteral("#C3C7CB");
     } else {
         bar = QStringLiteral("#202124");
         active = QStringLiteral("#2B2D30");
         hover = QStringLiteral("#33373B");
         textActive = QStringLiteral("#E4E7EB");
         textIdle = QStringLiteral("#9AA0A6");
+        textDisabled = QStringLiteral("#54585C");
     }
 
     // 说明：
@@ -170,8 +173,23 @@ QString windowsTerminalTabStyle()
                "}"
                "QTabBar::tab:top:!selected:hover {"
                "    background-color: %3;"
+               "}"
+               // 溢出时的左右滚动按钮：必须不透明，盖住滑到其下的标签（否则深色
+               // 主题下按钮背景透明，被遮住标签的状态点会透过按钮显示，看着像重合）。
+               // 用标签栏底色填充，让滚动按钮区与标签栏融为一体、仿佛接在最后标签后。
+               // 可切换方向箭头用亮色，到尽头（disabled，不可再切换）箭头变暗以区分。
+               "QTabBar QToolButton {"
+               "    background-color: %1;"
+               "    color: %4;"
+               "    border: none;"
+               "}"
+               "QTabBar QToolButton:hover {"
+               "    background-color: %3;"
+               "}"
+               "QTabBar QToolButton:disabled {"
+               "    color: %6;"
                "}")
-        .arg(bar, active, hover, textActive, textIdle);
+        .arg(bar, active, hover, textActive, textIdle, textDisabled);
 }
 
 } // namespace
@@ -306,6 +324,9 @@ TerminalTabWidget *MainWindow::createPane()
     // 关闭按钮由 TabCloseButton 自己画，不用 Qt 原生的。
     tabs->setTabsClosable(false);
     tabs->setMovable(true);          // 拖拽排序
+    // 标签放不下时显示左右滚动按钮。macOS 的 QMacStyle 默认不显示（usesScrollButtons
+    // 为 false），溢出后前面的标签再也点不到，必须显式打开；Windows 默认已显示。
+    tabs->setUsesScrollButtons(true);
     // 不开 documentMode：Python 版 ShellTab 未设置（ui/main.py:107-112）。
     // macOS 上 documentMode 会让 QMacStyle 按系统外观强制标签文字颜色，
     // 深色主题下未选中标签被画成黑字（qdarktheme 的 QTabBar::tab 不设 color，

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(cube-shell
-    VERSION 3.3.0
+    VERSION 3.4.0
     DESCRIPTION "CubeShell - C++/Qt6 rewrite of the Python terminal/SSH/RDP/AI client"
     LANGUAGES CXX
 )

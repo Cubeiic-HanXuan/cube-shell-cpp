@@ -328,6 +328,23 @@ target_link_libraries(sftp_browser_test PRIVATE
     cube_core
 )
 
+# 文件树筛选/排序共用逻辑（file_browser_common）纯函数单测，无显示环境。
+qt_add_executable(file_browser_test
+    file_browser_test.cpp
+)
+target_include_directories(file_browser_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget
+)
+target_link_libraries(file_browser_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    cube_ui
+    cube_core
+)
+
 # Screen reflow unit test (resizeImage with reflow=true; pure logic, no GUI).
 qt_add_executable(screen_reflow_test
     screen_reflow_test.cpp
@@ -465,6 +482,7 @@ if(CUBESHELL_WITH_LOCALPROC)
 endif()
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME sftp_browser_test COMMAND sftp_browser_test)
+add_test(NAME file_browser_test COMMAND file_browser_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
 add_test(NAME terminal_search_test COMMAND terminal_search_test)
 add_test(NAME update_checker_test COMMAND update_checker_test)

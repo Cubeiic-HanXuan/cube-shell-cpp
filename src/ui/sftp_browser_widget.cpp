@@ -18,6 +18,7 @@
 #include <QIcon>
 #include <QInputDialog>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -25,6 +26,7 @@
 #include <QMimeData>
 #include <QProgressBar>
 #include <QResizeEvent>
+#include <QShortcut>
 #include <QSizePolicy>
 #include <QStyle>
 #include <QThread>
@@ -42,6 +44,7 @@
 #include "ssh/SftpUploaderCore.h"
 #include "dialogs/CompressDialog.h"
 #include "editors/TextEditor.h"
+#include "file_browser_common.h"
 #include "file_icons.h"
 #include "pane_badge.h"
 
@@ -50,12 +53,9 @@ namespace cubeshell {
 // 析构时对每个存活 worker 的最长等待；超时则泄漏其引用对象而非无限阻塞 UI。
 static constexpr int kWorkerJoinTimeoutMs = 5000;
 
-// Roles on tree items.
-static constexpr int kPathRole = Qt::UserRole;       // full remote path
-static constexpr int kIsDirRole = Qt::UserRole + 1;  // bool
-static constexpr int kModeRole = Qt::UserRole + 2;   // permission bits (quint32)
-static constexpr int kIsUpRole = Qt::UserRole + 3;   // ".." 返回上级条目
-static constexpr int kSymlinkTargetRole = Qt::UserRole + 4; // 符号链接目标（QString）
+// 条目角色布局（kPathRole/kIsDirRole/kIsUpRole/kModeRole/kSymlinkTargetRole
+// 及排序用的 kSizeRole/kMtimeRole）统一由 file_browser_common.h 提供，
+// 与本地文件面板共用同一套，便于 sortFileTree/applyFileFilter 直接读。
 
 // 文件大小人类可读格式。对应Python: function/util.py::format_file_size
 static QString formatFileSize(qint64 bytes)
@@ -97,11 +97,18 @@ static QString ownerText(const SftpFileInfo &e)
 SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     : QWidget(parent)
 {
-    // 顶部路径栏：左侧徽章（多分屏时显示序号）+ 路径编辑框。
+    // 顶部路径栏：左侧徽章（多分屏时显示序号）+ 路径编辑框 + 右侧筛选开关。
     // 对应Python: add_line_edit(pwd) 在文件树顶部展示当前目录
     m_paneBadge = createPaneBadge(this);
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setText(m_cwd);
+
+    // 筛选开关：点击在路径栏下方弹出检索框，再次点击（或检索框里 Esc）收起。
+    m_filterBtn = new QToolButton(this);
+    m_filterBtn->setIcon(fileFilterIcon(palette()));
+    m_filterBtn->setToolTip(tr("筛选当前目录（Ctrl+F）"));
+    m_filterBtn->setCheckable(true);
+    m_filterBtn->setAutoRaise(true);
 
     auto *pathBar = new QWidget(this);
     auto *pathLayout = new QHBoxLayout(pathBar);
@@ -109,6 +116,18 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     pathLayout->setSpacing(4);
     pathLayout->addWidget(m_paneBadge);
     pathLayout->addWidget(m_pathEdit, 1);
+    pathLayout->addWidget(m_filterBtn);
+
+    // 检索框行（默认隐藏）：输入即筛选当前目录，Enter 定位第一个匹配项。
+    m_filterBar = new QWidget(this);
+    auto *filterLayout = new QHBoxLayout(m_filterBar);
+    filterLayout->setContentsMargins(0, 2, 0, 2);
+    filterLayout->setSpacing(4);
+    m_filterEdit = new QLineEdit(m_filterBar);
+    m_filterEdit->setPlaceholderText(tr("输入关键字筛选当前目录，Enter 定位，Esc 关闭"));
+    m_filterEdit->setClearButtonEnabled(true);
+    filterLayout->addWidget(m_filterEdit, 1);
+    m_filterBar->setVisible(false);
 
     // 平铺列表（非展开树），五列表头与 Python 侧一致。
     // 对应Python: handle_file_tree_updated 里 setRootIsDecorated(False)/setIndentation(0)
@@ -132,6 +151,15 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     m_tree->setColumnWidth(2, 130);
     m_tree->setColumnWidth(3, 100);
     m_tree->setColumnWidth(4, 110);
+    // 表头排序：不开 QTreeWidget 内建排序（它只比显示文本，"4.00 KB" 会排在
+    // "1 GB" 前），改由 sectionClicked 驱动 sortFileTree 按裸值 role 重排，
+    // ".." 条目恒置顶；名称列目录在文件前，其余列全列单调混排（见
+    // fileTreeSortLess 注释）。指示箭头由我们手动维护。
+    // 注意：QHeaderView 的 sectionsClickable 默认是 false（内建排序开启时会被
+    // 顺手置 true），自己接管排序必须显式打开，否则点击表头不发 sectionClicked。
+    m_tree->header()->setSectionsClickable(true);
+    m_tree->header()->setSortIndicatorShown(true);
+    m_tree->header()->setSortIndicator(m_sortColumn, m_sortOrder);
 
     m_progress = new QProgressBar(this);
     m_progress->setVisible(false);
@@ -157,6 +185,7 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     layout->setContentsMargins(2, 2, 2, 2);
     layout->setSpacing(0);
     layout->addWidget(pathBar);
+    layout->addWidget(m_filterBar);
     layout->addWidget(m_tree, 1);
     // 进度条 + 取消按钮一行：按钮仅在传输进行中可见（updateCancelButton）。
     auto *progressRow = new QHBoxLayout();
@@ -169,6 +198,18 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
 
     connect(m_pathEdit, &QLineEdit::returnPressed, this, &SftpBrowserWidget::onPathEdited);
     connect(m_tree, &QTreeWidget::itemDoubleClicked, this, &SftpBrowserWidget::onItemDoubleClicked);
+    connect(m_tree->header(), &QHeaderView::sectionClicked,
+            this, &SftpBrowserWidget::onHeaderSectionClicked);
+
+    // 筛选：按钮弹出/收起检索框，输入即筛，回车定位首个匹配。
+    connect(m_filterBtn, &QToolButton::toggled, this, &SftpBrowserWidget::setFilterBarVisible);
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::returnPressed, this, &SftpBrowserWidget::focusFirstFilterMatch);
+    // Ctrl+F 唤起检索框。作用域限定在本面板内（WidgetWithChildren），
+    // 避免抢占终端自己的 Ctrl+F 搜索。
+    auto *findShortcut = new QShortcut(QKeySequence::Find, this);
+    findShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(findShortcut, &QShortcut::activated, m_filterBtn, &QToolButton::toggle);
 
     // 右键菜单。对应Python: cube-shell.py::treeRight（已连接分支）
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -181,6 +222,8 @@ SftpBrowserWidget::SftpBrowserWidget(QWidget *parent)
     m_tree->setDragDropMode(QAbstractItemView::NoDragDrop);
     m_tree->viewport()->setAcceptDrops(true);
     m_tree->viewport()->installEventFilter(this);
+    // 检索框里的 Esc 走 eventFilter（QLineEdit 自身不消化 Esc）。
+    m_filterEdit->installEventFilter(this);
 }
 
 SftpBrowserWidget::~SftpBrowserWidget()
@@ -499,6 +542,10 @@ void SftpBrowserWidget::loadPath(const QString &path, LoadReason reason)
             }
             // 成功后才一次性提交：保证任意时刻路径栏 == m_cwd == 树内容所属目录
             m_sftpUnavailable = false;
+            // 换了目录就清掉旧筛选词（留在原样会让用户误以为新目录是空的）；
+            // 同目录刷新（path == m_cwd）保留筛选，populate 会重应用。
+            if (path != m_cwd && !m_filterEdit->text().isEmpty())
+                m_filterEdit->clear();
             m_cwd = path;
             m_pathEdit->setText(m_cwd);
             populate(path, entries);
@@ -519,6 +566,10 @@ bool SftpBrowserWidget::sftpLooksUnavailable(bool bastionProxied, const QString 
 void SftpBrowserWidget::showUnavailableNotice()
 {
     m_sftpUnavailable = true;
+    // 没有文件系统可给：筛选无意义，入口禁掉并收起检索框（说明行不该被筛选藏掉）。
+    m_filterEdit->clear();
+    m_filterBtn->setChecked(false);
+    m_filterBtn->setEnabled(false);
     m_tree->setUpdatesEnabled(false);
     m_tree->clear();
     // 一行不可选中的说明，占位在原本列目录的地方（Python 侧是 add_line_edit）。
@@ -562,20 +613,9 @@ void SftpBrowserWidget::populate(const QString &path, const SftpFileInfoList &en
         upItem->setData(0, kIsUpRole, true);
     }
 
-    // ls 风格排序：忽略隐藏文件前导点、忽略大小写。
-    // 对应Python: 远端 ls -al 的字典序输出
-    SftpFileInfoList sorted = entries;
-    const auto sortKey = [](const SftpFileInfo &e) {
-        QString k = e.filename;
-        while (k.startsWith(QLatin1Char('.')))
-            k.remove(0, 1);
-        return k.isEmpty() ? e.filename.toLower() : k.toLower();
-    };
-    std::sort(sorted.begin(), sorted.end(), [&sortKey](const SftpFileInfo &a, const SftpFileInfo &b) {
-        return sortKey(a) < sortKey(b);
-    });
-
-    for (const SftpFileInfo &e : sorted) {
+    // 按目录返回顺序插入，随后统一交给 sortFileTree 按当前排序列/序重排
+    // （替代原先的 std::sort 预排序：显示文本已格式化，排序必须比裸值）。
+    for (const SftpFileInfo &e : entries) {
         auto *item = new QTreeWidgetItem(m_tree);
         const QString fullPath = joinPath(path, e.filename);
         item->setText(0, e.filename);
@@ -588,11 +628,22 @@ void SftpBrowserWidget::populate(const QString &path, const SftpFileInfoList &en
         item->setData(0, kIsDirRole, e.isDirectory());
         item->setData(0, kModeRole, e.permissions());
         item->setData(0, kSymlinkTargetRole, e.symlinkTarget);
+        // 排序用裸值：显示列是格式化文本，直接比字符串会把 "1 GB" 排到 "4.00 KB" 前。
+        item->setData(0, kSizeRole, e.size);
+        item->setData(0, kMtimeRole, e.mtime);
         // 按扩展名映射类型图标（与本地浏览器共用 iconForFile）；
         // 符号链接与可执行文件优先使用专用图标。
         // 对应Python: handle_file_tree_updated 里根据 n[0] 权限位选图标
         item->setIcon(0, iconForFile(e.filename, e.isDirectory(), e.isSymlink(), e.mode));
     }
+
+    m_entryCount = int(entries.size());
+    // 排序与筛选跨刷新保持：传输完成/手动刷新重载目录后视图状态不丢。
+    sortFileTree(m_tree, m_sortColumn, m_sortOrder);
+    if (!m_filterEdit->text().trimmed().isEmpty())
+        applyFileFilter(m_tree, m_filterEdit->text());
+    // 成功列出目录 ⇒ 通道可用，恢复筛选入口（showUnavailableNotice 会禁掉它）。
+    m_filterBtn->setEnabled(true);
 
     m_tree->setUpdatesEnabled(true);
 }
@@ -623,6 +674,64 @@ void SftpBrowserWidget::refresh()
 void SftpBrowserWidget::onPathEdited()
 {
     loadPath(m_pathEdit->text().trimmed().isEmpty() ? QStringLiteral("/") : m_pathEdit->text().trimmed());
+}
+
+// 表头点击：同列再点切换升降序，换列从升序开始（文件管理器惯例）。
+void SftpBrowserWidget::onHeaderSectionClicked(int logical)
+{
+    if (logical == m_sortColumn) {
+        m_sortOrder = (m_sortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder
+                                                          : Qt::AscendingOrder;
+    } else {
+        m_sortColumn = logical;
+        m_sortOrder = Qt::AscendingOrder;
+    }
+    m_tree->header()->setSortIndicator(m_sortColumn, m_sortOrder);
+    sortFileTree(m_tree, m_sortColumn, m_sortOrder);
+}
+
+void SftpBrowserWidget::setFilterBarVisible(bool on)
+{
+    m_filterBar->setVisible(on);
+    if (on) {
+        m_filterEdit->setFocus();
+        m_filterEdit->selectAll();
+    } else {
+        // 收起即还原完整列表；text 为空时 clear 不发 textChanged，手动补一次。
+        if (!m_filterEdit->text().isEmpty())
+            m_filterEdit->clear();
+        else
+            applyFilter();
+        m_tree->setFocus();
+    }
+}
+
+void SftpBrowserWidget::applyFilter()
+{
+    if (m_sftpUnavailable)
+        return;
+    const QString needle = m_filterEdit->text().trimmed();
+    const int visible = applyFileFilter(m_tree, m_filterEdit->text());
+    // 有筛选词时状态栏报匹配数；清空后还原成目录条目计数。
+    if (!needle.isEmpty())
+        setStatusText(tr("%1 · 匹配 %2 项").arg(m_cwd).arg(visible));
+    else
+        setStatusText(tr("%1 · %2 项").arg(m_cwd).arg(m_entryCount));
+}
+
+// 回车定位：选中第一个可见的普通条目（".." 与隐藏项跳过），并把焦点还给树，
+// 用户可直接用方向键在匹配结果间移动。
+void SftpBrowserWidget::focusFirstFilterMatch()
+{
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_tree->topLevelItem(i);
+        if (item->isHidden() || item->data(0, kIsUpRole).toBool())
+            continue;
+        m_tree->setCurrentItem(item);
+        m_tree->scrollToItem(item);
+        m_tree->setFocus();
+        return;
+    }
 }
 
 QString SftpBrowserWidget::selectedRemotePath() const
@@ -768,6 +877,14 @@ void SftpBrowserWidget::enqueueUpload(const QString &local, const QString &remot
 // eventFilter 里 preempt 掉，统一走 handleDropEvent。
 bool SftpBrowserWidget::eventFilter(QObject *obj, QEvent *event)
 {
+    if (obj == m_filterEdit && event->type() == QEvent::KeyPress) {
+        auto *ke = static_cast<QKeyEvent *>(event);
+        // Esc：收起检索框并还原列表（清空由 setFilterBarVisible 负责）。
+        if (ke->key() == Qt::Key_Escape) {
+            m_filterBtn->setChecked(false);
+            return true;
+        }
+    }
     if (obj == m_tree->viewport()) {
         if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
             auto *de = static_cast<QDragMoveEvent *>(event);

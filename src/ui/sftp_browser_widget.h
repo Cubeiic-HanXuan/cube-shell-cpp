@@ -105,6 +105,14 @@ private slots:
     void uploadFiles();
     void downloadSelected();
     void onPathEdited();
+    // 表头点击排序：同列切换升降序，换列重置为升序。
+    void onHeaderSectionClicked(int logical);
+    // 筛选栏显隐（路径栏右侧筛选按钮 toggled）。打开即聚焦，关闭即清空还原。
+    void setFilterBarVisible(bool on);
+    // 按 m_filterEdit 当前文本重筛整棵树（textChanged 驱动）。
+    void applyFilter();
+    // 检索框回车：选中并滚动到第一个可见匹配项。
+    void focusFirstFilterMatch();
     // 右键菜单。对应Python: cube-shell.py::treeRight（已连接分支）
     void showContextMenu(const QPoint &pos);
     void renameSelected();
@@ -188,6 +196,9 @@ private:
 
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章
+    QToolButton *m_filterBtn = nullptr; // 路径栏右侧的筛选开关（弹出/收起检索框）
+    QWidget *m_filterBar = nullptr;    // 检索框所在行（默认隐藏）
+    QLineEdit *m_filterEdit = nullptr;
     QTreeWidget *m_tree = nullptr;
     QProgressBar *m_progress = nullptr;
     QToolButton *m_cancelBtn = nullptr;
@@ -196,6 +207,11 @@ private:
     QString m_statusFullText;
 
     QString m_cwd = QStringLiteral("/");
+    // 最近一次成功加载的目录条目数（不含 ".."）：状态栏在筛选开关间还原计数用。
+    int m_entryCount = 0;
+    // 表头排序状态（跨目录保持；默认按文件名升序，与原 ls 风格预排序一致）。
+    int m_sortColumn = 0;
+    Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     // 该会话经跳板机代理（见 setBastionProxied）。
     bool m_bastionProxied = false;
     // 已判定「代理端不提供文件浏览」，列表里现在是说明行而非目录内容。

@@ -11,6 +11,8 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QLineEdit;
 class QLabel;
+class QToolButton;
+class QEvent;
 
 namespace cubeshell {
 
@@ -38,6 +40,14 @@ private slots:
     void goHome();
     void onPathEdited();
     void onItemDoubleClicked(QTreeWidgetItem *item, int column);
+    // 表头点击排序：同列切换升降序，换列重置为升序（与 SFTP 面板一致）。
+    void onHeaderSectionClicked(int logical);
+    // 筛选栏显隐（路径栏右侧筛选按钮 toggled）。打开即聚焦，关闭即清空还原。
+    void setFilterBarVisible(bool on);
+    // 按 m_filterEdit 当前文本重筛整棵树（textChanged 驱动）。
+    void applyFilter();
+    // 检索框回车：选中并滚动到第一个可见匹配项。
+    void focusFirstFilterMatch();
     // 右键菜单。对应Python: cube-shell.py::treeRight（已连接 + is_local 分支）
     void showContextMenu(const QPoint &pos);
     void downloadSelected();      // 对应Python: downloadFile（本机=复制到目标目录）
@@ -65,11 +75,19 @@ private:
     // 选中项的绝对路径（排除 ".." 行）。
     QString selectedPath() const;
     QStringList selectedPaths() const;
+    // 检索框里的 Esc（QLineEdit 自身不消化 Esc）。
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
     QTreeWidget *m_tree = nullptr;
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章
+    QToolButton *m_filterBtn = nullptr; // 路径栏右侧的筛选开关（弹出/收起检索框）
+    QWidget *m_filterBar = nullptr;    // 检索框所在行（默认隐藏）
+    QLineEdit *m_filterEdit = nullptr;
     QString m_rootPath;
+    // 表头排序状态（跨目录保持；默认按文件名升序，与原 ls 风格预排序一致）。
+    int m_sortColumn = 0;
+    Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
 };
 
 } // namespace cubeshell

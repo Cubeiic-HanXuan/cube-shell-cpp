@@ -9,6 +9,7 @@ set(UI_SOURCES
     ssh_session_tab.cpp
     sftp_browser_widget.cpp
     local_file_browser_widget.cpp
+    file_browser_common.cpp   # 两棵文件树共用的筛选/排序逻辑（见 file_browser_common.h）
     file_icons.cpp
     add_device_dialog.cpp
     status_box_item.cpp

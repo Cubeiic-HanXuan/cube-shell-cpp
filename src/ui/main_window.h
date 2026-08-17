@@ -219,10 +219,18 @@ private:
     void onCommandsStepMode(const QList<AiCommand> &commands, SshAiAgent *agent);
     void showHermesPanel();
     void showClaudeCodePanel();
+#ifdef CUBESHELL_WITH_LOCALPROC
+    // DeepSeek Harness 管理面板（本机 dsh web 进程；需 exec + Node.js，鸿蒙摘除）。
+    void showDshPanel();
+#endif
 #ifdef CUBESHELL_WITH_LOCALPTY
     // 在新本机终端中执行 claude 命令（Claude Code 面板的 openTerminalRequested）。
     // 对应Python: cube-shell.py::open_claude_terminal（行 1314-1337）
     void openClaudeTerminal(const QString &command);
+#endif
+#if defined(CUBESHELL_WITH_LOCALPTY) && defined(CUBESHELL_WITH_LOCALPROC)
+    // 在新本机终端中执行 dsh CLI 命令（DeepSeek Harness 面板的 openCliRequested）。
+    void openDshTerminal(const QString &command, const QString &workingDir);
 #endif
     // 根据 claude 命令语义生成终端 Tab 名称。
     // 对应Python: cube-shell.py::_claude_tab_name（行 1282-1300）

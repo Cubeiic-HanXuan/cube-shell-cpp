@@ -118,6 +118,13 @@ if(CUBESHELL_WITH_LOCALPROC)
 
         # --- docker (CLI 驱动部分) ---
         docker/DockerManager.cpp    # port of core/docker/ (CLI + compose 编辑)
+
+        # --- DeepSeek Harness（dsh web 本机进程管理；Python 版无对应实现） ---
+        dsh/DshManager.cpp          # QProcess 托管 `npx @deepseek-ai/dsh web` + 端口健康检查
+        dsh/DshPanel.cpp            # 管理面板容器（4 Tab：状态/插件/会话/设置）
+        dsh/DshPluginPanel.cpp      # 插件 Tab（dsh plugin add/remove，转发 pnpm）
+        dsh/DshSessionPanel.cpp     # 会话 Tab（<DSH_HOME>/sessions 列举/恢复/删除）
+        dsh/DshSettingsPanel.cpp    # 设置 Tab（settings.yaml 摘要 + 全文编辑）
     )
 endif()
 

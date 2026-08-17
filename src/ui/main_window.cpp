@@ -70,6 +70,7 @@
 #include "claude_code/ClaudeCodePanel.h"
 #ifdef CUBESHELL_WITH_LOCALPROC
 #include "docker/DockerManager.h"
+#include "dsh/DshPanel.h"
 #endif
 #include "hermes/HermesPanel.h"
 #include "ssh/CommandExecutor.h"
@@ -663,6 +664,10 @@ void MainWindow::setupMenus()
     // 对应Python: setupLeftToolbar 里的 hermes / Claude Code 入口（菜单侧）
     toolsMenu->addAction(QStringLiteral("Hermes Agent"), this, &MainWindow::showHermesPanel);
     toolsMenu->addAction(QStringLiteral("Claude Code"), this, &MainWindow::showClaudeCodePanel);
+#ifdef CUBESHELL_WITH_LOCALPROC
+    // DeepSeek Harness 需本机 exec + Node.js，鸿蒙摘除。
+    toolsMenu->addAction(QStringLiteral("DeepSeek Harness"), this, &MainWindow::showDshPanel);
+#endif
 
     // --- 设置 --- 对应Python: menuBarController 的 setting_menu（L2227 + L2260-2292）
     QMenu *settingsMenu = menuBar()->addMenu(tr("设置"));
@@ -765,6 +770,11 @@ void MainWindow::setupToolbar()
             QStringLiteral("Hermes Agent"), &MainWindow::showHermesPanel);
     addTool(QStringLiteral(":/icons8-claudecode-48.png"), QStringLiteral("Claude Code"),
             QStringLiteral("Claude Code"), &MainWindow::showClaudeCodePanel);
+#ifdef CUBESHELL_WITH_LOCALPROC
+    // DeepSeek Harness 需本机 exec + Node.js，鸿蒙摘除。
+    addTool(QStringLiteral(":/icons8-deepseek-48.png"), QStringLiteral("DeepSeek Harness"),
+            QStringLiteral("DeepSeek Harness"), &MainWindow::showDshPanel);
+#endif
 }
 
 // 状态栏：连接状态 + 终端大小/编码 + 8 项监控指标小方块。
@@ -1312,6 +1322,36 @@ void MainWindow::showClaudeCodePanel()
     // 首次显示由 panel 的 showEvent 触发初始化与首刷（对应Python 行 117-122）
 }
 
+#ifdef CUBESHELL_WITH_LOCALPROC
+// 在标签页中打开 DeepSeek Harness 管理面板。
+// 与 showHermesPanel 同款的去重逻辑；面板自包含（持有 DshManager），
+// 仅管理本机 dsh web 进程，不接远程 executor（本期只做本机）。
+void MainWindow::showDshPanel()
+{
+    const QString tabName = QStringLiteral("DeepSeek Harness");
+    // 已有 DeepSeek Harness 标签页 → 直接切过去（主/副分屏都查）。
+    for (QTabWidget *tabs : allPanes()) {
+        for (int i = 0; i < tabs->count(); ++i) {
+            if (tabs->tabText(i) == tabName) {
+                tabs->setCurrentIndex(i);
+                return;
+            }
+        }
+    }
+
+    auto *panel = new cubeshell::DshPanel(this);
+#ifdef CUBESHELL_WITH_LOCALPTY
+    // CLI 页请求"在终端运行"→ 新开本机终端跑 dsh CLI（headless/tui）。
+    // 鸿蒙：无本地 shell，不接线（面板按钮已在 LOCALPROC 下才存在，二者桌面同开）。
+    connect(panel, &cubeshell::DshPanel::openCliRequested,
+            this, &MainWindow::openDshTerminal);
+#endif
+    TerminalTabWidget *pane = targetPane();
+    const int idx = pane->addTab(panel, tabName);
+    pane->setCurrentIndex(idx);
+}
+#endif // CUBESHELL_WITH_LOCALPROC
+
 #ifdef CUBESHELL_WITH_LOCALPTY
 // 在新本机终端中执行 claude 命令（延迟 500ms 发送，等 shell 就绪）。
 // 对应Python: cube-shell.py::open_claude_terminal（行 1314-1337）
@@ -1338,6 +1378,31 @@ void MainWindow::openClaudeTerminal(const QString &command)
     });
 }
 #endif // CUBESHELL_WITH_LOCALPTY
+
+#if defined(CUBESHELL_WITH_LOCALPTY) && defined(CUBESHELL_WITH_LOCALPROC)
+// 在新本机终端中执行 dsh CLI 命令（延迟 500ms 发送，等 shell 就绪）。
+// 与 openClaudeTerminal 同款；DeepSeek Harness 面板的 openCliRequested 触发。
+// workingDir 非空时终端起在该目录（恢复会话时传会话原本的工作目录，让 agent
+// 的文件操作落在对的项目上）；空则用默认目录。
+void MainWindow::openDshTerminal(const QString &command, const QString &workingDir)
+{
+    QTermWidget *term = openLocalTerminalAt(workingDir);
+    if (!term)
+        return;
+    if (QTabWidget *pane = paneOf(term)) {
+        const int idx = pane->indexOf(term);
+        if (idx >= 0)
+            pane->setTabText(idx, QStringLiteral("dsh"));
+    }
+    QTimer::singleShot(500, term, [term, command]() {
+#ifdef Q_OS_WIN
+        term->sendText(command + QStringLiteral("\r"));
+#else
+        term->sendText(command + QStringLiteral("\n"));
+#endif
+    });
+}
+#endif // CUBESHELL_WITH_LOCALPTY && CUBESHELL_WITH_LOCALPROC
 
 // 对应Python: cube-shell.py::_claude_tab_name（行 1282-1300）：
 // 命令可能包裹了切目录前缀，按语义提取而非取最后一个 token。

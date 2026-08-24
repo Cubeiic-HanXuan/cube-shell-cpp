@@ -54,6 +54,7 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
         emit disconnected();
     });
     connect(m_term, &SshTerminalWidget::mfaRequested, this, &SshSessionTab::mfaRequested);
+    connect(m_term, &SshTerminalWidget::awaitingPassword, this, &SshSessionTab::awaitingPassword);
     connect(m_term, &SshTerminalWidget::cwdChanged, this, &SshSessionTab::cwdChanged);
 }
 

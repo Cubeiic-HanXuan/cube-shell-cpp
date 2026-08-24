@@ -36,6 +36,8 @@ signals:
     void connectionFailed(const QString &message);
     void disconnected();
     void mfaRequested(const QString &prompt);
+    // 正在终端里等用户输密码（配置没存密码 / 上次认证失败重问）。
+    void awaitingPassword();
     // RemoteMonitor 已创建并启动（主窗口监控面板据此重新订阅）。
     void monitorReady();
     // OSC7 报告的远程 cwd（follow_folder 联动用）。

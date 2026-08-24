@@ -308,6 +308,12 @@ void TcpBridge::advanceAutoLogin(const QByteArray &clean)
 
     case LoginPhase::SentUser:
         if (looksLikePasswordPrompt(m_promptTail)) {
+            // 配置没存密码：把提示符原样留给用户手输，不甩一个空行过去
+            //（空行登不上，还白耗一次认证——有些设备几次失败就锁账号）。
+            if (m_loginPassword.isEmpty()) {
+                setLoginPhase(LoginPhase::Done);
+                break;
+            }
             writeToNetwork(m_loginPassword.toUtf8() + "\r\n");
             m_promptTail.clear();
             // 密码只发一次：直接进 SentPass，后续再出现 Password: 说明认证

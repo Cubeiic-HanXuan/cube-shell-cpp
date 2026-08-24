@@ -314,6 +314,25 @@ target_link_libraries(command_suggest_test PRIVATE
     cube_core
 )
 
+# TerminalPrompt 的按键归类 / UTF-8 退格（纯逻辑，无网络、无显示）。
+# 连接时在终端里输密码的手感就靠这两个函数：方向键不进密码、粘贴带换行
+# 算提交、退格整字符删。
+qt_add_executable(terminal_prompt_test
+    terminal_prompt_test.cpp
+)
+target_include_directories(terminal_prompt_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget
+)
+target_link_libraries(terminal_prompt_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    cube_ui
+    cube_core
+)
+
 # SFTP 面板「代理端不提供文件浏览」判定（纯逻辑，无网络、无显示）。
 qt_add_executable(sftp_browser_test
     sftp_browser_test.cpp
@@ -484,6 +503,7 @@ if(CUBESHELL_WITH_LOCALPROC)
     add_test(NAME frp_installer_test COMMAND frp_installer_test)
 endif()
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
+add_test(NAME terminal_prompt_test COMMAND terminal_prompt_test)
 add_test(NAME sftp_browser_test COMMAND sftp_browser_test)
 add_test(NAME file_browser_test COMMAND file_browser_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)

@@ -50,7 +50,8 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     pwForm->setContentsMargins(0, 0, 0, 0);
     m_password = new QLineEdit(this);
     m_password->setEchoMode(QLineEdit::Password);
-    m_password->setPlaceholderText(tr("终端密码可以不输入"));
+    // 占位符随协议变（见 onProtocolChanged）；这里只给个通用初值。
+    m_password->setPlaceholderText(tr("留空则在连接时输入"));
     pwForm->addRow(tr("密码："), m_password);
 
     // page 1: private key
@@ -370,6 +371,16 @@ void AddDeviceDialog::onTestConnection()
     if (e.password.isEmpty() && !e.usesKey() && m_passwordResolver)
         e.password = m_passwordResolver(e.id);
 
+    // 密码非必填（见 validate）：SSH 密码登录却一个密码都没有时别真去连——
+    // 「测试连接」不做交互式应答（promptCb 传 nullptr），空密码只会撞回
+    // 「认证失败：用户名或密码错误」，把"压根没填密码"说成"密码错了"。
+    // 就地填一个即可测；留空保存也行，连接时终端里会问（见 TerminalPrompt）。
+    if (e.isSsh() && !e.usesKey() && e.password.isEmpty()) {
+        onTestFinished(false, tr("未填写密码，无法测试；可先填一个用于测试，"
+                                 "或留空保存、连接时在终端中输入。"));
+        return;
+    }
+
     setTestingUi(true);
     m_testStatus->setText(tr("正在测试连接…"));
     m_testStatus->setStyleSheet(QString());
@@ -582,6 +593,19 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
     m_form->setRowVisible(m_netLocalEcho, isNet);
     m_form->setRowVisible(m_netRxImplicitCr, isNet);
 
+    // 密码框的占位符：密码非必填，得告诉用户"留空之后在哪儿输"——
+    // 三个协议的答案不一样（SSH 在终端里、RDP 在面板里、Telnet 在提示符处）。
+    // 已存密码的设备不动它：那里的"留空则不修改"是更要紧的提示
+    //（见 setHasStoredPassword）。
+    if (!m_hasStoredPassword) {
+        if (isRdp)
+            m_password->setPlaceholderText(tr("留空则在连接面板中输入"));
+        else if (isTelnet)
+            m_password->setPlaceholderText(tr("留空则在终端里自己输入"));
+        else
+            m_password->setPlaceholderText(tr("留空则在连接时于终端输入"));
+    }
+
     // 切协议时给出合理的默认端口（串口不用端口字段，跳过）。
     // 只在端口框为空、或里面放的还是上一个协议的默认值时才改——用户自己
     // 填过端口就一直保留。默认值收敛在 defaultPortFor()。
@@ -650,24 +674,17 @@ bool AddDeviceDialog::validate(QString *err) const
     if (m_host->text().trimmed().isEmpty()) { *err = tr("IP地址不能为空。"); return false; }
 #ifdef CUBESHELL_WITH_RDP
     if (rdpSelected()) {
-        // 对应Python: 'RDP 连接需要提供密码！'（cube-shell.py:6109-6111）
-        // m_hasStoredPassword：密码已在钥匙串里时密码框本就是空的，
-        // 此时仍强制要求填写，等于所有已有 RDP 设备都不能改端口/域名。
-        if (m_password->text().isEmpty() && !m_hasStoredPassword) {
-            *err = tr("RDP 连接需要提供密码。");
-            return false;
-        }
+        // 密码不再必填：留空就等连接时在 RDP 面板里现填（见 RdpPanel::promptForPassword）。
+        // Python 版这里会拦下（'RDP 连接需要提供密码！'，cube-shell.py:6109-6111），
+        // C++ 侧不强制把密码落进钥匙串。
         return true;
     }
 #endif
     if (m_authMethod->currentIndex() == 1) {
         if (m_keyFile->text().trimmed().isEmpty()) { *err = tr("请选择私钥文件。"); return false; }
-    } else {
-        if (m_password->text().isEmpty() && !m_hasStoredPassword) {
-            *err = tr("请输入密码（或切换为私钥登录）。");
-            return false;
-        }
     }
+    // 密码登录：密码可留空——连接时在终端里就地输入（见 TerminalPrompt），
+    // 只在本次会话内有效、不写钥匙串，比强制预存更安全。
     return true;
 }
 

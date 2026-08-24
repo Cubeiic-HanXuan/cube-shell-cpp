@@ -180,6 +180,9 @@ RdpPanel::RdpPanel(QWidget *parent)
     connect(m_connectButton, &QPushButton::clicked, this, &RdpPanel::onConnectClicked);
     connect(m_disconnectButton, &QPushButton::clicked, this,
             &RdpPanel::onDisconnectClicked);
+    // 密码框里回车即连：密码留空的配置打开后光标就停在这儿
+    //（见 promptForPassword），还要用鼠标去点"连接"太别扭。
+    connect(m_passwordEdit, &QLineEdit::returnPressed, this, &RdpPanel::onConnectClicked);
     connect(m_client, &RdpClient::stateChanged, this, &RdpPanel::onStateChanged);
     connect(m_client, &RdpClient::errorOccurred, this, &RdpPanel::onError);
     connect(m_client, &RdpClient::frameUpdated, this, &RdpPanel::onFrameUpdated);
@@ -220,6 +223,14 @@ void RdpPanel::setSettings(const RdpSettings &settings)
     const int index = m_resolutionCombo->findText(resolution);
     if (index >= 0)
         m_resolutionCombo->setCurrentIndex(index);
+}
+
+void RdpPanel::promptForPassword()
+{
+    m_statusLabel->setText(tr("请输入密码后点击「连接」"));
+    // setFocus 而不只是提示：面板本身是 StrongFocus 的（要收键鼠转发给远端），
+    // 打开标签页时焦点在面板上，用户看到光标才知道该往哪儿打字。
+    m_passwordEdit->setFocus();
 }
 
 void RdpPanel::onConnectClicked()

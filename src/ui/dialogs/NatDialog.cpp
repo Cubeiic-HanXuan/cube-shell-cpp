@@ -221,6 +221,16 @@ void NatDialog::onConnectClicked()
     params.keyType = entry.keyType;
     params.keyFile = entry.keyFile;
 
+    // 密码非必填（见 AddDeviceDialog::validate），但内网穿透没有终端可以
+    // 就地问密码（SSH 标签页走 TerminalPrompt），带着空密码去连只会撞回
+    // 一句「认证失败」，看不出真因。
+    if (!entry.usesKey() && params.password.isEmpty()) {
+        QMessageBox::warning(hostWindow(), tr("缺少密码"),
+                             tr("设备“%1”未保存密码；内网穿透需要预存密码，"
+                                "或改用私钥登录。").arg(device));
+        return;
+    }
+
     // 显示进度对话框（对应Python: QProgressDialog(..., None, 0, 0, self)）
     closeProgress(); // C++ 特有：清掉上一轮可能残留的进度框，避免悬挂窗口
     m_progress = new QProgressDialog(m_nat ? tr("正在停止服务...") : tr("正在连接服务器..."),

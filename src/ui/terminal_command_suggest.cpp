@@ -101,10 +101,29 @@ TerminalCommandSuggest::~TerminalCommandSuggest()
     delete m_popup;
 }
 
+// 暂停期间彻底不作数：收起已有弹窗、停掉防抖定时器，并清掉输入缓冲——
+// 恢复后从干净状态重新跟踪（密码那几个字符绝不能留在缓冲里）。
+void TerminalCommandSuggest::setPaused(bool paused)
+{
+    if (m_paused == paused)
+        return;
+    m_paused = paused;
+    if (paused) {
+        m_timer->stop();
+        hideSuggestions();
+    }
+    m_inputBuffer.clear();
+    m_lastInput.clear();
+}
+
 // 弹窗可见时拦截"导航/选择"按键；隐藏时所有按键交给终端。
 // 对应Python: SSHQTermWidget.eventFilter KeyPress 分支 (L7418-7445)
 bool TerminalCommandSuggest::eventFilter(QObject *obj, QEvent *event)
 {
+    // 暂停中（终端里正在输密码）：一律放行，不看不碰。
+    if (m_paused)
+        return QObject::eventFilter(obj, event);
+
     // 问题2修复：终端所在 Tab 被切走/隐藏时收回弹窗（弹窗挂在主窗口上，
     // 不会随 Tab 页面一起隐藏）；同时停掉待触发的防抖定时器避免再次弹出。
     // HideToParent 处理终端被嵌套在容器内、由祖先隐藏连带触发的情况。
@@ -149,6 +168,10 @@ bool TerminalCommandSuggest::eventFilter(QObject *obj, QEvent *event)
 // 对应Python: _on_term_key_pressed (L7463-7528)
 void TerminalCommandSuggest::onTermKeyPressed(QKeyEvent *event)
 {
+    // 暂停中（终端里正在输密码）：不跟踪输入、不弹候选、不写历史。
+    if (m_paused)
+        return;
+
     // alternate screen（vim/less/top 等）时禁用提示 (L7473-7475)
     if (m_term->isAppScreenMode()) {
         hideSuggestions();

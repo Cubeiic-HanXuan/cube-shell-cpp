@@ -17,6 +17,7 @@
 #include "config/GlobalState.h"
 
 #include "terminal_command_suggest.h"
+#include "terminal_prompt.h"
 #include "terminal_theme_util.h"
 
 namespace cubeshell {
@@ -51,6 +52,9 @@ SshTerminalWidget::SshTerminalWidget(const DeviceEntry &device, QWidget *parent)
     // 本 widget 仅用于 SSH 会话（RDP 走 RdpPanel，不经过这里），无需协议判断。
     // 对应Python: cube-shell.py::SSHQTermWidget 提示相关初始化 (L7322-7359)
     m_suggest = new TerminalCommandSuggest(m_term, m_device.name, this);
+
+    // 终端内就地读一行（连接时问密码）。
+    m_prompt = new TerminalPrompt(m_term, this);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -91,6 +95,72 @@ void SshTerminalWidget::connectToHost()
         return;
     m_started = true;
 
+    // 密码没预存（且不是私钥登录）：先在终端画面里问一次，拿到了才建连。
+    // 不能带着空密码去连——SshClient::authenticate() 会跳过 password 认证
+    // 落到 keyboard-interactive，那条路的回调 promptForMfa() 是个对话框。
+    if (!m_device.usesKey() && m_device.password.isEmpty()) {
+        promptForPassword(QString());
+        return;
+    }
+    startConnect(m_device.password);
+}
+
+void SshTerminalWidget::promptForPassword(const QString &notice)
+{
+    if (!m_prompt) {
+        emit connectionFailed(tr("终端未就绪，无法输入密码。"));
+        return;
+    }
+
+    if (!notice.isEmpty())
+        m_prompt->write(notice + QLatin1Char('\n'));
+
+    // 输密码期间停掉命令提示：这一次 Enter 会让它把提示符那行垃圾当成命令
+    // 写进历史，候选弹窗也不该在密码上方冒出来。
+    if (m_suggest)
+        m_suggest->setPaused(true);
+
+    const QString label = tr("%1@%2 的密码：")
+                              .arg(m_device.username, m_device.hostPort().host);
+    QPointer<SshTerminalWidget> self(this);
+    m_prompt->ask(label, false, [self](bool ok, const QString &text) {
+        if (!self || self->m_teardown)
+            return;
+        if (!ok) {
+            // Ctrl+C/Ctrl+D：放弃连接。走 disconnected() 而不是
+            // connectionFailed()——后者会弹警告框并关掉标签页，而用户只是
+            // 取消了这一次输入，不该被"报错"打断。
+            if (self->m_suggest)
+                self->m_suggest->setPaused(false);
+            self->m_prompt->write(tr("已取消连接。可关闭本标签页后重新连接。")
+                                  + QLatin1Char('\n'));
+            // 闸门复位：这次没建成连接，connectToHost() 应当还能再来一遍
+            //（当前 UI 没有 SSH 标签页内重连入口，但别让状态自己把路堵死）。
+            self->m_started = false;
+            self->m_authAttempt = 0;
+            emit self->disconnected();
+            return;
+        }
+        if (text.isEmpty()) {
+            // 空回车不算一次尝试（还没发出去），直接再问。
+            self->promptForPassword(QString());
+            return;
+        }
+        if (self->m_suggest)
+            self->m_suggest->setPaused(false);
+        self->m_prompt->write(tr("正在连接 %1…").arg(self->m_device.hostPort().host)
+                              + QLatin1Char('\n'));
+        self->startConnect(text);
+    });
+
+    // 状态栏还挂着 openSshSession() 设的"正在连接…"，纠正成等输入。
+    emit awaitingPassword();
+}
+
+void SshTerminalWidget::startConnect(const QString &password)
+{
+    ++m_authAttempt;
+
     const DeviceEntry device = m_device;
 
     // The client object lives on the heap (shared_ptr) and is only touched from
@@ -102,7 +172,7 @@ void SshTerminalWidget::connectToHost()
     if (device.usesKey())
         client->setPrivateKey(device.keyType, device.keyFile);
     else
-        client->setPassword(device.password);
+        client->setPassword(password);
 
     // Keyboard-interactive MFA: libssh2 invokes this callback from the worker
     // thread, but it must show a dialog on the UI thread. We bounce through the
@@ -139,11 +209,20 @@ void SshTerminalWidget::connectToHost()
         SshError err;
         if (!client->connectToHost(promptCb, err)) {
             if (self) {
-                QMetaObject::invokeMethod(self, [self, msg = err.message]() {
-                    if (self) {
-                        self->m_pendingClient.reset();
-                        emit self->connectionFailed(msg);
+                QMetaObject::invokeMethod(self, [self, msg = err.message,
+                                                 authFailed = err.authFailed]() {
+                    if (!self)
+                        return;
+                    self->m_pendingClient.reset();
+                    // 密码不对（含预存的旧密码）就在终端里重问，同 ssh 的
+                    // 三次机会。私钥登录没得重试，非认证类失败（网络不通、
+                    // 主机不存在）重问也没意义，都直接报错。
+                    if (authFailed && !self->m_device.usesKey()
+                        && self->m_authAttempt < kMaxAuthAttempts) {
+                        self->promptForPassword(tr("认证失败，请重试。"));
+                        return;
                     }
+                    emit self->connectionFailed(msg);
                 }, Qt::QueuedConnection);
             }
             return;

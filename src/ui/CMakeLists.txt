@@ -20,6 +20,8 @@ set(UI_SOURCES
     # --- 终端命令智能提示 (对应Python: cube-shell.py::_SuggestionPopup/SSHQTermWidget 提示逻辑) ---
     suggestion_popup.cpp
     terminal_command_suggest.cpp
+    # 终端内就地读一行（SSH 连接时问密码，不弹对话框）
+    terminal_prompt.cpp
 
     # --- dialogs (对应Python: ui/*.py 各对话框) ---
     dialogs/ConfirmDialog.cpp

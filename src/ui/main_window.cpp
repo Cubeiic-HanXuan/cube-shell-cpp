@@ -1433,6 +1433,14 @@ void MainWindow::setupTunnels()
                 error = tr("未找到设备“%1”").arg(deviceName);
                 return false;
             }
+            // 密码非必填（见 AddDeviceDialog::validate），但隧道没有终端可以
+            // 像 SSH 标签页那样就地问（见 TerminalPrompt），空密码连上去只会
+            // 得到一句「认证失败」。这里把真因说清楚。
+            if (!e.usesKey() && e.password.isEmpty()) {
+                error = tr("设备“%1”未保存密码；隧道需要预存密码，"
+                           "或改用私钥登录。").arg(deviceName);
+                return false;
+            }
             const HostPort hp = e.hostPort();
             spec.sshHost = hp.host;
             spec.sshPort = hp.port;
@@ -2653,6 +2661,10 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
     connect(tab, &SshSessionTab::mfaRequested, this, [this](const QString &prompt) {
         setStatus(tr("MFA 验证：%1").arg(prompt));
     });
+    // 配置里没存密码（或上次认证失败重问）：终端里等输入，别一直挂着"正在连接…"。
+    connect(tab, &SshSessionTab::awaitingPassword, this, [this]() {
+        setStatus(tr("请在终端中输入密码…"));
+    });
 
     bindMonitorToTab(tab);
     tab->connectToHost();
@@ -2738,13 +2750,22 @@ void MainWindow::openRdpTab(const RdpSettings &settings)
         }
     });
 
-    if (!resolved.host.isEmpty()) {
+    // 密码非必填（见 AddDeviceDialog::validate）：没存密码就只把面板摊开，
+    // 让用户在表单里现填后自己点「连接」（回车也行）——RDP 没有终端可以像
+    // SSH 那样就地问，而弹对话框是用户明确否掉的做法。
+    const bool needPassword = resolved.password.isEmpty();
+    if (!resolved.host.isEmpty() && !needPassword) {
         setStatus(tr("正在连接 RDP %1:%2…").arg(resolved.host).arg(resolved.port));
         // 直接以完整参数建连：面板的分辨率下拉框只有固定档位，动态计算出的
         // 分辨率不经表单回读，避免被就近档位截断。
         client->connectToHost(resolved);
+    } else if (!resolved.host.isEmpty()) {
+        setStatus(tr("请输入 RDP 密码后点击连接"));
     }
     panel->setFocus();
+    // 必须在 panel->setFocus() 之后：否则焦点被面板抢回去，光标就不在密码框里了。
+    if (!resolved.host.isEmpty() && needPassword)
+        panel->promptForPassword();
 }
 
 #endif // CUBESHELL_WITH_RDP

@@ -41,6 +41,11 @@ public:
     // 外部（如 URL 分发）预填表单。
     void setSettings(const RdpSettings &settings);
 
+    // 配置里没存密码时调用：把焦点放到密码框并在状态栏提示。
+    // RDP 是图形画面，没有终端可以就地问密码（SSH 走 TerminalPrompt），
+    // 所以复用面板本来就有的连接前表单，不额外弹对话框。
+    void promptForPassword();
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
     // --- 输入事件（对应Python: RDPWidget 的 keyPressEvent/mouse*/wheelEvent/drop） ---

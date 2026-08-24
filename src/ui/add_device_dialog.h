@@ -51,8 +51,8 @@ public:
     bool passwordEdited() const { return m_passwordEdited; }
 
     // 告知对话框：这个设备在钥匙串里已经存有密码。
-    // 于是密码框可以留空（占位符提示"留空则不修改"），校验也不再强制要求填写
-    // ——否则迁移一完成，所有 RDP 设备都会因为密码框是空的而无法保存。
+    // 于是密码框可以留空，占位符提示"留空则不修改"（区别于新建时的
+    // "留空则在连接时输入"）。密码本身不再是必填项——见 validate()。
     void setHasStoredPassword(bool has);
 
     // 注入「按 id 取已存密码」的回调（由持有 DeviceConfigStore 的 MainWindow 提供）。

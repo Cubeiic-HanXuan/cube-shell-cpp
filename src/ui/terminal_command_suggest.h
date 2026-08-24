@@ -48,6 +48,12 @@ public:
     // 对应Python: SSHQTermWidget.eventFilter KeyPress 分支 (L7418-7445)
     bool eventFilter(QObject *obj, QEvent *event) override;
 
+    // 暂停/恢复提示。暂停期间不跟踪输入、不弹候选、不写历史——SSH 连接前
+    // 在终端里问密码（TerminalPrompt）时必须暂停：那一次 Enter 会把提示符
+    // 那行当成命令写进历史，候选弹窗也不该压在密码提示上。
+    void setPaused(bool paused);
+    bool paused() const { return m_paused; }
+
 private slots:
     // 终端按键事件（来自 QTermWidget::termKeyPressed）。
     // 对应Python: _on_term_key_pressed (L7463-7528)
@@ -104,6 +110,7 @@ private:
     QString m_inputBuffer;                       // 尽力而为的本地输入缓冲
     QString m_lastInput;                         // 上次触发弹窗的输入（去重）
     qint64 m_lastDeleteMs = 0;                   // 上次删除键时间戳（毫秒）
+    bool m_paused = false;                       // 暂停中（见 setPaused）
 };
 
 } // namespace cubeshell

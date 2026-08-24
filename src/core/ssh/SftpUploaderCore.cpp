@@ -815,9 +815,26 @@ void SftpUploaderCore::workerUpload(const WorkerContextPtr &ctx, const QString &
         });
     };
 
+    // 取消同样必须给一个终态信号。上层（SftpBrowserWidget）的在传记账
+    // m_activeUploads、进度条、状态栏文案、取消按钮的显隐，全都只在
+    // uploadCompleted / uploadFailed 的处理里收尾；取消时一声不响地退出，
+    // 传输确实停了，但界面永远停在取消那一刻——进度条不消失、状态栏还写着
+    // "正在上传"、取消按钮一直亮着，而工作线程收尾时已经把取消标志摘掉了
+    // （见函数末尾），再点一次 cancelUpload 直接查不到条目、静默返回。
+    // 从用户角度看就是"点取消没反应"。
+    //
+    // 走 uploadFailed 而不是新增 uploadCancelled 信号：上层早就按这个约定
+    // 写好了——消息里带"已取消"就当成用户主动取消、不报错（不算失败，
+    // 断点续传元数据保留）。这里补的正是它一直在等的那个信号。
+    auto emitCancelled = [&emitFailed] {
+        emitFailed(QStringLiteral("上传已取消"));
+    };
+
     do {
-        if (cancel->load())
+        if (cancel->load()) {
+            emitCancelled();
             break; // 入队后未开始就被取消
+        }
 
         if (!QFile::exists(localPath)) {
             emitFailed(QStringLiteral("本地文件不存在: %1").arg(localPath));
@@ -841,8 +858,10 @@ void SftpUploaderCore::workerUpload(const WorkerContextPtr &ctx, const QString &
 
         // 空文件：无分片可传，直接创建远端空文件并报完成。
         if (totalSize == 0) {
-            if (cancel->load())
+            if (cancel->load()) {
+                emitCancelled();
                 break;
+            }
             QString err;
             if (!createEmptyRemoteFile(ctx, remotePath, err)) {
                 emitFailed(err);
@@ -903,8 +922,13 @@ void SftpUploaderCore::workerUpload(const WorkerContextPtr &ctx, const QString &
             }
         }
 
-        if (cancel->load())
-            break; // 取消：保留元数据供下次续传
+        if (cancel->load()) {
+            // 取消：保留元数据供下次续传。注意这个检查在 hasFailed 之前——
+            // 取消途中各条流大多会带着 writeChunk 的"上传已取消"进 setFailed，
+            // 那属于取消的副产物，不该报成传输失败。
+            emitCancelled();
+            break;
+        }
 
         if (state.hasFailed()) {
             emitFailed(state.error);

@@ -867,6 +867,7 @@ void SftpBrowserWidget::uploadFiles()
 // 对应Python: sftp_uploader_core.py::upload_file
 void SftpBrowserWidget::enqueueUpload(const QString &local, const QString &remote)
 {
+    m_cancelPending = false;   // 新一轮传输：取消闸门复位（见 updateCancelButton）
     m_activeUploads.insert(remote, UploadProgress{0, QFileInfo(local).size()});
     m_uploader->uploadFile(remote, local, remote);
 }
@@ -1004,6 +1005,7 @@ void SftpBrowserWidget::downloadSelected()
         if (local.isEmpty())
             return;
         m_progress->setVisible(true);
+        m_cancelPending = false;   // 新一轮传输：取消闸门复位
         m_activeDownloads.insert(files.first(), UploadProgress{0, 0});
         updateCancelButton();
         m_sftp->download(files.first(), local);
@@ -1031,6 +1033,7 @@ void SftpBrowserWidget::dispatchNextDownload()
     if (m_downloadQueue.isEmpty())
         return;
     const DownloadTask task = m_downloadQueue.dequeue();
+    m_cancelPending = false;   // 新一轮传输：取消闸门复位
     m_activeDownloads.insert(task.remote, UploadProgress{0, 0});
     updateCancelButton();
     m_sftp->download(task.remote, task.local);
@@ -1071,15 +1074,28 @@ void SftpBrowserWidget::updateCancelButton()
 {
     if (!m_cancelBtn)
         return;
-    m_cancelBtn->setVisible(!m_activeUploads.isEmpty()
-                            || !m_activeDownloads.isEmpty()
-                            || !m_downloadQueue.isEmpty());
+    const bool busy = !m_activeUploads.isEmpty()
+                      || !m_activeDownloads.isEmpty()
+                      || !m_downloadQueue.isEmpty();
+    // 在传集合排空 = 上一次取消已经收敛，闸门复位，下一轮传输的取消按钮可用。
+    if (!busy)
+        m_cancelPending = false;
+    m_cancelBtn->setVisible(busy);
+    // 取消已请求但还没停稳：置灰。工作线程只在分片边界看取消标志，正在飞的
+    // 那片 4MB 写完才停，这中间按钮若还是可点的，用户会以为没生效而反复点。
+    m_cancelBtn->setEnabled(!m_cancelPending);
+    m_cancelBtn->setToolTip(m_cancelPending
+                                ? tr("正在取消，等待当前分片结束…")
+                                : tr("取消传输（已传部分保留，可断点续传）"));
 }
 
 // 取消全部在传传输。取消即"暂停"：下载/上传都支持断点续传，半成品文件
 // 保留，重新传输自动从断点继续。
 void SftpBrowserWidget::cancelTransfers()
 {
+    // 已经请求过、还没收敛：忽略重复点击（按钮此时也是置灰的）。
+    if (m_cancelPending)
+        return;
     // 下载：清空批量队列（整批取消），再取消当前在传文件。
     m_downloadQueue.clear();
     if (m_sftp)
@@ -1089,6 +1105,13 @@ void SftpBrowserWidget::cancelTransfers()
         const QList<QString> ids = m_activeUploads.keys();
         for (const QString &fileId : ids)
             m_uploader->cancelUpload(fileId);
+    }
+    // 立刻给反馈：真正停下来要等分片边界（大文件分片下可达数秒），期间
+    // 状态栏若还写着"正在上传 … 87%"，看着就像这一下没点着。
+    const bool busy = !m_activeUploads.isEmpty() || !m_activeDownloads.isEmpty();
+    if (busy) {
+        m_cancelPending = true;
+        setStatusText(tr("正在取消传输…"));
     }
     updateCancelButton();
 }

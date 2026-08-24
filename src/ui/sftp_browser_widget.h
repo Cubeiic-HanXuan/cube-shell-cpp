@@ -193,6 +193,10 @@ private:
     // 有在传传输时显示取消按钮，空闲时隐藏。所有改变 m_activeUploads /
     // m_activeDownloads / m_downloadQueue 的路径末尾都要调。
     void updateCancelButton();
+    // 已请求取消、但在传任务还没收敛完。取消不是瞬时的（上传工作线程只在
+    // 4MB 分片边界看标志），这段窗口里按钮置灰防重复点击；在传集合排空时
+    // 自动复位，新起一轮传输也复位（见 enqueueUpload / dispatchNextDownload）。
+    bool m_cancelPending = false;
 
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_paneBadge = nullptr;     // 路径栏左侧的分屏序号圆角徽章

@@ -241,37 +241,65 @@ static void testPythonInterop(const QString &tmpDir)
 
 // 取消标志（不依赖网络：未设置 SshClient 时任务会立刻失败退出）。
 // 对应Python: cancel_upload / stop_events
+//
+// 这里同时守住一条不变量：**每个上传任务都必须以恰好一个终态信号收场**
+// （uploadCompleted 或 uploadFailed）。取消路径曾经静默 break 掉、什么都不发，
+// 于是 SftpBrowserWidget 的 m_activeUploads / 进度条 / 取消按钮永远不复位，
+// 表现为"点了取消没反应"。
 static void testCancelFlag(const QString &tmpDir)
 {
     const QString localPath = QDir(tmpDir).filePath(QStringLiteral("cancel_src.bin"));
     CHECK(writeTestFile(localPath, 1024));
 
-    SftpUploaderCore uploader; // 无 SshClient
-    uploader.setMetadataDir(QDir(tmpDir).filePath(QStringLiteral("meta_cancel")));
-
+    SftpUploaderCore probe; // 无 SshClient
+    probe.setMetadataDir(QDir(tmpDir).filePath(QStringLiteral("meta_cancel")));
     // 未知 fileId -> 未请求取消。
-    CHECK(!uploader.isCancelRequested(QStringLiteral("nope")));
+    CHECK(!probe.isCancelRequested(QStringLiteral("nope")));
 
-    bool completed = false;
-    QString failMsg;
-    QObject::connect(&uploader, &SftpUploaderCore::uploadCompleted,
-                     [&completed](const QString &, const QString &) { completed = true; });
-    QObject::connect(&uploader, &SftpUploaderCore::uploadFailed,
-                     [&failMsg](const QString &, const QString &, const QString &e) {
-                         failMsg = e;
-                     });
+    // 多跑几轮：取消是在"任务入队后、工作线程读取消标志前"这个窗口里发出的，
+    // 谁先到没有保证。轮数多了两种落点都会被覆盖到，而不变量对两种都成立。
+    int cancelledRounds = 0;
+    for (int round = 0; round < 8; ++round) {
+        SftpUploaderCore uploader; // 无 SshClient
+        uploader.setMetadataDir(QDir(tmpDir).filePath(QStringLiteral("meta_cancel")));
 
-    const QString fileId = QStringLiteral("cancel_id");
-    uploader.uploadFile(fileId, localPath, QStringLiteral("/tmp/cancel_dst.bin"));
-    uploader.cancelUpload(fileId); // 立即取消（可能在任务开始前/后）
-    CHECK(uploader.waitForFinished(10000));
-    spin(200); // 让 QueuedConnection 的信号落地
+        int completedCount = 0;
+        int failedCount = 0;
+        QString failMsg;
+        QObject::connect(&uploader, &SftpUploaderCore::uploadCompleted,
+                         [&completedCount](const QString &, const QString &) {
+                             ++completedCount;
+                         });
+        QObject::connect(&uploader, &SftpUploaderCore::uploadFailed,
+                         [&failedCount, &failMsg](const QString &, const QString &,
+                                                  const QString &e) {
+                             ++failedCount;
+                             failMsg = e;
+                         });
 
-    // 取消或"未设置客户端"都不应产生 completed。
-    CHECK(!completed);
-    // 任务结束后取消标志已被清理。
-    CHECK(!uploader.isCancelRequested(fileId));
-    qInfo() << "cancel path failMsg:" << failMsg;
+        const QString fileId = QStringLiteral("cancel_id");
+        uploader.uploadFile(fileId, localPath, QStringLiteral("/tmp/cancel_dst.bin"));
+        uploader.cancelUpload(fileId); // 立即取消（可能在任务开始前/后）
+        CHECK(uploader.waitForFinished(10000));
+        spin(200); // 让 QueuedConnection 的信号落地
+
+        // 取消或"未设置客户端"都不应产生 completed。
+        CHECK(completedCount == 0);
+        // 核心不变量：必须收到恰好一个终态信号。取消时一声不响地退出，
+        // 就是这个 bug 的根（上层据此收尾在传记账与取消按钮）。
+        CHECK(failedCount == 1);
+        // 任务结束后取消标志已被清理。
+        CHECK(!uploader.isCancelRequested(fileId));
+
+        // 取消先到时，消息必须带"已取消"——上层就是靠这个子串把用户主动取消
+        // 与真正的传输失败区分开（见 SftpBrowserWidget 的 uploadFailed 接线），
+        // 措辞改了会让取消被报成"上传失败"。
+        if (failMsg.contains(QStringLiteral("取消"))) {
+            ++cancelledRounds;
+            CHECK(failMsg.contains(QStringLiteral("已取消")));
+        }
+    }
+    qInfo() << "cancel path: cancel-won rounds =" << cancelledRounds << "/ 8";
 }
 
 // --------------------------------------------------------------------------

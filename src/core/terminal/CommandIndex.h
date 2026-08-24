@@ -22,9 +22,9 @@ class CommandIndex {
 public:
     CommandIndex() = default;
 
-    // 加载 conf/linux_commands.json 并合并内置表。jsonPath 为空时按
-    // appDir/conf → appDir/../Resources/conf → cwd/conf → 源码树 conf/
-    // 顺序自动探测（与 LinuxCommandsDialog::resolveCommandsFile 一致）。
+    // 加载 conf/linux_commands.json 并合并内置表。jsonPath 为空时走
+    // FrequentlyUsedCommands::defaultPath() 探测（磁盘 conf/ 优先，
+    // 打包产物里落到编进二进制的 :/conf/linux_commands.json）。
     // 返回值仅表示 JSON 是否加载成功；内置表始终会被合并。
     // 对应Python: function/ssh_prompt_client.py::load_linux_commands
     bool load(const QString &jsonPath = QString());

@@ -32,6 +32,16 @@ class FrequentlyUsedCommands {
 public:
     FrequentlyUsedCommands() = default;
 
+    // linux_commands.json 的运行期定位（LinuxCommandsDialog 与 CommandIndex 共用）：
+    //   应用目录/conf → macOS bundle 的 Contents/Resources/conf →
+    //   安装布局 <prefix>/share/cube-shell/conf → cwd/conf →
+    //   源码树 conf/（开发期，CMake 注入 CUBESHELL_SOURCE_CONF_DIR）→
+    //   编进二进制的 ":/conf/linux_commands.json"（conf/conf.qrc）。
+    // 磁盘副本优先，用户在应用旁放一份 conf/linux_commands.json 即可覆盖内置
+    // 数据；打包产物不带 conf/ 目录，靠最后的 qrc 兜底，故返回值永不为空。
+    // 对应Python: function/ssh_prompt_client.py::_default_linux_commands_path
+    static QString defaultPath();
+
     // 对应Python: core/frequently_used_commands.py::TreeSearchApp.load_data_from_json
     bool load(const QString &filePath, QString *errorOut = nullptr);
 

@@ -120,6 +120,12 @@ static void testFrequentlyUsedCommands()
     CHECK(!cmds.isEmpty());
 
     // The real data has a category row with children ("文件管理" -> cat...).
+    // 空树时 first() 是未定义行为，先记一次失败再退出，别把整个用例带崩。
+    if (cmds.isEmpty()) {
+        qWarning() << "FAIL: conf/linux_commands.json 不可读，后续断言跳过";
+        ++failures;
+        return;
+    }
     CHECK(cmds.entries().first().hasChildren());
     const CommandEntry *cat = cmds.find(QStringLiteral("cat"));
     CHECK(cat != nullptr);
@@ -153,6 +159,26 @@ static void testFrequentlyUsedCommands()
         CHECK(root.value(QStringLiteral("treeData")).isArray());
     }
     QFile::remove(tmp);
+}
+
+// 打包产物（macOS .app / Windows 安装包 / 鸿蒙 HAP）里没有 conf/ 目录，
+// 「Linux常用命令查找」曾因此只显示「未找到 linux_commands.json」。命令库现在
+// 编进二进制（conf/conf.qrc），这里校验内置副本确实在、且能解析出真实数据。
+static void testEmbeddedCommandsResource()
+{
+    FrequentlyUsedCommands embedded;
+    QString err;
+    CHECK(embedded.load(QStringLiteral(":/conf/linux_commands.json"), &err));
+    CHECK(err.isEmpty());
+    CHECK(!embedded.isEmpty());
+    CHECK(embedded.find(QStringLiteral("cat")) != nullptr);
+
+    // 探测兜底到 qrc，永不返回空路径 —— 对话框因此不会再落到失败分支。
+    const QString resolved = FrequentlyUsedCommands::defaultPath();
+    CHECK(!resolved.isEmpty());
+    FrequentlyUsedCommands byDefault;
+    CHECK(byDefault.load(resolved, &err));
+    CHECK(!byDefault.isEmpty());
 }
 
 static void testConfigUtil()
@@ -267,6 +293,7 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
     testGroupManager();
+    testEmbeddedCommandsResource();
     testFrequentlyUsedCommands();
     testConfigUtil();
     testGlobalState();

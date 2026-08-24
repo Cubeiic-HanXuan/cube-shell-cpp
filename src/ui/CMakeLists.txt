@@ -83,11 +83,10 @@ target_link_libraries(cube_ui PUBLIC
     cube_core
 )
 
-# LinuxCommandsDialog 在开发环境下回退到源码树的 conf/linux_commands.json
-#（与 cube_core 的 AiPreferences 探测方式一致）。CUBESHELL_RESOURCE_DIR 指向
-# 源码树 resources/，供 LanguageManager 开发期探测翻译文件。
+# CUBESHELL_RESOURCE_DIR 指向源码树 resources/，供 LanguageManager 开发期探测
+# 翻译文件。（命令库 conf/linux_commands.json 的探测已下移到 cube_core 的
+# FrequentlyUsedCommands::defaultPath()，这里不再需要 CUBESHELL_SOURCE_CONF_DIR。）
 target_compile_definitions(cube_ui PRIVATE
-    CUBESHELL_SOURCE_CONF_DIR="${CMAKE_SOURCE_DIR}/conf"
     CUBESHELL_RESOURCE_DIR="${CMAKE_SOURCE_DIR}/resources"
 )
 

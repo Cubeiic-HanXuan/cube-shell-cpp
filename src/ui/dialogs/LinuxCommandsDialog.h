@@ -23,7 +23,7 @@ namespace cubeshell {
 class LinuxCommandsDialog : public QDialog {
     Q_OBJECT
 public:
-    // jsonPath 为空时按 应用目录/conf → cwd/conf → 源码树 conf 顺序探测。
+    // jsonPath 为空时走 FrequentlyUsedCommands::defaultPath() 探测。
     explicit LinuxCommandsDialog(QWidget *parent = nullptr,
                                  const QString &jsonPath = QString());
 
@@ -34,7 +34,6 @@ private slots:
 private:
     void rebuildTree(const QString &searchText);
     void addEntries(QTreeWidgetItem *parent, const QList<CommandEntry> &entries);
-    static QString resolveCommandsFile();
 
     FrequentlyUsedCommands m_commands;
     QLineEdit *m_search = nullptr;

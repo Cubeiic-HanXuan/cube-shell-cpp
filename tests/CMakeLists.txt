@@ -42,6 +42,9 @@ target_link_libraries(config_store_test PRIVATE
 # GroupManager / FrequentlyUsedCommands / ConfigUtil / GlobalState / Secrets test.
 qt_add_executable(config_group_test
     config_group_test.cpp
+    # 命令库的内置副本（打包产物里 conf/ 不存在时的兜底），一并编进测试可执行
+    # 文件，testEmbeddedCommandsResource 校验它确实在。
+    ${CMAKE_SOURCE_DIR}/conf/conf.qrc
 )
 target_include_directories(config_group_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core

@@ -4,9 +4,6 @@
 
 #include "CommandIndex.h"
 
-#include <QCoreApplication>
-#include <QDir>
-#include <QFileInfo>
 #include <QRegularExpression>
 #include <QRegularExpressionMatchIterator>
 #include <QSet>
@@ -16,29 +13,6 @@
 #include "config/FrequentlyUsedCommands.h"
 
 namespace cubeshell {
-
-// conf/linux_commands.json 探测顺序与 LinuxCommandsDialog::resolveCommandsFile
-// 一致：应用目录 → macOS bundle Resources → cwd → 源码树（CMake 注入）。
-// core 不依赖 ui，故在此重复实现同一逻辑。
-// 对应Python: function/ssh_prompt_client.py::_default_linux_commands_path
-static QString resolveCommandsFile()
-{
-    const QString fileName = QStringLiteral("linux_commands.json");
-    const QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates;
-    candidates << appDir + QStringLiteral("/conf/") + fileName
-               << appDir + QStringLiteral("/../Resources/conf/") + fileName
-               << QDir::currentPath() + QStringLiteral("/conf/") + fileName;
-#ifdef CUBESHELL_SOURCE_CONF_DIR
-    // Dev tree: cpp/build/... -> repo root conf/ (source layout, CMake 注入).
-    candidates << QStringLiteral(CUBESHELL_SOURCE_CONF_DIR "/") + fileName;
-#endif
-    for (const QString &path : candidates) {
-        if (QFileInfo::exists(path))
-            return QFileInfo(path).absoluteFilePath();
-    }
-    return QString();
-}
 
 // 从 option 文本中提取形如 -x / --xxx 的选项集合。
 // 对应Python: function/ssh_prompt_client.py::_extract_options (L15-23)
@@ -282,13 +256,12 @@ bool CommandIndex::load(const QString &jsonPath)
 
     // 1. JSON 树（失败时静默跳过，内置表仍可用 — 对应 Python 的 try/except pass）
     bool jsonOk = false;
-    const QString path = jsonPath.isEmpty() ? resolveCommandsFile() : jsonPath;
-    if (!path.isEmpty()) {
-        FrequentlyUsedCommands tree;
-        if (tree.load(path)) {
-            collectFromTree(tree.entries(), commands, options);
-            jsonOk = true;
-        }
+    const QString path =
+        jsonPath.isEmpty() ? FrequentlyUsedCommands::defaultPath() : jsonPath;
+    FrequentlyUsedCommands tree;
+    if (tree.load(path)) {
+        collectFromTree(tree.entries(), commands, options);
+        jsonOk = true;
     }
 
     // 2. 合并内置表（对应 Python L139-141）

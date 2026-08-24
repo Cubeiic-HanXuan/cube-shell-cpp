@@ -2,13 +2,41 @@
 
 #include "FrequentlyUsedCommands.h"
 
+#include <QCoreApplication>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
 
 namespace cubeshell {
+
+// 探测顺序见头文件。最后一项是编进二进制的副本（conf/conf.qrc），QFile 能像
+// 普通文件一样读 ":/" 路径，因此 load() 无需为它做任何特殊处理。
+QString FrequentlyUsedCommands::defaultPath()
+{
+    const QString fileName = QStringLiteral("linux_commands.json");
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates;
+    candidates << appDir + QStringLiteral("/conf/") + fileName
+               // macOS bundle: Contents/MacOS -> Contents/Resources/conf/
+               << appDir + QStringLiteral("/../Resources/conf/") + fileName
+               // 安装布局: <prefix>/bin -> <prefix>/share/cube-shell/conf/
+               //（CMakeLists.txt 的 install(DIRECTORY conf/) 就装在这里）
+               << appDir + QStringLiteral("/../share/cube-shell/conf/") + fileName
+               << QDir::currentPath() + QStringLiteral("/conf/") + fileName;
+#ifdef CUBESHELL_SOURCE_CONF_DIR
+    // 开发期: build/bin/... -> 源码树 conf/（CMake 注入）。
+    candidates << QStringLiteral(CUBESHELL_SOURCE_CONF_DIR "/") + fileName;
+#endif
+    for (const QString &path : candidates) {
+        if (QFileInfo::exists(path))
+            return QFileInfo(path).absoluteFilePath();
+    }
+    return QStringLiteral(":/conf/") + fileName;
+}
 
 // 对应Python: core/frequently_used_commands.py::TreeSearchApp.add_items (JSON -> 树)
 static QList<CommandEntry> parseEntries(const QJsonArray &arr)

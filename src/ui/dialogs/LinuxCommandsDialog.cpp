@@ -4,9 +4,6 @@
 #include "LinuxCommandsDialog.h"
 
 #include <QClipboard>
-#include <QCoreApplication>
-#include <QDir>
-#include <QFileInfo>
 #include <QGuiApplication>
 #include <QHeaderView>
 #include <QLabel>
@@ -43,11 +40,11 @@ LinuxCommandsDialog::LinuxCommandsDialog(QWidget *parent, const QString &jsonPat
     m_status = new QLabel(this);
     layout->addWidget(m_status);
 
-    const QString path = jsonPath.isEmpty() ? resolveCommandsFile() : jsonPath;
+    const QString path =
+        jsonPath.isEmpty() ? FrequentlyUsedCommands::defaultPath() : jsonPath;
     QString error;
-    if (path.isEmpty() || !m_commands.load(path, &error)) {
-        m_status->setText(tr("加载命令数据失败：%1")
-                              .arg(error.isEmpty() ? tr("未找到 linux_commands.json") : error));
+    if (!m_commands.load(path, &error)) {
+        m_status->setText(tr("加载命令数据失败：%1").arg(error));
         return;
     }
     rebuildTree(QString());
@@ -95,27 +92,6 @@ void LinuxCommandsDialog::addEntries(QTreeWidgetItem *parent,
         if (entry.hasChildren())
             addEntries(item, entry.children);
     }
-}
-
-// conf/linux_commands.json 探测顺序与 AiPreferences 的 conf 探测一致：
-// 应用目录 → macOS bundle Resources → cwd → 源码树（CMake 注入）。
-QString LinuxCommandsDialog::resolveCommandsFile()
-{
-    const QString fileName = QStringLiteral("linux_commands.json");
-    const QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates;
-    candidates << appDir + QStringLiteral("/conf/") + fileName
-               << appDir + QStringLiteral("/../Resources/conf/") + fileName
-               << QDir::currentPath() + QStringLiteral("/conf/") + fileName;
-#ifdef CUBESHELL_SOURCE_CONF_DIR
-    // Dev tree: cpp/build/... -> repo root conf/ (source layout, CMake 注入).
-    candidates << QStringLiteral(CUBESHELL_SOURCE_CONF_DIR "/") + fileName;
-#endif
-    for (const QString &path : candidates) {
-        if (QFileInfo::exists(path))
-            return QFileInfo(path).absoluteFilePath();
-    }
-    return QString();
 }
 
 } // namespace cubeshell

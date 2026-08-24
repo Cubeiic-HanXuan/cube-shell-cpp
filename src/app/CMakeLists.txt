@@ -15,6 +15,11 @@ qt_add_executable(cube-shell
     # cube_core。ThemeManager::styleSheet() 在资源缺失时会 qWarning 并回退到内置 QSS。
     ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
 
+    # 共享配置：conf/linux_commands.json（「Linux常用命令查找」的命令库）编进
+    # 二进制。打包产物不带 conf/ 目录，磁盘探测全落空时靠它兜底，见 conf/conf.qrc
+    # 与 FrequentlyUsedCommands::defaultPath()。同样挂在可执行目标上。
+    ${CMAKE_SOURCE_DIR}/conf/conf.qrc
+
     # 终端资源：把 src/qtermwidget/color-schemes/ 与 kb-layouts/ 编进二进制
     #（前缀 "/color-schemes"、"/kb-layouts"，见该 qrc 注释）。鸿蒙 HAP 无可探测
     # 的 resources/ 目录，主题/右键切主题依赖配色（问题2/3 的根因），方向键等

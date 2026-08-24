@@ -1,0 +1,22 @@
+<!DOCTYPE RCC>
+<!--
+  conf.qrc — 把运行期必需的共享配置编进二进制。
+
+  打包产物里没有 conf/ 目录：macOS .app 的 POST_BUILD 只往 Contents/Resources/
+  拷 resources/ 与 qtermwidget 资源，Windows/Linux 只拷可执行文件旁的
+  resources/，鸿蒙 HAP 更是没有可探测的文件系统目录。开发期靠编译期宏
+  CUBESHELL_SOURCE_CONF_DIR 指回源码树才凑巧能用，装到 /Applications 后
+  「Linux常用命令查找」就只剩「未找到 linux_commands.json」。
+
+  命令库是只读的随包数据（没有任何写入方），所以直接嵌进二进制；
+  FrequentlyUsedCommands::defaultPath() 仍先探测磁盘，用户想覆盖内置数据，
+  在应用旁放一份 conf/linux_commands.json 即可。
+
+  与 resources/icons/icons.qrc 等一致：挂在可执行目标上（见 src/app/
+  CMakeLists.txt），避开静态库里 Q_INIT_RESOURCE 被链接器丢弃的问题。
+-->
+<RCC version="1.0">
+  <qresource prefix="/conf">
+    <file>linux_commands.json</file>
+  </qresource>
+</RCC>

@@ -31,11 +31,13 @@ StatusBoxItem::StatusBoxItem(const QString &iconColor, const QString &iconChar,
         "border: none; padding: 0px;").arg(iconColor));
     layout->addWidget(m_iconLabel);
 
-    // 文字标签
+    // 文字标签。颜色用 palette(window-text) 跟随主题调色板：亮色主题下为深色、
+    // 暗色主题下为浅色，随 ThemeManager 应用主题自动切换。
+    // （此前硬编码 #cccccc，亮色主题浅底上几乎不可见。）
     m_textLabel = new QLabel(text, this);
     m_textLabel->setStyleSheet(QStringLiteral(
-        "color: #cccccc; background: transparent; border: none; "
-        "font-size: 11px; padding: 0px;"));
+        "color: palette(window-text); background: transparent; "
+        "border: none; font-size: 11px; padding: 0px;"));
     layout->addWidget(m_textLabel);
 }
 

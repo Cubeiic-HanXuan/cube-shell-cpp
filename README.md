@@ -24,7 +24,7 @@
 ### cube-shell有哪些功能？
 **1.设备列表**
 
-![](docs/images/1.png)
+<img src="docs/images/1.png" width="388" alt="设备列表">
 - 链接
 - 新增配置
 - 编辑配置
@@ -33,7 +33,8 @@
 
 **2.快捷菜单栏**
 
-![](docs/images/2.png)
+<img src="docs/images/2.png" width="388" alt="快捷菜单栏">
+
 - 文件
   - 新增配置
   - 新增SSH 隧道
@@ -82,8 +83,9 @@
 
 **3.支持sftp协议对文件的操作**
 
-![](docs/images/3.png)
-下载文件（支持批量下载）
+<img src="docs/images/3.png" width="388" alt="支持sftp协议对文件的操作">
+
+- 下载文件（支持批量下载）
 - 上传文件（支持批量上传）
 - 删除文件和文件夹（支持批量删除）
 - 编辑文件
@@ -93,7 +95,7 @@
 
 **4.支持ssh协议远程操作linux系统**
 
-![](docs/images/4.png)
+<img src="docs/images/4.png" width="588" alt="支持ssh协议远程操作linux系统">
 
 - 可以进行终端操作
 - 支持多标签（支持相同服务器）
@@ -110,12 +112,15 @@
 **5.主题切换**
 
 支持两种主题切换，暗主题和亮主题两种
-![](docs/images/5.png)
-![](docs/images/6.png)
+
+<img src="docs/images/5.png" width="588" alt="主题切换">
+
+<img src="docs/images/6.png" width="588" alt="主题切换">
 
 **6.状态栏**
 
-![](docs/images/7.png)
+<img src="docs/images/7.png" width="588" alt="状态栏">
+
 - CPU 监控
 - 内存监控
 - 磁盘监控

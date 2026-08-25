@@ -81,8 +81,6 @@
 #include "url_dispatch/BastionClient.h"
 #ifdef CUBESHELL_WITH_RDP
 #include "rdp/RdpPanel.h"
-#include <QGuiApplication>
-#include <QScreen>
 #endif
 #ifdef CUBESHELL_WITH_SERIAL
 #include "serial_terminal_widget.h"
@@ -2572,7 +2570,7 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
         settings.username = device.username;
         settings.password = device.password;
         settings.domain = device.domain;
-        openRdpTab(settings);   // openRdpTab 内部用 computeRdpTargetResolution 计算分辨率
+        openRdpTab(settings);   // 分辨率由 RdpPanel 决定（设备配置里没有这个字段）
 #else
         QMessageBox::warning(this, tr("RDP"),
                              tr("当前构建未启用 RDP 支持（CUBESHELL_WITH_RDP=OFF）。"));
@@ -2672,48 +2670,26 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
 
 #ifdef CUBESHELL_WITH_RDP
 
-namespace {
-
-// 计算 RDP 连接分辨率：主屏物理像素（逻辑尺寸×设备像素比）÷ 显示缩放系数 2
-//（Retina 高分屏直接用满物理像素会让远程内容过小），夹在 [1280x800, 4096x2304]
-// 区间内后宽对齐 4、高对齐 2（RDP 协议要求）。
-// 对应Python: cube-shell.py::RDP_DISPLAY_SCALE + _rdp_target_resolution（行 1612-1637）
-RdpSettings computeRdpTargetResolution(RdpSettings settings)
-{
-    int w = 1920, h = 1080;   // 取不到屏幕信息时的回退值
-    if (QScreen *screen = QGuiApplication::primaryScreen()) {
-        const QRect geo = screen->geometry();
-        const qreal dpr = screen->devicePixelRatio();
-        w = int(geo.width() * dpr / 2.0);
-        h = int(geo.height() * dpr / 2.0);
-    }
-    w = qMax(1280, qMin(w, 4096));
-    h = qMax(800, qMin(h, 2304));
-    w -= w % 4;
-    h -= h % 2;
-    settings.width = w;
-    settings.height = h;
-    return settings;
-}
-
-} // namespace
-
 // 打开 RDP 远程桌面标签页。host 为空（“新建 RDP 连接”菜单）时只建空白面板，
 // 用户填好表单后自行点“连接”；host 非空（rdp:// URL 分发）则立即建连。
 // 对应Python: cube-shell.py::add_new_rdp_tab（行 1589-1610）+ open_rdp_tab（行 1640-1691）
 // 注：Python 版还支持从设备列表打开 protocol == "rdp" 的设备；C++ 侧
 // 由 openSshSession 按 DeviceEntry::isRdp() 分流到本方法（见上方分发逻辑）。
+//
+// 分辨率不在这里算：面板自己按画布尺寸/用户选择决定（RdpPanel::targetResolution）。
+// 这里曾有个 computeRdpTargetResolution()，把主屏物理像素 ÷2 再夹进 [1280x800,…]
+// ——那个 ÷2 是照搬 Python 的 RDP_DISPLAY_SCALE=2（只对 dpr=2 的 Retina 成立），
+// 在 dpr=1 的普通屏上一律砍成 1280x800，正是用户反馈"分辨率太低"的根因；
+// 而且它算出的值与面板下拉框互不相干，改了下拉框也不生效。
 void MainWindow::openRdpTab(const RdpSettings &settings)
 {
-    const RdpSettings resolved = computeRdpTargetResolution(settings);
-
     auto *panel = new RdpPanel(this);
-    panel->setSettings(resolved);
+    panel->setSettings(settings);   // 只喂凭据
 
     // Tab 标题 "RDP: hostname"；空白面板先用占位名，连上后按实际主机改名。
-    const QString title = resolved.host.isEmpty()
+    const QString title = settings.host.isEmpty()
                               ? tr("RDP 连接")
-                              : QStringLiteral("RDP: %1").arg(resolved.host);
+                              : QStringLiteral("RDP: %1").arg(settings.host);
     TerminalTabWidget *pane = targetPane();
     const int idx = pane->addTab(panel, title);
     decorateSessionTab(pane, idx);
@@ -2753,18 +2729,19 @@ void MainWindow::openRdpTab(const RdpSettings &settings)
     // 密码非必填（见 AddDeviceDialog::validate）：没存密码就只把面板摊开，
     // 让用户在表单里现填后自己点「连接」（回车也行）——RDP 没有终端可以像
     // SSH 那样就地问，而弹对话框是用户明确否掉的做法。
-    const bool needPassword = resolved.password.isEmpty();
-    if (!resolved.host.isEmpty() && !needPassword) {
-        setStatus(tr("正在连接 RDP %1:%2…").arg(resolved.host).arg(resolved.port));
-        // 直接以完整参数建连：面板的分辨率下拉框只有固定档位，动态计算出的
-        // 分辨率不经表单回读，避免被就近档位截断。
-        client->connectToHost(resolved);
-    } else if (!resolved.host.isEmpty()) {
+    const bool needPassword = settings.password.isEmpty();
+    if (!settings.host.isEmpty() && !needPassword) {
+        setStatus(tr("正在连接 RDP %1:%2…").arg(settings.host).arg(settings.port));
+        // 走面板的唯一建连入口，分辨率由它统一决定（显示值 == 连接值）。
+        // 必须延后一轮事件循环：标签页刚 addTab 还没走布局，面板画布此刻是
+        // 假尺寸，「适应窗口」会量出一个远小于实际的分辨率。
+        QTimer::singleShot(0, panel, &RdpPanel::beginConnect);
+    } else if (!settings.host.isEmpty()) {
         setStatus(tr("请输入 RDP 密码后点击连接"));
     }
     panel->setFocus();
     // 必须在 panel->setFocus() 之后：否则焦点被面板抢回去，光标就不在密码框里了。
-    if (!resolved.host.isEmpty() && needPassword)
+    if (!settings.host.isEmpty() && needPassword)
         panel->promptForPassword();
 }
 

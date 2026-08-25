@@ -385,7 +385,7 @@ private:
                                         m_settings.domain.toUtf8().constData());
         // 分辨率：0/负数或越界值同样会被上述 monitor 校验拿去构造监视器定义，
         // 故夹到协议允许区间并对齐（宽 4 的倍数、高 2 的倍数，与
-        // main_window::computeRdpTargetResolution 一致），再显式写入。
+        // RdpPanel::alignResolution 一致），再显式写入。
         int width = m_settings.width > 0 ? m_settings.width : 1920;
         int height = m_settings.height > 0 ? m_settings.height : 1080;
         width = qBound(200, width, 8192) & ~3;
@@ -1020,6 +1020,20 @@ void RdpClient::connectToHost(const RdpSettings &settings)
 #ifdef CUBESHELL_HAVE_FREERDP
     rdpLog(QStringLiteral("connectToHost: starting worker thread"));
     m_worker = new FreeRdpWorker(this, settings);
+    // 线程自己跑完（建连失败、服务端主动断开）时回收它：
+    //  · 不回收 → 下次 connectToHost 直接覆盖 m_worker，旧 QThread 对象永远
+    //    挂在 this 的子对象链上，反复重连就一路攒；
+    //  · 且 disconnectFromHost 会对着一条已经结束的线程白等 wait(3000)。
+    // "应用新分辨率 = 重连" 会在同一面板里反复建连，这条必须先干净。
+    // finished 从 worker 线程发出，经 this 回主线程；捕获的是这一条 worker，
+    // 只在 m_worker 还指着它时置空（disconnectFromHost 可能已换过一轮）。
+    FreeRdpWorker *worker = m_worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        rdpLog(QStringLiteral("worker finished: reclaiming thread object"));
+        if (m_worker == worker)
+            m_worker = nullptr;
+        worker->deleteLater();
+    }, Qt::QueuedConnection);
     m_worker->start();
 #else
     QStringList args;

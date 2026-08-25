@@ -5,7 +5,8 @@
 //   - WindowsIntegration : 平台支持判定（非 Windows 下 stub 语义）
 //   - UrlSchemeRegistrar : 默认 scheme 集合 / isRegistered 不崩不写
 //   - PlatformIntegration: 门面按平台分发与底层一致
-// CUBESHELL_WITH_RDP=ON 时额外覆盖 RDP 命令行参数不含明文密码。
+// CUBESHELL_WITH_RDP=ON 时额外覆盖 RDP 命令行参数不含明文密码，以及
+// RdpPanel 的分辨率夹取/解析（"分辨率太低" 那个 bug 的回归闸门）。
 //
 // 刻意**不**调用 install/register：那些会真实改动用户环境（~/Library/Services、
 // HKCU 注册表、~/.local/share/applications），单测只做只读探测。
@@ -23,6 +24,7 @@
 
 #ifdef CUBESHELL_WITH_RDP
 #include "rdp/RdpClient.h"
+#include "rdp/RdpPanel.h"
 #endif
 
 namespace {
@@ -183,6 +185,47 @@ void testRdp()
     (void)cubeshell::RdpClient::commandLineProgram();
     check(true, "commandLineProgram() 探测不崩溃");
 }
+
+// 分辨率夹取/解析（RdpPanel 的静态部分，纯函数，不建控件）。
+// 这是 "RDP 分辨率太低" 的回归闸门：旧实现把主屏物理像素 ÷2 后夹进
+// [1280x800, 4096x2304]，1080p 普通屏一律连成 1280x800。现在只做协议对齐，
+// 不再有任何"下限抬高"的动作。
+void testRdpResolution()
+{
+    using cubeshell::RdpPanel;
+    std::printf("RdpPanel 分辨率（夹取 + 解析）\n");
+
+    // 主流尺寸原样通过：不再被砍半、也不被抬到 1280x800
+    check(RdpPanel::alignResolution(QSize(1920, 1080)) == QSize(1920, 1080),
+          "1920x1080 原样保留");
+    check(RdpPanel::alignResolution(QSize(2560, 1440)) == QSize(2560, 1440),
+          "2560x1440 原样保留");
+    // 典型的"最大化窗口"尺寸：宽已是 4 的倍数，高奇数 → 向下对齐到偶数
+    check(RdpPanel::alignResolution(QSize(1912, 997)) == QSize(1912, 996),
+          "1912x997 → 高对齐到 996");
+    check(RdpPanel::alignResolution(QSize(1366, 768)) == QSize(1364, 768),
+          "1366x768 → 宽对齐到 4 的倍数");
+    // 越界夹取：小窗口/巨屏都收进协议区间
+    check(RdpPanel::alignResolution(QSize(100, 50)) == QSize(640, 480),
+          "过小尺寸夹到 640x480");
+    check(RdpPanel::alignResolution(QSize(8000, 5000)) == QSize(4096, 2304),
+          "过大尺寸夹到 4096x2304");
+    check(RdpPanel::alignResolution(QSize(0, 0)) == QSize(640, 480),
+          "零尺寸夹到 640x480（画布还没布局时的兜底）");
+
+    // 解析：大小写 x、多余空格都收
+    check(RdpPanel::parseResolution(QStringLiteral("1920x1080")) == QSize(1920, 1080),
+          "解析 1920x1080");
+    check(RdpPanel::parseResolution(QStringLiteral("1920X1080")) == QSize(1920, 1080),
+          "解析大写 X");
+    check(RdpPanel::parseResolution(QStringLiteral(" 2560 x 1440 ")) == QSize(2560, 1440),
+          "解析带空格");
+    // 非法输入一律判无效（调用方退回"适应窗口"，绝不猜一个用户没要的尺寸）
+    for (const char *bad : {"", "abc", "1920", "1920x", "x1080", "0x0",
+                            "1920x1080x2", "1920*1080"})
+        check(!RdpPanel::parseResolution(QString::fromLatin1(bad)).isValid(),
+              "非法分辨率串判无效");
+}
 #endif // CUBESHELL_WITH_RDP
 
 } // namespace
@@ -197,6 +240,7 @@ int main(int argc, char *argv[])
     testPlatformIntegrationFacade();
 #ifdef CUBESHELL_WITH_RDP
     testRdp();
+    testRdpResolution();
 #endif
 
     if (g_failures == 0) {

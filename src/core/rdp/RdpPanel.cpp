@@ -3,6 +3,7 @@
 
 #include "RdpPanel.h"
 
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDragEnterEvent>
@@ -20,6 +21,9 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
+#include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTimer>
 #include <QUrl>
@@ -97,6 +101,60 @@ static constexpr quint16 PTR_FLAGS_WHEEL_NEGATIVE = 0x0100;
 static constexpr quint16 WHEEL_ROTATION_POSITIVE  = 0x0078;
 static constexpr quint16 WHEEL_ROTATION_NEGATIVE  = 0x0088;
 
+// ---------------------------------------------------------------------------
+// 分辨率
+// ---------------------------------------------------------------------------
+
+// QSettings 键（组织/应用名见 app/main.cpp 的 setOrganizationName）。
+// 命名沿用 ui/dialogs/SettingsDialog.cpp 的 "分组/键" 习惯。
+namespace {
+const char kFitToWindowKey[] = "rdp/fit_to_window";
+const char kResolutionKey[]  = "rdp/resolution";
+
+// 常用档位。可编辑下拉框，用户可直接手填任意 "宽x高"，这里只是省事的预设。
+const char *const kResolutionPresets[] = {
+    "1024x768", "1280x720",  "1280x800",  "1366x768",  "1440x900",  "1600x900",
+    "1680x1050", "1920x1080", "1920x1200", "2560x1440", "3840x2160",
+};
+
+// 与 RdpClient 里写入 settings 前的夹取区间保持一致。
+constexpr int kMinWidth  = 640;
+constexpr int kMinHeight = 480;
+constexpr int kMaxWidth  = 4096;
+constexpr int kMaxHeight = 2304;
+
+QString formatResolution(QSize size)
+{
+    return QStringLiteral("%1x%2").arg(size.width()).arg(size.height());
+}
+} // namespace
+
+QSize RdpPanel::alignResolution(QSize size)
+{
+    // 宽 4 的倍数、高 2 的倍数：[MS-RDPBCGR] 对桌面尺寸的要求，也与
+    // RdpClient::runConnection 里写入 FreeRDP_DesktopWidth/Height 前的夹取一致。
+    int w = qBound(kMinWidth, size.width(), kMaxWidth) & ~3;
+    int h = qBound(kMinHeight, size.height(), kMaxHeight) & ~1;
+    return QSize(w, h);
+}
+
+QSize RdpPanel::parseResolution(const QString &text)
+{
+    // "1920x1080" / "1920X1080" / " 1920 x 1080 " 都收。整串必须只有这两个数字，
+    // 否则宁可判非法退回 "适应窗口"，也不要猜出一个用户没想要的尺寸。
+    const QStringList parts = text.split(QLatin1Char('x'), Qt::SkipEmptyParts,
+                                         Qt::CaseInsensitive);
+    if (parts.size() != 2)
+        return QSize();
+    bool okW = false;
+    bool okH = false;
+    const int w = parts.at(0).trimmed().toInt(&okW);
+    const int h = parts.at(1).trimmed().toInt(&okH);
+    if (!okW || !okH || w <= 0 || h <= 0)
+        return QSize();
+    return QSize(w, h);
+}
+
 RdpPanel::RdpPanel(QWidget *parent)
     : QWidget(parent)
     , m_client(new RdpClient(this))
@@ -122,26 +180,46 @@ RdpPanel::RdpPanel(QWidget *parent)
     m_domainEdit = new QLineEdit(this);
     form->addRow(tr("域"), m_domainEdit);
 
+    // ---------------- 会话控制条（连接后不隐藏） ----------------
+    // 分辨率必须能在会话中改——"连上之后没有调整分辨率的位置" 是用户反馈的问题。
     m_resolutionCombo = new QComboBox(this);
-    m_resolutionCombo->addItems({
-        QStringLiteral("1024x768"),
-        QStringLiteral("1280x800"),
-        QStringLiteral("1440x900"),
-        QStringLiteral("1920x1080"),
-    });
-    m_resolutionCombo->setCurrentIndex(1);
-    form->addRow(tr("分辨率"), m_resolutionCombo);
+    m_resolutionCombo->setEditable(true);   // 档位之外可手填，如 "2048x1152"
+    m_resolutionCombo->setInsertPolicy(QComboBox::NoInsert);
+    for (const char *preset : kResolutionPresets)
+        m_resolutionCombo->addItem(QString::fromLatin1(preset));
+    m_resolutionCombo->setToolTip(tr("远程桌面分辨率，可直接输入 宽x高"));
 
-    // ---------------- 连接/断开 + 状态 ----------------
+    m_fitCheck = new QCheckBox(tr("适应窗口"), this);
+    m_fitCheck->setToolTip(tr("分辨率跟随面板尺寸：远端 1 像素对本地 1 像素，"
+                              "画面不经缩放最清晰"));
+
+    m_applyButton = new QPushButton(tr("应用"), this);
+    m_applyButton->setToolTip(tr("按新分辨率重连当前会话（RDP 无法在会话中直接改分辨率）"));
+    m_applyButton->setEnabled(false);
     m_connectButton = new QPushButton(tr("连接"), this);
     m_disconnectButton = new QPushButton(tr("断开"), this);
     m_disconnectButton->setEnabled(false);
-    auto *buttons = new QHBoxLayout();
-    buttons->addWidget(m_connectButton);
-    buttons->addWidget(m_disconnectButton);
-    buttons->addStretch();
+    // 按钮不收焦点：面板是 StrongFocus 的（键鼠要转发给远端），按钮抢了焦点后
+    // 空格/回车会打在按钮上而不是远程桌面。
+    for (QPushButton *b : {m_applyButton, m_connectButton, m_disconnectButton})
+        b->setFocusPolicy(Qt::NoFocus);
+    m_fitCheck->setFocusPolicy(Qt::NoFocus);
 
     m_statusLabel = new QLabel(tr("未连接"), this);
+    // 状态文字与控件同排：sizeHint 交给布局忽略，否则一条长状态
+    //（"…服务端未采用 1920x1080"）会把面板最小宽度顶起来，连带撑大主窗口。
+    m_statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
+    m_controlBar = new QWidget(this);
+    auto *controlLayout = new QHBoxLayout(m_controlBar);
+    controlLayout->setContentsMargins(6, 3, 6, 3);
+    controlLayout->addWidget(new QLabel(tr("分辨率"), m_controlBar));
+    controlLayout->addWidget(m_resolutionCombo);
+    controlLayout->addWidget(m_fitCheck);
+    controlLayout->addWidget(m_applyButton);
+    controlLayout->addWidget(m_connectButton);
+    controlLayout->addWidget(m_disconnectButton);
+    controlLayout->addWidget(m_statusLabel, /*stretch=*/1);
 
     // 画面显示区。对应Python: RDPWidget._label（等比缩放居中，深色底）
     m_canvas = new QLabel(this);
@@ -155,14 +233,14 @@ RdpPanel::RdpPanel(QWidget *parent)
     if (RdpClient::backend() == RdpClient::Backend::CommandLine)
         m_canvas->setText(tr("画面将在外部 RDP 客户端窗口中显示"));
 
-    // 表单区收进独立容器：连接成功后整体隐藏，断开/失败后恢复以便重连。
+    // 凭据表单收进独立容器：连接成功后整体隐藏（会话中这些字段改了也没用），
+    // 断开/失败后恢复以便重连。控制条与状态不在里面——见文件头说明。
     // 对应Python: RDPWidget 本身无表单（参数由 ShellTab 传入，断开靠关闭
     // 标签页），连接后整个标签页都是远程桌面画面
     m_formPanel = new QWidget(this);
     auto *formPanelLayout = new QVBoxLayout(m_formPanel);
+    formPanelLayout->setContentsMargins(6, 6, 6, 0);
     formPanelLayout->addLayout(form);
-    formPanelLayout->addLayout(buttons);
-    formPanelLayout->addWidget(m_statusLabel);
 
     // 外层零边距：表单隐藏后画布贴边占满面板
     // 对应Python: layout.setContentsMargins(0,0,0,0) + setSpacing(0) (lines 566-569)
@@ -170,6 +248,7 @@ RdpPanel::RdpPanel(QWidget *parent)
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(m_formPanel);
+    layout->addWidget(m_controlBar);
     layout->addWidget(m_canvas, /*stretch=*/1);
 
     // 帧合并定时器：16ms ≈ 60fps上限（对应Python: _repaint_timer lines 547-550）
@@ -180,12 +259,29 @@ RdpPanel::RdpPanel(QWidget *parent)
     connect(m_connectButton, &QPushButton::clicked, this, &RdpPanel::onConnectClicked);
     connect(m_disconnectButton, &QPushButton::clicked, this,
             &RdpPanel::onDisconnectClicked);
+    connect(m_applyButton, &QPushButton::clicked, this,
+            &RdpPanel::onApplyResolutionClicked);
     // 密码框里回车即连：密码留空的配置打开后光标就停在这儿
     //（见 promptForPassword），还要用鼠标去点"连接"太别扭。
     connect(m_passwordEdit, &QLineEdit::returnPressed, this, &RdpPanel::onConnectClicked);
+    // 勾选"适应窗口"时下拉框只作展示（值由画布尺寸决定），故禁用避免误导。
+    connect(m_fitCheck, &QCheckBox::toggled, this, [this](bool fit) {
+        m_resolutionCombo->setEnabled(!fit);
+        if (fit)
+            updateResolutionDisplay();
+        saveResolutionPrefs();
+    });
+    // 手填/选档位后立刻落盘：下次开标签页仍是用户要的值。currentTextChanged
+    // 同时覆盖"下拉选择"和"编辑框输入"两条路径。
+    connect(m_resolutionCombo, &QComboBox::currentTextChanged, this,
+            [this](const QString &) { saveResolutionPrefs(); });
     connect(m_client, &RdpClient::stateChanged, this, &RdpPanel::onStateChanged);
     connect(m_client, &RdpClient::errorOccurred, this, &RdpPanel::onError);
     connect(m_client, &RdpClient::frameUpdated, this, &RdpPanel::onFrameUpdated);
+
+    // 读取上次选择，再把生效值回填到下拉框（勾了"适应窗口"时显示量出来的尺寸）。
+    loadResolutionPrefs();
+    updateResolutionDisplay();
 
     // 输入事件接收配置（对应Python: RDPWidget.__init__ lines 571-574）
     setFocusPolicy(Qt::StrongFocus);
@@ -193,6 +289,94 @@ RdpPanel::RdpPanel(QWidget *parent)
     setAcceptDrops(true);
     setCursor(Qt::ArrowCursor);
 }
+
+// ---------------------------------------------------------------------------
+// 分辨率来源
+// ---------------------------------------------------------------------------
+
+QSize RdpPanel::fitResolution() const
+{
+    // 远端 1 像素 = 本地 1 逻辑像素：画面完全不经缩放，最清晰、无黑边。
+    // 高分屏上等于物理像素 ÷ dpr，正是 Python 版 RDP_DISPLAY_SCALE=2 想要的效果，
+    // 但不会误伤 dpr=1 的普通屏（旧的 main_window::computeRdpTargetResolution
+    // 无条件 ÷2，主流 1080p 上一律夹到 1280x800，就是"分辨率太低"的根因）。
+    QSize size = m_canvas ? m_canvas->size() : QSize();
+
+    // 凭据表单还露着时（尚未连上）要把它让出来的高度算进去：库后端连上后
+    // m_formPanel 会隐藏，画布正好长高这么多（外层布局零边距零间距）。
+    // 不补的话首次建连会按小一圈的画布去算，连上后画面被放大，白丢清晰度。
+    if (m_formPanel && m_formPanel->isVisible()
+        && RdpClient::backend() == RdpClient::Backend::FreeRdp)
+        size.rheight() += m_formPanel->height();
+
+    // 标签页刚建好、布局还没跑时画布可能是 0 或默认的 640x480 之类的假尺寸，
+    // 依次退回窗口尺寸、主屏可用区域。外部建连须延后一轮事件循环（见 beginConnect
+    // 的注释），走到这里的兜底只是最后一道保险。
+    if (size.width() < kMinWidth || size.height() < kMinHeight) {
+        if (const QWidget *w = window())
+            size = w->size();
+    }
+    if (size.width() < kMinWidth || size.height() < kMinHeight) {
+        if (const QScreen *screen = QGuiApplication::primaryScreen())
+            size = screen->availableGeometry().size();
+    }
+    return alignResolution(size);
+}
+
+QSize RdpPanel::targetResolution() const
+{
+    if (m_fitCheck->isChecked())
+        return fitResolution();
+    const QSize parsed = parseResolution(m_resolutionCombo->currentText());
+    if (!parsed.isValid())
+        return fitResolution();   // 手填了一串看不懂的东西，别拿它去连
+    return alignResolution(parsed);
+}
+
+void RdpPanel::updateResolutionDisplay()
+{
+    // 把实际要用的值写回下拉框：用户随时看得见"将要用"（未连接）或"正在用"
+    //（已连接）的分辨率。不用 findText——档位外的值曾被它静默丢弃。
+    const QString text = formatResolution(targetResolution());
+    if (m_resolutionCombo->currentText() == text)
+        return;
+    QSignalBlocker blocker(m_resolutionCombo);   // 别把回填当成用户改动去落盘
+    m_resolutionCombo->setCurrentText(text);
+}
+
+void RdpPanel::loadResolutionPrefs()
+{
+    QSettings settings;
+    const bool fit = settings.value(QLatin1String(kFitToWindowKey), true).toBool();
+    const QSize saved =
+        parseResolution(settings.value(QLatin1String(kResolutionKey)).toString());
+    {
+        QSignalBlocker b1(m_fitCheck);
+        QSignalBlocker b2(m_resolutionCombo);
+        m_fitCheck->setChecked(fit);
+        if (saved.isValid())
+            m_resolutionCombo->setCurrentText(formatResolution(alignResolution(saved)));
+    }
+    m_resolutionCombo->setEnabled(!fit);
+}
+
+void RdpPanel::saveResolutionPrefs() const
+{
+    QSettings settings;
+    settings.setValue(QLatin1String(kFitToWindowKey), m_fitCheck->isChecked());
+    // 只在手选模式下记分辨率："适应窗口"下框里是量出来的值，记了没意义
+    // （换台机器/换窗口大小就该重新量），反而会在取消勾选时给出陈旧值。
+    if (!m_fitCheck->isChecked()) {
+        const QSize parsed = parseResolution(m_resolutionCombo->currentText());
+        if (parsed.isValid())
+            settings.setValue(QLatin1String(kResolutionKey),
+                              formatResolution(alignResolution(parsed)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 连接参数
+// ---------------------------------------------------------------------------
 
 RdpSettings RdpPanel::currentSettings() const
 {
@@ -202,27 +386,21 @@ RdpSettings RdpPanel::currentSettings() const
     settings.username = m_userEdit->text().trimmed();
     settings.password = m_passwordEdit->text();
     settings.domain = m_domainEdit->text().trimmed();
-    const QStringList parts =
-        m_resolutionCombo->currentText().split(QLatin1Char('x'));
-    if (parts.size() == 2) {
-        settings.width = parts.at(0).toInt();
-        settings.height = parts.at(1).toInt();
-    }
+    const QSize size = targetResolution();
+    settings.width = size.width();
+    settings.height = size.height();
     return settings;
 }
 
 void RdpPanel::setSettings(const RdpSettings &settings)
 {
+    // 只喂凭据。分辨率归本面板管——设备配置与 rdp:// URL 里都没有这个字段，
+    // 这里若再回填一次就会出现"下拉框一个值、实际连接另一个值"的分裂状态。
     m_hostEdit->setText(settings.host);
     m_portSpin->setValue(settings.port);
     m_userEdit->setText(settings.username);
     m_passwordEdit->setText(settings.password);
     m_domainEdit->setText(settings.domain);
-    const QString resolution =
-        QStringLiteral("%1x%2").arg(settings.width).arg(settings.height);
-    const int index = m_resolutionCombo->findText(resolution);
-    if (index >= 0)
-        m_resolutionCombo->setCurrentIndex(index);
 }
 
 void RdpPanel::promptForPassword()
@@ -233,16 +411,28 @@ void RdpPanel::promptForPassword()
     m_passwordEdit->setFocus();
 }
 
-void RdpPanel::onConnectClicked()
+void RdpPanel::beginConnect()
 {
     const RdpSettings settings = currentSettings();
     if (settings.host.isEmpty()) {
         m_statusLabel->setText(tr("请填写主机地址"));
         return;
     }
+    // 先把真正要用的分辨率回填到下拉框，再拿同一份 settings 去连——
+    // 显示值与连接值必须同源（历史 bug：两条路径各算一次，用户改了没反应）。
+    updateResolutionDisplay();
+    // 上一次会话的画面尺寸作废：留着会让 updateConnectedStatus 拿旧尺寸
+    // 跟新请求比，误报"服务端未采用"。
+    m_videoWidth = 0;
+    m_videoHeight = 0;
     // 对应Python: RDPWidget.__init__ 里的 "正在连接远程桌面，请稍候…"
     m_canvas->setText(tr("正在连接远程桌面，请稍候…"));
     m_client->connectToHost(settings);
+}
+
+void RdpPanel::onConnectClicked()
+{
+    beginConnect();
 }
 
 void RdpPanel::onDisconnectClicked()
@@ -250,17 +440,72 @@ void RdpPanel::onDisconnectClicked()
     m_client->disconnectFromHost();
 }
 
+void RdpPanel::onApplyResolutionClicked()
+{
+    if (m_client->state() != RdpClient::State::Connected)
+        return;
+
+    // RDP 改不了活动会话的分辨率：那要走 Display Control 通道（[MS-RDPEDISP]），
+    // 而该扩展依赖图形管线 EGFX，本客户端只挂了 GDI 的 Begin/EndPaint 并在
+    // RdpClient::runConnection 里显式关掉了 EGFX（开了会崩在库内）。所以"应用"
+    // 就是按新分辨率重连——RDP 重连会回到服务端上原有会话，窗口/程序都还在，
+    // 不是新建桌面。
+    RdpSettings settings = m_client->settings();   // 生效中的凭据（表单此时是隐藏的）
+    const QSize size = targetResolution();
+    settings.width = size.width();
+    settings.height = size.height();
+
+    updateResolutionDisplay();
+    saveResolutionPrefs();
+    m_videoWidth = 0;   // 见 beginConnect 里的同一处理
+    m_videoHeight = 0;
+    // connectToHost 内部会先断开当前会话；m_reconnecting 抑制这期间的
+    // Disconnected 分支把凭据表单闪出来（表单此时可能连密码都没有）。
+    m_reconnecting = true;
+    m_client->connectToHost(settings);
+    m_reconnecting = false;
+}
+
+void RdpPanel::updateConnectedStatus()
+{
+    // 已连接时状态栏带上分辨率：这是"到底生效没生效"唯一能自证的地方。
+    // 有帧了就报画面实际尺寸——服务端不认我们请求的尺寸时（会话被服务端定死、
+    // 老服务端不支持 resize），用户能看到是服务端改的，而不是自己猜。
+    const RdpSettings settings = m_client->settings();
+    const QSize requested(settings.width, settings.height);
+    if (m_videoWidth > 0
+        && (m_videoWidth != settings.width || m_videoHeight != settings.height)) {
+        m_statusLabel->setText(
+            tr("已连接 %1（画面 %2 ≠ 请求 %3，服务端未采用）")
+                .arg(settings.host,
+                     formatResolution(QSize(m_videoWidth, m_videoHeight)),
+                     formatResolution(requested)));
+        return;
+    }
+    m_statusLabel->setText(
+        tr("已连接 %1（%2）").arg(settings.host, formatResolution(requested)));
+}
+
 void RdpPanel::onStateChanged(RdpClient::State state)
 {
     switch (state) {
-    case RdpClient::State::Connecting:
-        m_statusLabel->setText(tr("正在连接 %1…").arg(m_client->settings().host));
+    case RdpClient::State::Connecting: {
+        const RdpSettings settings = m_client->settings();
+        if (m_reconnecting)
+            m_statusLabel->setText(
+                tr("正在以 %1 重连 %2…")
+                    .arg(formatResolution(QSize(settings.width, settings.height)),
+                         settings.host));
+        else
+            m_statusLabel->setText(tr("正在连接 %1…").arg(settings.host));
         break;
+    }
     case RdpClient::State::Connected:
-        m_statusLabel->setText(tr("已连接 %1").arg(m_client->settings().host));
-        // 库后端（内嵌渲染）：连接成功后隐藏表单，画面占满整个面板，
-        // 与 Python 版一致；断开靠关闭标签页（closeTab 已有 disconnect）。
-        // 命令行后备画面在外部窗口，保留表单和断开按钮。
+        updateConnectedStatus();
+        // 库后端（内嵌渲染）：连接成功后隐藏凭据表单，画面占满面板下方，
+        // 与 Python 版一致。控制条（分辨率/应用/断开/状态）留着——会话中要能
+        // 改分辨率、也要能断开，这两个此前被一起藏了。
+        // 命令行后备画面在外部窗口，表单也留着。
         if (RdpClient::backend() == RdpClient::Backend::FreeRdp) {
             m_formPanel->setVisible(false);
             setFocus();   // 键盘直接落到远程桌面
@@ -270,13 +515,15 @@ void RdpPanel::onStateChanged(RdpClient::State state)
         }
         break;
     case RdpClient::State::Disconnected:
-        m_statusLabel->setText(tr("未连接"));
-        m_formPanel->setVisible(true);   // 断开/失败后恢复表单以便重连
-        m_repaintTimer->stop();
-        // 定时器已停：等布局稳定后按恢复后的画布尺寸重缩最后一帧
-        if (m_hasFrame) {
-            m_frameDirty = true;
-            QTimer::singleShot(0, this, &RdpPanel::flushFrame);
+        if (!m_reconnecting) {
+            m_statusLabel->setText(tr("未连接"));
+            m_formPanel->setVisible(true);   // 断开/失败后恢复表单以便重连
+            m_repaintTimer->stop();
+            // 定时器已停：等布局稳定后按恢复后的画布尺寸重缩最后一帧
+            if (m_hasFrame) {
+                m_frameDirty = true;
+                QTimer::singleShot(0, this, &RdpPanel::flushFrame);
+            }
         }
         // 不清除m_buffer/m_hasFrame，保留最后一帧显示
         break;
@@ -285,6 +532,8 @@ void RdpPanel::onStateChanged(RdpClient::State state)
     setFormEnabled(!busy);
     m_connectButton->setEnabled(!busy);
     m_disconnectButton->setEnabled(busy);
+    // "应用" = 重连，只有连上了才有会话可重连
+    m_applyButton->setEnabled(state == RdpClient::State::Connected);
 }
 
 void RdpPanel::onError(const QString &message)
@@ -306,7 +555,8 @@ void RdpPanel::onFrameUpdated(const QImage &frame)
     const int fw = frame.width();
     const int fh = frame.height();
 
-    if (fw != m_videoWidth || fh != m_videoHeight) {
+    const bool sizeChanged = (fw != m_videoWidth || fh != m_videoHeight);
+    if (sizeChanged) {
         // 分辨率变化或首帧：重建缓冲
         m_videoWidth = fw;
         m_videoHeight = fh;
@@ -325,6 +575,10 @@ void RdpPanel::onFrameUpdated(const QImage &frame)
 
     m_hasFrame = true;
     m_frameDirty = true;
+
+    // 首帧/服务端改了尺寸时刷一次状态栏：请求值与实际画面不一致的话要说出来。
+    if (sizeChanged && m_client->state() == RdpClient::State::Connected)
+        updateConnectedStatus();
 
     // 首帧到达时启动定时器
     if (!m_repaintTimer->isActive())
@@ -359,16 +613,40 @@ void RdpPanel::resizeEvent(QResizeEvent *event)
     QWidget::resizeEvent(event);
     if (m_hasFrame)
         m_frameDirty = true;
+
+    if (m_fitCheck->isChecked())
+        updateResolutionDisplay();   // 未连接时下拉框跟着窗口走，连之前就看得见
+
+    if (m_client->state() != RdpClient::State::Connected)
+        return;
+
+    if (!m_fitCheck->isChecked()) {
+        updateConnectedStatus();
+        return;
+    }
+
+    // "适应窗口" 下窗口一变，1:1 的目标尺寸就跟着变，但会话分辨率改不了
+    // （见 onApplyResolutionClicked 的注释）。只提示、**不自动重连**——
+    // 拖窗口时反复断连比画面被拉伸糟得多。
+    const QSize fit = fitResolution();
+    const QSize current(m_client->settings().width, m_client->settings().height);
+    if (qAbs(fit.width() - current.width()) > 16
+        || qAbs(fit.height() - current.height()) > 16)
+        m_statusLabel->setText(tr("窗口已变为 %1，点「应用」重连以匹配")
+                                   .arg(formatResolution(fit)));
+    else
+        updateConnectedStatus();
 }
 
 void RdpPanel::setFormEnabled(bool enabled)
 {
+    // 只管凭据字段。分辨率下拉框/适应窗口不在此列——会话中必须能改，
+    // 这正是本次要修的问题（改完点"应用"重连生效）。
     m_hostEdit->setEnabled(enabled);
     m_portSpin->setEnabled(enabled);
     m_userEdit->setEnabled(enabled);
     m_passwordEdit->setEnabled(enabled);
     m_domainEdit->setEnabled(enabled);
-    m_resolutionCombo->setEnabled(enabled);
 }
 
 // ---------------------------------------------------------------------------

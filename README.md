@@ -173,7 +173,7 @@ cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 ```bash
 # 安装系统依赖
 sudo apt-get install -y build-essential cmake pkg-config \
-    qt6-base-dev qt6-tools-dev libgl1-mesa-dev
+    qt6-base-dev qt6-tools-dev libgl1-mesa-dev qt6-multimedia-dev qt6-serialport-dev
 
 # 安装 vcpkg（如未安装）
 git clone https://github.com/microsoft/vcpkg.git

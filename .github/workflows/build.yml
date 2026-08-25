@@ -530,7 +530,10 @@ jobs:
           #    必须先于 Qt 库收集：下面第 2 步要从「主程序 + 所有插件」的 ldd 里收集
           #    它们依赖的 libQt6*，插件得先在位才能被 ldd 扫到。
           mkdir -p dist/bin/plugins
-          for p in platforms platformthemes imageformats multimedia tls xcbglintegrations; do
+          #    platforminputcontexts：输入法前端插件（compose/ibus）。缺失则
+          #    QT_IM_MODULE=ibus 的目标机上无法唤起输入法、中文无法输入
+          #    （Qt6 已移除 XIM 兜底，不能省）。
+          for p in platforms platformthemes platforminputcontexts imageformats multimedia tls xcbglintegrations; do
             [ -d "$QT_PLUGINS/$p" ] && cp -r "$QT_PLUGINS/$p" dist/bin/plugins/
           done
 

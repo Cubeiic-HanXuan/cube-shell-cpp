@@ -25,6 +25,10 @@
 #include <QWidget>
 
 #include "RdpClient.h"
+// RdpClipboard.h（而不是仅前向声明）：fetchFingerprint 要按值遍历
+// QList<RdpRemoteFile>，需要完整类型。这个头本身不含 FreeRDP 类型（pimpl），
+// 引进来不会把 FreeRDP 依赖带进 UI 层。
+#include "RdpClipboard.h"
 
 class QCheckBox;
 class QComboBox;
@@ -36,6 +40,7 @@ class QLineEdit;
 class QMouseEvent;
 class QPushButton;
 class QResizeEvent;
+class QShowEvent;
 class QSpinBox;
 class QTimer;
 class QWheelEvent;
@@ -70,8 +75,23 @@ public:
     // 容错解析 "1920x1080" / "1920X1080" / 带空格；非法返回无效 QSize。
     static QSize parseResolution(const QString &text);
 
+    // --- 远端文件自动取回策略（静态纯函数，便于单测）---------------------------
+    // 远端复制文件后自动传回本机，让"远端复制 → 本机粘贴"和反方向一样不需要多
+    // 一步点击。唯一的例外是体积：自动传回的量必须有上限，否则远端复制了几个 GB
+    // 就是一次静默的长时间占用。超限时不自动传，退回按钮让用户自己决定。
+    static constexpr qint64 kAutoFetchLimitBytes = 64LL * 1024 * 1024;   // 64 MiB
+
+    // 该不该自动取回这批文件。totalBytes 为已知大小之和，sizeUnknown 表示清单里
+    // 有条目没带 FD_FILESIZE。
+    // 大小未知**不**阻止自动取回：目录条目本来就不带大小，真按"未知就拦"会让
+    // 复制文件夹永远退回手动，反而回到了原来那个别扭的交互。取回过程中一旦累计
+    // 超限会中止（见 .cpp 的 onRemoteClipboardFetchProgress），所以未知量是有兜底的。
+    static bool shouldAutoFetch(qint64 totalBytes, bool sizeUnknown);
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // 面板重新可见时补推一次本机剪贴板快照（隐藏期间不监听，见 .cpp）。
+    void showEvent(QShowEvent *event) override;
     // --- 输入事件（对应Python: RDPWidget 的 keyPressEvent/mouse*/wheelEvent/drop） ---
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
@@ -94,6 +114,20 @@ private slots:
     // 对应Python: _flush_frame（定时器回调，合并小矩形为单次渲染）
     void flushFrame();
 
+    // --- 剪贴板同步（cliprdr，见 RdpClipboard.h） ---
+    // 本机系统剪贴板变了：抓快照推给 client（远端粘贴时才真正取用）。
+    void onLocalClipboardChanged();
+    // 远端复制了文本：写进本机系统剪贴板。
+    void onRemoteClipboardText(const QString &text);
+    // 远端剪贴板里有 count 个文件（仅清单，内容还没传）。
+    void onRemoteClipboardFilesAvailable(int count);
+    // 「取回 N 个文件」：真的把内容传回本机临时目录。
+    void onFetchRemoteFilesClicked();
+    void onRemoteClipboardFilesFetched(const QStringList &localPaths);
+    void onRemoteClipboardFetchProgress(qint64 received, qint64 total);
+    // 剪贴板动作失败（会话还活着，不同于 onError 的建连失败）。
+    void onClipboardError(const QString &message);
+
 private:
     void setFormEnabled(bool enabled);
 
@@ -108,6 +142,19 @@ private:
     // 分辨率选择的跨会话记忆（QSettings）。
     void loadResolutionPrefs();
     void saveResolutionPrefs() const;
+
+    // 把本机系统剪贴板的当前内容抓成快照推给 client。文件优先于文本
+    //（二者互斥，见 .cpp 里的取舍说明）；内容与我们自己刚写进去的一致时跳过，
+    // 避免远端→本机的数据被原路公告回去。
+    void pushLocalClipboard();
+    // 「剪贴板同步」开关的跨会话记忆（与分辨率分开：前者改了要重连才生效）。
+    void loadClipboardPrefs();
+    void saveClipboardPrefs() const;
+
+    // 远端文件取回（自动 + 手动共用一条路，isAuto 只影响语气与兜底策略）。
+    void startFetch(bool isAuto);
+    // 一批远端文件的指纹（名字+大小+类型按序拼接），用于"这批已自动取过"的去重。
+    QString fetchFingerprint(const QList<RdpRemoteFile> &files) const;
 
     // 键盘输入。对应Python: RDPWidget.send_key (lines 779-848)
     void sendKey(QKeyEvent *event, bool isPressed);
@@ -128,6 +175,10 @@ private:
     QComboBox *m_resolutionCombo = nullptr;   // 可编辑：档位之外可手填 "宽x高"
     QCheckBox *m_fitCheck = nullptr;          // 分辨率跟随画布尺寸
     QPushButton *m_applyButton = nullptr;     // 按新分辨率重连
+    QCheckBox *m_clipboardSyncCheck = nullptr;   // 剪贴板同步，默认开
+    // 「取回 N 个文件」。远端复制后**自动**取回，所以平时永远隐藏；只有体积超过
+    // kAutoFetchLimitBytes 被拦下时才露出来，当"我确认要传这么大"的确认入口。
+    QPushButton *m_fetchFilesButton = nullptr;
     QPushButton *m_connectButton = nullptr;
     QPushButton *m_disconnectButton = nullptr;
     QLabel *m_statusLabel = nullptr;
@@ -149,6 +200,19 @@ private:
 
     // 滚轮残差累积（对应Python: self._wheel_resid，每满 120 发一次滚轮事件）
     int m_wheelResid = 0;
+
+    // --- 剪贴板同步状态 ---
+    int m_remoteFileCount = 0;      // 远端最近一次公告的文件数
+    bool m_fetchInProgress = false; // 取回进行中：避免重入
+    bool m_fetchIsAuto = false;     // 本次取回是自动发起的（影响提示语与超限兜底）
+    int m_fetchSeq = 0;             // 临时目录序号，保证每次取回互不覆盖
+    // 已自动取过的那一份清单的指纹。远端公告会重复到达（切窗口、远端应用重新
+    // 声明格式都会触发一次 FormatList），不去重就会对同一批文件反复重传。
+    QString m_autoFetchedFingerprint;
+    // 我们自己刚写进系统剪贴板的内容（远端→本机方向）。写 QClipboard 会触发
+    // dataChanged，不认出来就会把远端刚给的东西原路公告回去。
+    QString m_echoText;
+    QStringList m_echoFiles;
 };
 
 } // namespace cubeshell

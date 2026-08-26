@@ -6,6 +6,8 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFormLayout>
@@ -15,6 +17,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
@@ -23,8 +26,10 @@
 #include <QResizeEvent>
 #include <QScreen>
 #include <QSettings>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -110,6 +115,7 @@ static constexpr quint16 WHEEL_ROTATION_NEGATIVE  = 0x0088;
 namespace {
 const char kFitToWindowKey[] = "rdp/fit_to_window";
 const char kResolutionKey[]  = "rdp/resolution";
+const char kClipboardSyncKey[] = "rdp/clipboard_sync";
 
 // 常用档位。可编辑下拉框，用户可直接手填任意 "宽x高"，这里只是省事的预设。
 const char *const kResolutionPresets[] = {
@@ -199,11 +205,29 @@ RdpPanel::RdpPanel(QWidget *parent)
     m_connectButton = new QPushButton(tr("连接"), this);
     m_disconnectButton = new QPushButton(tr("断开"), this);
     m_disconnectButton->setEnabled(false);
+
+    // 剪贴板同步（cliprdr 通道）。默认开，照 mstsc 的习惯；开关改了要重连才生效，
+    // 因为通道插件是建连期按 FreeRDP_RedirectClipboard 加载的（见 RdpClient.cpp）。
+    m_clipboardSyncCheck = new QCheckBox(tr("剪贴板同步"), this);
+    m_clipboardSyncCheck->setChecked(true);
+    m_clipboardSyncCheck->setToolTip(
+        tr("本机与远端共享剪贴板（文本与文件）。\n"
+           "会把本机复制的内容送到远端主机；改动需重连生效。"));
+
+    // 远端复制文件后自动传回本机（见 shouldAutoFetch）。这个按钮只在体积超限、
+    // 需要用户确认时才出现，所以初始隐藏。
+    m_fetchFilesButton = new QPushButton(this);
+    m_fetchFilesButton->setToolTip(
+        tr("把远端剪贴板里的文件传回本机临时目录，完成后可在文件管理器里粘贴"));
+    m_fetchFilesButton->setVisible(false);
+
     // 按钮不收焦点：面板是 StrongFocus 的（键鼠要转发给远端），按钮抢了焦点后
     // 空格/回车会打在按钮上而不是远程桌面。
-    for (QPushButton *b : {m_applyButton, m_connectButton, m_disconnectButton})
+    for (QPushButton *b : {m_applyButton, m_connectButton, m_disconnectButton,
+                           m_fetchFilesButton})
         b->setFocusPolicy(Qt::NoFocus);
     m_fitCheck->setFocusPolicy(Qt::NoFocus);
+    m_clipboardSyncCheck->setFocusPolicy(Qt::NoFocus);
 
     m_statusLabel = new QLabel(tr("未连接"), this);
     // 状态文字与控件同排：sizeHint 交给布局忽略，否则一条长状态
@@ -217,6 +241,8 @@ RdpPanel::RdpPanel(QWidget *parent)
     controlLayout->addWidget(m_resolutionCombo);
     controlLayout->addWidget(m_fitCheck);
     controlLayout->addWidget(m_applyButton);
+    controlLayout->addWidget(m_clipboardSyncCheck);
+    controlLayout->addWidget(m_fetchFilesButton);
     controlLayout->addWidget(m_connectButton);
     controlLayout->addWidget(m_disconnectButton);
     controlLayout->addWidget(m_statusLabel, /*stretch=*/1);
@@ -279,9 +305,45 @@ RdpPanel::RdpPanel(QWidget *parent)
     connect(m_client, &RdpClient::errorOccurred, this, &RdpPanel::onError);
     connect(m_client, &RdpClient::frameUpdated, this, &RdpPanel::onFrameUpdated);
 
+    // --- 剪贴板同步接线 ---
+    connect(m_clipboardSyncCheck, &QCheckBox::toggled, this, [this](bool on) {
+        m_client->setClipboardSyncEnabled(on);
+        saveClipboardPrefs();
+        if (on) {
+            // 通道已加载的会话里（开→关→开）立刻就能用；没加载时快照先存着，
+            // 下次建连 RdpClipboard 会补公告，所以这里无条件推一次。
+            pushLocalClipboard();
+        } else {
+            // 关掉不会立刻拆通道（那要重连），但从现在起不再推新内容，
+            // 取回入口也收掉。
+            m_remoteFileCount = 0;
+            m_autoFetchedFingerprint.clear();
+            m_fetchFilesButton->setVisible(false);
+        }
+        if (m_client->state() == RdpClient::State::Connected)
+            m_statusLabel->setText(on ? tr("剪贴板同步已开启（如不生效请重连）")
+                                      : tr("剪贴板同步已关闭，重连后完全断开通道"));
+    });
+    // 本机复制的那一刻就把快照推给 worker：远端按 Ctrl+V 时 worker 才能就地应答，
+    // 不用回主线程取数据（见 RdpClipboard.h 的线程模型）。
+    connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this,
+            &RdpPanel::onLocalClipboardChanged);
+    connect(m_client, &RdpClient::clipboardTextReceived, this,
+            &RdpPanel::onRemoteClipboardText);
+    connect(m_client, &RdpClient::remoteClipboardFilesAvailable, this,
+            &RdpPanel::onRemoteClipboardFilesAvailable);
+    connect(m_client, &RdpClient::remoteClipboardFilesFetched, this,
+            &RdpPanel::onRemoteClipboardFilesFetched);
+    connect(m_client, &RdpClient::remoteClipboardFetchProgress, this,
+            &RdpPanel::onRemoteClipboardFetchProgress);
+    connect(m_client, &RdpClient::clipboardError, this, &RdpPanel::onClipboardError);
+    connect(m_fetchFilesButton, &QPushButton::clicked, this,
+            &RdpPanel::onFetchRemoteFilesClicked);
+
     // 读取上次选择，再把生效值回填到下拉框（勾了"适应窗口"时显示量出来的尺寸）。
     loadResolutionPrefs();
     updateResolutionDisplay();
+    loadClipboardPrefs();
 
     // 输入事件接收配置（对应Python: RDPWidget.__init__ lines 571-574）
     setFocusPolicy(Qt::StrongFocus);
@@ -372,6 +434,23 @@ void RdpPanel::saveResolutionPrefs() const
             settings.setValue(QLatin1String(kResolutionKey),
                               formatResolution(alignResolution(parsed)));
     }
+}
+
+void RdpPanel::loadClipboardPrefs()
+{
+    QSettings settings;
+    const bool on = settings.value(QLatin1String(kClipboardSyncKey), true).toBool();
+    QSignalBlocker b(m_clipboardSyncCheck);   // 别把回填当成用户改动去落盘
+    m_clipboardSyncCheck->setChecked(on);
+    // 信号被挡住了，开关值得自己送到 client——它要在建连时读走。
+    m_client->setClipboardSyncEnabled(on);
+}
+
+void RdpPanel::saveClipboardPrefs() const
+{
+    QSettings settings;
+    settings.setValue(QLatin1String(kClipboardSyncKey),
+                      m_clipboardSyncCheck->isChecked());
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +581,8 @@ void RdpPanel::onStateChanged(RdpClient::State state)
     }
     case RdpClient::State::Connected:
         updateConnectedStatus();
+        // 连接前复制的东西也要能粘：通道刚起来，把当前系统剪贴板补公告一次。
+        pushLocalClipboard();
         // 库后端（内嵌渲染）：连接成功后隐藏凭据表单，画面占满面板下方，
         // 与 Python 版一致。控制条（分辨率/应用/断开/状态）留着——会话中要能
         // 改分辨率、也要能断开，这两个此前被一起藏了。
@@ -527,6 +608,17 @@ void RdpPanel::onStateChanged(RdpClient::State state)
         }
         // 不清除m_buffer/m_hasFrame，保留最后一帧显示
         break;
+    }
+    // 远端剪贴板是会话状态：断开后那份清单已经没有意义（listIndex 指向的列表
+    // 随会话消失），取回入口必须收掉，否则点了会向已关闭的通道发请求。
+    if (state != RdpClient::State::Connected) {
+        m_remoteFileCount = 0;
+        m_fetchInProgress = false;
+        m_fetchIsAuto = false;
+        // 指纹也要清：下个会话里远端可能复制同一批文件，留着会被当成"已经自动
+        // 取过了"而不再同步。
+        m_autoFetchedFingerprint.clear();
+        m_fetchFilesButton->setVisible(false);
     }
     const bool busy = state != RdpClient::State::Disconnected;
     setFormEnabled(!busy);
@@ -638,6 +730,16 @@ void RdpPanel::resizeEvent(QResizeEvent *event)
         updateConnectedStatus();
 }
 
+void RdpPanel::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // 面板被隐藏（切到别的标签页）期间发生的复制会被 onLocalClipboardChanged
+    // 跳过——多个 RDP 标签页都监听同一个系统剪贴板，各自都推一遍纯属浪费。
+    // 代价是切回来时快照可能是旧的，这里补一次：否则"在别处复制 → 切回 RDP →
+    // 远端 Ctrl+V"会粘到上一次的内容。
+    pushLocalClipboard();
+}
+
 void RdpPanel::setFormEnabled(bool enabled)
 {
     // 只管凭据字段。分辨率下拉框/适应窗口不在此列——会话中必须能改，
@@ -659,13 +761,11 @@ void RdpPanel::sendKey(QKeyEvent *e, bool isPressed)
     if (m_client->state() != RdpClient::State::Connected)
         return;
 
-    // Ctrl+V：把本地剪贴板文本同步到远程（对应Python lines 784-788）
-    if (isPressed && (e->modifiers() & Qt::ControlModifier) && e->key() == Qt::Key_V) {
-        const QString text = QGuiApplication::clipboard()->text();
-        if (!text.isEmpty())
-            m_client->sendClipboardText(text);
-        return;
-    }
+    // 注意：Ctrl+V 在此**不做**特殊处理，照常按扫描码转发下去。RDP 的粘贴是远端
+    // 按键触发的，本机只负责在按键之前把内容"挂"在剪贴板通道上（复制那一刻由
+    // onLocalClipboardChanged 完成）。这里早退过一版，结果远端收不到粘贴键，
+    // 通道通了也粘不出来。macOS 上 Qt 把 Cmd 映射成 ControlModifier，所以
+    // Cmd+V 天然转成远端的 Ctrl+V。
 
     // macOS：可打印键走物理扫描码（PS/2 Set1），让远程 IME 能拦截
     // 对应Python: _mac_ps2_scancode (lines 764-777) + send_key lines 808-818
@@ -861,6 +961,261 @@ void RdpPanel::wheelEvent(QWheelEvent *event)
 }
 
 // ---------------------------------------------------------------------------
+// 剪贴板同步（cliprdr 通道，实现见 RdpClipboard.cpp）
+// ---------------------------------------------------------------------------
+
+// 一批远端文件的指纹，用来认出"这批我已经自动取过了"。
+// 用名字+大小而不是 listIndex：下标是每轮公告重新编的，同一批文件重复公告时
+// 下标可能一样也可能不一样，拿它做指纹会误判。
+QString RdpPanel::fetchFingerprint(const QList<RdpRemoteFile> &files) const
+{
+    if (files.isEmpty())
+        return {};
+    QStringList parts;
+    parts.reserve(files.size());
+    for (const RdpRemoteFile &f : files)
+        parts.append(QStringLiteral("%1:%2:%3")
+                         .arg(f.name)
+                         .arg(f.sizeKnown ? QString::number(f.size)
+                                          : QStringLiteral("?"))
+                         .arg(f.isDirectory ? QLatin1Char('d') : QLatin1Char('f')));
+    return parts.join(QLatin1Char('\n'));
+}
+
+void RdpPanel::pushLocalClipboard()
+{
+    if (!m_clipboardSyncCheck->isChecked())
+        return;
+    // 未连接时推了也没用（通道还没起）；连上那一刻 onStateChanged 会补一次。
+    if (m_client->state() != RdpClient::State::Connected)
+        return;
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (!mime)
+        return;
+
+    QStringList files;
+    if (mime->hasUrls()) {
+        for (const QUrl &url : mime->urls()) {
+            // 只收本地文件；http:// 之类的 URL 没有本地路径，留给下面的文本分支。
+            const QString path = url.toLocalFile();
+            if (!path.isEmpty())
+                files.append(path);
+        }
+    }
+    // 文件与文本二选一、不合并：Finder / 资源管理器复制文件时 mimeData 里通常还
+    // 附一份文件名文本，两个格式一起公告，远端粘贴时可能挑中文本，粘出来是一串
+    // 路径而不是文件。文件优先——用户复制文件时要的就是文件。
+    const QString text = files.isEmpty() && mime->hasText() ? mime->text() : QString();
+    if (files.isEmpty() && text.isEmpty())
+        return;
+
+    // 挡回声：这正是我们自己刚从远端拿回来、写进系统剪贴板的东西。原路公告回去
+    // 只会让远端看到一份它自己给出的数据，白跑一趟协商。
+    if (text == m_echoText && files == m_echoFiles)
+        return;
+
+    if (!files.isEmpty())
+        m_client->clipboardSendFiles(files);
+    else
+        m_client->sendClipboardText(text);
+}
+
+void RdpPanel::onLocalClipboardChanged()
+{
+    // 只在本面板可见时推：多个 RDP 标签页监听的是同一个系统剪贴板信号，隐藏的
+    // 那些推了也没人去粘。切回来时 showEvent 补推。
+    if (!isVisible())
+        return;
+    pushLocalClipboard();
+}
+
+void RdpPanel::onRemoteClipboardText(const QString &text)
+{
+    if (!m_clipboardSyncCheck->isChecked() || text.isEmpty())
+        return;
+    m_echoText = text;
+    m_echoFiles.clear();
+    QGuiApplication::clipboard()->setText(text);
+}
+
+bool RdpPanel::shouldAutoFetch(qint64 totalBytes, bool sizeUnknown)
+{
+    Q_UNUSED(sizeUnknown);   // 见头文件：未知大小不拦，由传输中的累计闸门兜底
+    return totalBytes <= kAutoFetchLimitBytes;
+}
+
+void RdpPanel::onRemoteClipboardFilesAvailable(int count)
+{
+    m_remoteFileCount = count;
+    if (count <= 0 || !m_clipboardSyncCheck->isChecked()) {
+        m_fetchFilesButton->setVisible(false);
+        m_autoFetchedFingerprint.clear();
+        return;
+    }
+
+    // 体积先算出来再决定：描述符里带 FD_FILESIZE，所以传之前就知道要传多少，
+    // 不用"先传了再说"。
+    const QList<RdpRemoteFile> files = m_client->clipboard()->remoteFiles();
+    qint64 total = 0;
+    bool unknown = false;
+    for (const RdpRemoteFile &f : files) {
+        if (f.isDirectory)
+            continue;
+        if (f.sizeKnown)
+            total += qint64(f.size);
+        else
+            unknown = true;
+    }
+
+    // 同一批文件只自动取一次。远端公告会重复到达（远端应用重新声明格式、
+    // 切换窗口都会再发一次 FormatList），不去重就是对着同一批文件反复重传。
+    const QString fingerprint = fetchFingerprint(files);
+    const bool alreadyFetched = !fingerprint.isEmpty()
+                                && fingerprint == m_autoFetchedFingerprint;
+
+    if (shouldAutoFetch(total, unknown)) {
+        m_fetchFilesButton->setVisible(false);
+        if (!alreadyFetched && !m_fetchInProgress) {
+            m_autoFetchedFingerprint = fingerprint;
+            startFetch(/*auto=*/true);
+        }
+        return;
+    }
+
+    // 超限：不自动传，把按钮当"我确认要传这么大"的入口露出来。这是按钮唯一
+    // 还存在的理由，所以文字里必须写明体积——否则用户不知道自己在确认什么。
+    m_autoFetchedFingerprint.clear();
+    m_fetchFilesButton->setVisible(true);
+    m_fetchFilesButton->setEnabled(!m_fetchInProgress);
+    m_fetchFilesButton->setText(tr("取回 %1 个文件（%2）")
+                                    .arg(count)
+                                    .arg(QLocale().formattedDataSize(total)));
+    m_statusLabel->setText(
+        tr("远端复制了 %1 个文件，共 %2，超过 %3 未自动取回——点「取回」确认")
+            .arg(count)
+            .arg(QLocale().formattedDataSize(total))
+            .arg(QLocale().formattedDataSize(kAutoFetchLimitBytes)));
+}
+
+void RdpPanel::onFetchRemoteFilesClicked()
+{
+    startFetch(/*auto=*/false);
+}
+
+// 真正发起取回。isAuto 只影响提示文字与失败时的语气：自动取回是用户没主动要求
+// 的后台动作，不该用"失败"这种需要用户处置的措辞去打扰他。
+void RdpPanel::startFetch(bool isAuto)
+{
+    if (m_fetchInProgress || m_remoteFileCount <= 0)
+        return;
+
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    if (base.isEmpty()) {
+        m_statusLabel->setText(tr("取回失败：拿不到临时目录"));
+        return;
+    }
+    // 每次取回落到独立子目录：远端可能连续复制同名文件，共用一个目录会互相覆盖，
+    // 而"上次取回的路径还留在系统剪贴板里"是常态，覆盖了就等于悄悄换掉内容。
+    // 也正因为剪贴板还指着这些路径，取回的文件**不主动删**——删了用户粘出来就是
+    // 一堆失效引用。留给系统的临时目录清理机制。
+    const QString dir = QDir(base).absoluteFilePath(
+        QStringLiteral("cube-shell-rdp-%1-%2")
+            .arg(QCoreApplication::applicationPid())
+            .arg(++m_fetchSeq));
+    if (!QDir().mkpath(dir)) {
+        m_statusLabel->setText(tr("取回失败：无法创建 %1").arg(dir));
+        return;
+    }
+
+    m_fetchInProgress = true;
+    m_fetchIsAuto = isAuto;
+    m_fetchFilesButton->setEnabled(false);
+    m_statusLabel->setText(isAuto
+                               ? tr("正在同步远端复制的 %1 个文件…").arg(m_remoteFileCount)
+                               : tr("正在取回 %1 个文件…").arg(m_remoteFileCount));
+    m_client->fetchRemoteClipboardFiles(dir);
+}
+
+void RdpPanel::onRemoteClipboardFilesFetched(const QStringList &localPaths)
+{
+    const bool wasAuto = m_fetchIsAuto;
+    m_fetchInProgress = false;
+    m_fetchIsAuto = false;
+    m_fetchFilesButton->setEnabled(m_remoteFileCount > 0);
+    if (localPaths.isEmpty()) {
+        m_statusLabel->setText(tr("取回结束，没有文件落地"));
+        return;
+    }
+
+    // 把落地后的本地真实路径塞进系统剪贴板：之后在 Finder / 资源管理器里粘贴
+    // 就是真文件。这是"远端→本机文件"这条路能用的关键一步（见 RdpClipboard.h
+    // 里关于为什么不做透明粘贴的说明）。
+    QList<QUrl> urls;
+    urls.reserve(localPaths.size());
+    for (const QString &path : localPaths)
+        urls.append(QUrl::fromLocalFile(path));
+    auto *mime = new QMimeData;
+    mime->setUrls(urls);
+    m_echoText.clear();
+    m_echoFiles = localPaths;
+    QGuiApplication::clipboard()->setMimeData(mime);   // 剪贴板接管所有权
+    // 自动取回成功后按钮没有存在意义了（文件已经在剪贴板里，再点就是重传一份）。
+    m_fetchFilesButton->setVisible(false);
+    m_statusLabel->setText(
+        wasAuto ? tr("远端复制的 %1 个文件已同步，可直接粘贴").arg(localPaths.size())
+                : tr("已取回 %1 个文件，可在文件管理器里直接粘贴").arg(localPaths.size()));
+}
+
+void RdpPanel::onRemoteClipboardFetchProgress(qint64 received, qint64 total)
+{
+    if (!m_fetchInProgress)
+        return;
+    // 自动取回的兜底闸门：清单里有条目没带 FD_FILESIZE 时事前算不出总量
+    //（见 shouldAutoFetch），只能在传输中盯着已收字节。真的超了就中止，
+    // 不让一次自动同步无声地拖成几个 GB。
+    if (m_fetchIsAuto && received > kAutoFetchLimitBytes) {
+        m_client->cancelRemoteClipboardFetch();
+        m_fetchInProgress = false;
+        m_fetchIsAuto = false;
+        m_fetchFilesButton->setVisible(m_remoteFileCount > 0);
+        m_fetchFilesButton->setEnabled(m_remoteFileCount > 0);
+        m_fetchFilesButton->setText(tr("取回 %1 个文件").arg(m_remoteFileCount));
+        m_statusLabel->setText(
+            tr("远端文件超过 %1，已停止自动同步——点「取回」手动传回")
+                .arg(QLocale().formattedDataSize(kAutoFetchLimitBytes)));
+        return;
+    }
+    if (total > 0)
+        m_statusLabel->setText(
+            tr("正在取回文件… %1%").arg(qMin<qint64>(100, received * 100 / total)));
+    else
+        // 远端描述符没带 FD_FILESIZE 时总量未知，只能报已收字节。
+        m_statusLabel->setText(
+            tr("正在取回文件… 已收 %1").arg(QLocale().formattedDataSize(received)));
+}
+
+void RdpPanel::onClipboardError(const QString &message)
+{
+    // 会话还活着，只是这次剪贴板动作没成——不要走 onError 那条路（它会报
+    // "连接错误"并把提示画到画面区，指错方向）。
+    const bool wasAuto = m_fetchIsAuto;
+    m_statusLabel->setText(message.isEmpty() ? tr("剪贴板同步出错") : message);
+    // 取回失败必须解锁按钮，否则一次失败之后它永远是禁用的。
+    m_fetchInProgress = false;
+    m_fetchIsAuto = false;
+    // 自动取回失败了就把按钮露出来当重试入口，并清掉指纹——否则这批文件既自动
+    // 取不到、又因为"已经自动取过"而不再重试，用户干瞪眼。
+    if (wasAuto) {
+        m_autoFetchedFingerprint.clear();
+        if (m_remoteFileCount > 0) {
+            m_fetchFilesButton->setVisible(true);
+            m_fetchFilesButton->setText(tr("重试取回 %1 个文件").arg(m_remoteFileCount));
+        }
+    }
+    m_fetchFilesButton->setEnabled(m_remoteFileCount > 0);
+}
+
+// ---------------------------------------------------------------------------
 // 拖拽传文件
 // ---------------------------------------------------------------------------
 
@@ -885,6 +1240,9 @@ void RdpPanel::dropEvent(QDropEvent *event)
     }
     if (!files.isEmpty())
         m_client->clipboardSendFiles(files);
+    // 同步关掉时通道压根没加载，拖进来也送不出去——明说，别让用户以为在传。
+    if (!files.isEmpty() && !m_clipboardSyncCheck->isChecked())
+        m_statusLabel->setText(tr("剪贴板同步已关闭，文件未发送（勾选后重连生效）"));
 }
 
 } // namespace cubeshell

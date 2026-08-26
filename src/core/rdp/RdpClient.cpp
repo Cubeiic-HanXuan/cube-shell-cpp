@@ -3,6 +3,8 @@
 
 #include "RdpClient.h"
 
+#include "RdpClipboard.h"
+
 #include <QCoreApplication>
 #include <QProcess>
 #include <QStandardPaths>
@@ -18,6 +20,7 @@
 #endif
 
 #ifdef CUBESHELL_HAVE_FREERDP
+#include <freerdp/channels/cliprdr.h>
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
 #ifdef CUBESHELL_HAVE_FREERDP_CLIENT
@@ -229,6 +232,10 @@ public:
         : QThread(client)
         , m_client(client)
         , m_settings(settings)
+        , m_clipboard(client->clipboard())
+        // 开关与剪贴板对象在建连前定格：cliprdr 插件的加载发生在建连期，
+        // 会话中途改开关本来就不生效，快照下来免得 worker 跨线程读主线程的成员。
+        , m_clipboardSync(client->isClipboardSyncEnabled())
     {
     }
 
@@ -247,14 +254,16 @@ public:
 
     // 输入事件的队列传输载体（tagged union 风格；跨线程只做值拷贝）。
     // 对应Python: in_q 中流转的 RDP_KEYBOARD_SCANCODE / RDP_KEYBOARD_UNICODE /
-    // RDP_MOUSE / RDP_CLIPBOARD_DATA_TXT 数据对象
+    // RDP_MOUSE 数据对象
+    //（剪贴板不走这条队列：那是键鼠输入的通道，而剪贴板走 RdpClipboard 自己的
+    //  加锁快照——挤进来只会让两边都难读，且剪贴板需要的是"最新一份"语义而不是
+    //  逐条重放。）
     struct InputEvent {
-        enum class Type { KeyScancode, KeyUnicode, Mouse, ClipboardText };
+        enum class Type { KeyScancode, KeyUnicode, Mouse };
         Type type = Type::KeyScancode;
         RdpKeyEvent key;                // Type::KeyScancode
         RdpUnicodeKeyEvent unicodeKey;  // Type::KeyUnicode
         RdpMouseEvent mouse;            // Type::Mouse
-        QString clipboardText;          // Type::ClipboardText
     };
 
     // 主线程入队（QMutex 保护），Worker 线程在事件循环中 poll 出队。
@@ -449,6 +458,25 @@ private:
         // 嵌入式面板渲染：软件 GDI，忽略自签证书（与 Python 侧堡垒机场景一致）
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
+        // cliprdr 虚拟通道。这个 bool 就是 freerdp_client_load_channels 用来决定
+        // 是否加载 cliprdr 插件的开关——同步关掉时压根不加载通道，比加载了再在
+        // 回调里拦干净（也省掉一条本可能出错的路径）。
+        freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard,
+                                  (m_clipboardSync && m_clipboard) ? TRUE : FALSE);
+        // 通道就绪/拆除靠 PubSub 通知：cliprdr 的 CliprdrClientContext 是插件在
+        // 建连期自己创建的，除了这个事件没有别的拿它的途径。订阅必须在
+        // freerdp_connect() 之前完成（通道在建连过程中就会连上）。
+        if (m_clipboardSync && m_clipboard) {
+            // 两个 Subscribe 都是 NODISCARD 的，返回值必须看：订阅失败就等于
+            // 剪贴板静默不工作，宁可留一行日志。
+            const int rcConnected = PubSub_SubscribeChannelConnected(
+                instance->context->pubSub, &FreeRdpWorker::channelConnected);
+            const int rcDisconnected = PubSub_SubscribeChannelDisconnected(
+                instance->context->pubSub, &FreeRdpWorker::channelDisconnected);
+            rdpLog(QStringLiteral("runConnection: cliprdr 订阅 connected=%1 disconnected=%2")
+                       .arg(rcConnected)
+                       .arg(rcDisconnected));
+        }
 
         rdpLog(QStringLiteral("runConnection: settings configured w=%1 h=%2, "
                               "about to call freerdp_connect NOW")
@@ -467,6 +495,9 @@ private:
             emit m_client->errorOccurred(connectErrorMessage(instance, target));
             releaseInstance(instance);
             m_instance = nullptr;
+            // 通道可能连上过又随失败的建连一起没了，ChannelDisconnected 未必来。
+            if (m_clipboard)
+                m_clipboard->abandon();
 #ifdef Q_OS_WIN
             rdpRemoveVectoredHandler(veh);
 #endif
@@ -505,6 +536,10 @@ private:
             }
             // 对应Python: loop.call_soon_threadsafe(conn.ext_in_queue.put_nowait, data)
             flushInputQueue(instance);
+            // 主线程排进来的剪贴板动作（公告新快照 / 取回远端文件）在这里派发，
+            // 与 flushInputQueue 同一个位置、同一个理由：只有本线程能碰通道。
+            if (m_clipboard)
+                m_clipboard->pump();
             if (!freerdp_check_event_handles(instance->context)) {
                 rdpLog(QStringLiteral("runConnection: freerdp_check_event_handles FALSE"));
                 break;
@@ -542,6 +577,12 @@ private:
         rdpLog(QStringLiteral("runConnection: freerdp_disconnect done"));
         releaseInstance(instance);
         m_instance = nullptr;
+        // 兜底：正常路径下 ChannelDisconnected 已经把通道拆干净了，abandon() 是
+        // 空操作。异常路径（事件循环因协议错误提前 break）下事件可能不来，这里
+        // 只清我们自己的东西、绝不回写已释放的 cliprdr context。重连是热路径，
+        // 漏一次就会带着旧 context 进下一个会话。
+        if (m_clipboard)
+            m_clipboard->abandon();
 #ifdef Q_OS_WIN
         // 会话彻底结束、上下文已释放，此处才拆除异常处理器。
         rdpRemoveVectoredHandler(veh);
@@ -603,6 +644,40 @@ private:
                            .arg(target.host);
         }
         return message;
+    }
+
+    // 回调里从 pubSub/FreeRDP 传回的 context 取回 worker。核心 fire 这些事件时
+    // 传的就是 rdpContext*，而 WorkerContext 以它（或以它为首成员的
+    // rdpClientContext）开头，故强转在两种布局下都成立。
+    static FreeRdpWorker *workerOf(void *context)
+    {
+        auto *wctx = reinterpret_cast<WorkerContext *>(context);
+        return wctx ? wctx->worker : nullptr;
+    }
+
+    // cliprdr 的 CliprdrClientContext 是插件在建连期自己 new 出来的，除了这两个
+    // PubSub 事件没有别的拿到它的途径。两个回调都在 worker 线程触发（建连过程
+    // 或事件循环内），正好是 RdpClipboard 要求装卸通道的线程。
+    static void channelConnected(void *context, const ChannelConnectedEventArgs *e)
+    {
+        FreeRdpWorker *worker = workerOf(context);
+        if (!worker || !e || qstrcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) != 0)
+            return;
+        rdpLog(QStringLiteral("channelConnected: cliprdr"));
+        if (worker->m_clipboard)
+            worker->m_clipboard->attach(e->pInterface);
+    }
+
+    static void channelDisconnected(void *context, const ChannelDisconnectedEventArgs *e)
+    {
+        FreeRdpWorker *worker = workerOf(context);
+        if (!worker || !e || qstrcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) != 0)
+            return;
+        rdpLog(QStringLiteral("channelDisconnected: cliprdr"));
+        // 必须在这里拆（而不是等 freerdp_disconnect 之后）：这个事件发生在插件
+        // 释放自己的 context 之前，是最后一个还能安全回写它的时机。
+        if (worker->m_clipboard)
+            worker->m_clipboard->detach(e->pInterface);
     }
 
     // 建连前回调：只做 settings 等基础状态校验。通道加载不在此处做——
@@ -852,11 +927,6 @@ private:
                     static_cast<UINT16>(ev.mouse.x),
                     static_cast<UINT16>(ev.mouse.y));
                 break;
-            case InputEvent::Type::ClipboardText:
-                // 对应Python: RDP_CLIPBOARD_DATA_TXT（CF_UNICODETEXT）
-                // TODO: 需集成 FreeRDP cliprdr channel（格式协商 + 数据响应
-                // 回调），实现复杂，此处预留接口暂不派发。
-                break;
             }
         }
     }
@@ -864,6 +934,10 @@ private:
     RdpClient *m_client = nullptr;
     RdpSettings m_settings;
     freerdp *m_instance = nullptr;
+    // 剪贴板通道。对象归 RdpClient（主线程创建、活得比 worker 长），worker 只在
+    // 通道连上/断开与每轮循环里调它的 worker 侧方法。
+    RdpClipboard *m_clipboard = nullptr;
+    bool m_clipboardSync = true;
     // 线程安全输入队列（值语义元素，Worker 析构时随成员自动安全释放）。
     // 对应Python: RDPWidget 里的 in_q = queue.Queue()
     QMutex m_inputMutex;
@@ -877,6 +951,7 @@ private:
 // ---------------------------------------------------------------------------
 RdpClient::RdpClient(QObject *parent)
     : QObject(parent)
+    , m_clipboard(new RdpClipboard(this))
 {
     // 状态机集中维护：两种后端都只发 connected/disconnected/errorOccurred，
     // state 由这里统一推进，避免重连时重复挂接。
@@ -888,10 +963,30 @@ RdpClient::RdpClient(QObject *parent)
         if (m_state == State::Connecting)
             setState(State::Disconnected);
     });
+
+    // 剪贴板信号转发到 RdpClient 的对外接口，面板只跟 client 打交道。
+    // 这些 connect 是自动 QueuedConnection（信号发自 cliprdr 的通道线程，而
+    // RdpClient 住在主线程），到达 UI 侧时已经在主线程——远端→本机那条路才敢
+    // 在槽里碰 QClipboard。队列化同时保证了 emit 立即返回：发信号那侧正握着
+    // RdpClipboard 的 channelMutex，同步派发就会把 UI 线程拖进那个临界区。
+    connect(m_clipboard, &RdpClipboard::textReceived,
+            this, &RdpClient::clipboardTextReceived);
+    connect(m_clipboard, &RdpClipboard::remoteFilesAvailable,
+            this, &RdpClient::remoteClipboardFilesAvailable);
+    connect(m_clipboard, &RdpClipboard::remoteFilesFetched,
+            this, &RdpClient::remoteClipboardFilesFetched);
+    connect(m_clipboard, &RdpClipboard::fetchProgress,
+            this, &RdpClient::remoteClipboardFetchProgress);
+    // 剪贴板失败**不**并进 errorOccurred：那条信号的语义是"建连/会话出错"，面板
+    // 会据此报"连接错误"并把提示画到画面区。一次取回失败不该长成断连的样子。
+    connect(m_clipboard, &RdpClipboard::errorOccurred,
+            this, &RdpClient::clipboardError);
 }
 
 RdpClient::~RdpClient()
 {
+    // 先停 worker：它会在 run() 收尾时 abandon() 剪贴板。反过来的话 worker 还在
+    // 事件循环里 pump() 一个正在析构的对象。
     disconnectFromHost();
 }
 
@@ -1197,27 +1292,60 @@ void RdpClient::sendMouseEvent(const RdpMouseEvent &event)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// 剪贴板同步（cliprdr 通道）
+// ---------------------------------------------------------------------------
+// 都不再走输入队列：剪贴板要的是「最新一份快照」语义而不是逐条重放，且远端来
+// 要数据时 worker 必须能同步答上（见 RdpClipboard.h 的线程模型）。
+
+void RdpClient::setClipboardSyncEnabled(bool enabled)
+{
+    m_clipboardSync = enabled;
+    // 不动 m_clipboard：通道的加载在建连期定死，本次会话不受影响。下次建连时
+    // worker 会读走这个值。
+}
+
+void RdpClient::fetchRemoteClipboardFiles(const QString &destDir)
+{
+    if (m_clipboard)
+        m_clipboard->fetchRemoteFiles(destDir);
+}
+
+void RdpClient::cancelRemoteClipboardFetch()
+{
+    if (m_clipboard)
+        m_clipboard->cancelFetch();
+}
+
 // 对应Python: in_q.put(RDP_CLIPBOARD_DATA_TXT)
 void RdpClient::sendClipboardText(const QString &text)
 {
-#ifdef CUBESHELL_HAVE_FREERDP
-    if (m_worker) {
-        FreeRdpWorker::InputEvent ev;
-        ev.type = FreeRdpWorker::InputEvent::Type::ClipboardText;
-        ev.clipboardText = text;
-        m_worker->enqueueInput(ev);
-    }
-#else
-    Q_UNUSED(text);
-#endif
+    if (!m_clipboard)
+        return;
+    RdpClipboardSnapshot snapshot;
+    snapshot.text = text;
+    m_clipboard->setLocalSnapshot(snapshot);
 }
 
 // 对应Python: clipboard_send_files（conn.set_current_clipboard_files）
 void RdpClient::clipboardSendFiles(const QStringList &paths)
 {
-    // TODO: 需 FreeRDP cliprdr channel 的文件列表格式（CF_HDROP/FileGroup
-    // Descriptor）支持，实现复杂，此处预留接口暂不派发。
-    Q_UNUSED(paths);
+    if (!m_clipboard)
+        return;
+    RdpClipboardSnapshot snapshot;
+    snapshot.files = paths;
+    m_clipboard->setLocalSnapshot(snapshot);
+}
+
+// rdp/ 目录内共用的日志入口（声明见 RdpClient.h）。rdpLog 是本文件的静态实现，
+// 这里只做导出转发，让 RdpClipboard.cpp 能写进同一份 rdp_debug.log。
+void rdpDebugLog(const QString &msg)
+{
+#ifdef CUBESHELL_HAVE_FREERDP
+    rdpLog(msg);
+#else
+    Q_UNUSED(msg);
+#endif
 }
 
 } // namespace cubeshell

@@ -27,6 +27,13 @@ class QProcess;
 
 namespace cubeshell {
 
+class RdpClipboard;
+
+// rdp/ 目录内共用的诊断日志：落 AppLocalDataLocation/rdp_debug.log，一行一条并
+// 立即 flush。建连过程（RdpClient）与 cliprdr 通道事件（RdpClipboard）写同一份
+// 文件，出问题时能按时间线对读。FreeRDP 缺席时是空操作。
+void rdpDebugLog(const QString &msg);
+
 // 连接参数。对应Python: build_rdp_url 的入参 + RDPIOSettings 的分辨率字段
 struct RdpSettings {
     QString host;
@@ -110,6 +117,27 @@ public:
     void sendKeyUnicode(const RdpUnicodeKeyEvent &event);
     // 对应Python: in_q.put(RDP_MOUSE)
     void sendMouseEvent(const RdpMouseEvent &event);
+
+    // ---------------- 剪贴板同步（cliprdr 通道）----------------
+
+    // 必须在 connectToHost() 之前设置：cliprdr 插件是在建连期由
+    // freerdp_client_load_channels 按 FreeRDP_RedirectClipboard 决定加载的，
+    // 改开关要重连才生效。默认开（照 mstsc 的习惯）。
+    void setClipboardSyncEnabled(bool enabled);
+    bool isClipboardSyncEnabled() const { return m_clipboardSync; }
+
+    // 剪贴板对象（信号在主线程发；同步关闭时仍然存在，只是不接通道）。
+    RdpClipboard *clipboard() const { return m_clipboard; }
+
+    // 把远端剪贴板里的文件取回到 destDir（必须已存在），结果经
+    // remoteClipboardFilesFetched / clipboardError 回报。
+    void fetchRemoteClipboardFiles(const QString &destDir);
+
+    // 中止正在进行的取回（自动取回超限时的兜底闸门）。
+    void cancelRemoteClipboardFetch();
+
+    // 下面两个是「本机剪贴板现在装着什么」的整体设置器——不是增量：设文本会
+    // 清掉文件、设文件会清掉文本，与系统剪贴板的互斥语义一致。
     // 对应Python: in_q.put(RDP_CLIPBOARD_DATA_TXT)
     void sendClipboardText(const QString &text);
     // 对应Python: clipboard_send_files
@@ -125,6 +153,18 @@ signals:
     // 对应Python: result 信号（RDPImage 帧）；仅 FreeRDP 后端发射
     void frameUpdated(const QImage &frame);
 
+    // 远端剪贴板 → 本机文本（已在主线程，可直接写 QClipboard）。
+    void clipboardTextReceived(const QString &text);
+    // 远端公告了 count 个文件，还没传内容；count==0 表示远端已无文件可取。
+    void remoteClipboardFilesAvailable(int count);
+    // 取回完成，localPaths 是落地后的本地绝对路径。
+    void remoteClipboardFilesFetched(const QStringList &localPaths);
+    // 取回进度（已完成字节 / 总字节；总字节未知时 total 为 0）。
+    void remoteClipboardFetchProgress(qint64 received, qint64 total);
+    // 剪贴板同步出错（取回失败、格式协商被拒等）。与 errorOccurred 分开：会话
+    // 还活着，不该让面板报"连接错误"。
+    void clipboardError(const QString &message);
+
 private:
     void setState(State state);
     QString resolveCommandLineArgs(QStringList *args) const; // 返回程序名
@@ -133,6 +173,12 @@ private:
     RdpSettings m_settings;
     QProcess *m_process = nullptr; // 命令行后备的外部进程
     QString m_lastProcessError;    // 进程错误暂存，由 finished 槽统一发射
+
+    // 只随 CUBESHELL_WITH_RDP 存在，与 CUBESHELL_HAVE_FREERDP 无关——后者是
+    // cube_core 的 PRIVATE 宏，若成员随它增减，单测编译单元看到的类布局就与库里
+    // 的不一致（ODR）。RdpClipboard 自己用 pimpl 吞掉了这层差异。
+    RdpClipboard *m_clipboard = nullptr;
+    bool m_clipboardSync = true;
 
 #ifdef CUBESHELL_HAVE_FREERDP
     class FreeRdpWorker;

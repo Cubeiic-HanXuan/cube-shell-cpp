@@ -141,8 +141,9 @@ endif()
 # 对应Python: core/rdp/rdp_client.py
 if(CUBESHELL_WITH_RDP)
     list(APPEND CORE_SOURCES
-        rdp/RdpClient.cpp   # port of core/rdp/rdp_client.py (connection mgmt)
-        rdp/RdpPanel.cpp    # port of core/rdp/rdp_client.py::RDPWidget (UI)
+        rdp/RdpClient.cpp     # port of core/rdp/rdp_client.py (connection mgmt)
+        rdp/RdpClipboard.cpp  # cliprdr 剪贴板重定向（Python 版无对应实现）
+        rdp/RdpPanel.cpp      # port of core/rdp/rdp_client.py::RDPWidget (UI)
     )
 endif()
 

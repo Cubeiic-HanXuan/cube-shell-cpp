@@ -247,6 +247,17 @@ void GlobalState::setScrollbackLines(int lines)
     m_theme.insert(QStringLiteral("scrollback_lines"), lines);
 }
 
+// C++ 侧新增键；缺省 true —— 保持加开关之前"无条件启用补全"的行为不变。
+bool GlobalState::commandCompletionEnabled() const
+{
+    return m_theme.value(QStringLiteral("command_completion")).toBool(true);
+}
+
+void GlobalState::setCommandCompletionEnabled(bool enabled)
+{
+    m_theme.insert(QStringLiteral("command_completion"), enabled);
+}
+
 // C++ 侧新增键；缺省回退平台默认（macOS 15，其它 14），与设备列表历史硬编码一致。
 int GlobalState::deviceListFontSize() const
 {

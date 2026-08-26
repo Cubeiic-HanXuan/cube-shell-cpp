@@ -273,6 +273,14 @@ static void testGlobalState()
     CHECK(gs.appearance() == QStringLiteral("light"));
     gs.setFont(QStringLiteral("Menlo"), 16);
     CHECK(gs.fontFamily() == QStringLiteral("Menlo") && gs.fontSize() == 16);
+
+    // 命令补全开关：theme.json 里没有该键时缺省 true（与加开关之前的行为一致），
+    // 显式关闭后能读回 false。
+    CHECK(gs.commandCompletionEnabled());
+    gs.setCommandCompletionEnabled(false);
+    CHECK(!gs.commandCompletionEnabled());
+    gs.setCommandCompletionEnabled(true);
+    CHECK(gs.commandCompletionEnabled());
 }
 
 static void testSecretsCompileLevel()

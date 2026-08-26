@@ -42,6 +42,7 @@
 #include "ssh_session_tab.h"
 #include "ssh_terminal_widget.h"
 #include "status_box_item.h"
+#include "terminal_command_suggest.h"
 #include "terminal_tab_widget.h"
 #include "dialogs/AboutDialog.h"
 #include "dialogs/AddTunnelDialog.h"
@@ -2898,6 +2899,13 @@ void MainWindow::showSettings(int tabIndex)
         const QList<QTermWidget *> terms = findChildren<QTermWidget *>();
         for (QTermWidget *t : terms)
             t->setHistorySize(lines);
+    });
+    // 命令补全开关即时应用到所有已打开会话的提示控制器（不必重开 Tab）。
+    connect(&dlg, &SettingsDialog::commandCompletionEnabledChanged, this, [this](bool on) {
+        const QList<TerminalCommandSuggest *> suggests =
+            findChildren<TerminalCommandSuggest *>();
+        for (TerminalCommandSuggest *s : suggests)
+            s->setEnabled(on);
     });
     dlg.exec();
 }

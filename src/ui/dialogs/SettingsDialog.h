@@ -8,6 +8,7 @@
 
 #include <QDialog>
 
+class QCheckBox;
 class QComboBox;
 class QFontComboBox;
 class QListWidget;
@@ -43,6 +44,8 @@ signals:
     void deviceListFontSizeChanged(int pointSize);
     // 回滚行数已修改，已打开的终端可即时应用（setHistorySize）。
     void scrollbackLinesChanged(int lines);
+    // 命令补全开关已修改，已打开的终端可即时生效（无需重开会话）。
+    void commandCompletionEnabledChanged(bool enabled);
 
 private:
     QWidget *createThemeTab();
@@ -59,6 +62,7 @@ private:
     QSpinBox *m_sshTimeout = nullptr;     // 秒
     QComboBox *m_encoding = nullptr;      // UTF-8 / GBK / GB2312
     QSpinBox *m_scrollback = nullptr;     // 终端回滚行数（搜索可检索的范围）
+    QCheckBox *m_commandCompletion = nullptr; // 终端命令补全开关（默认开启）
     QString m_originalAppearance;         // Cancel 时还原实时预览
 };
 

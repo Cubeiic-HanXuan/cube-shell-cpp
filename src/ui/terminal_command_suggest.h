@@ -54,6 +54,12 @@ public:
     void setPaused(bool paused);
     bool paused() const { return m_paused; }
 
+    // 补全总开关（设置 → 通用 → 终端命令补全）。关闭后不弹候选窗、
+    // Ctrl+Space 也不唤起；输入跟踪与历史记录照常，便于再开启时立即有候选。
+    // 与 setPaused 相互独立：暂停是连接过程中的临时状态，这里是用户偏好。
+    void setEnabled(bool enabled);
+    bool isEnabled() const { return m_enabled; }
+
 private slots:
     // 终端按键事件（来自 QTermWidget::termKeyPressed）。
     // 对应Python: _on_term_key_pressed (L7463-7528)
@@ -111,6 +117,7 @@ private:
     QString m_lastInput;                         // 上次触发弹窗的输入（去重）
     qint64 m_lastDeleteMs = 0;                   // 上次删除键时间戳（毫秒）
     bool m_paused = false;                       // 暂停中（见 setPaused）
+    bool m_enabled = true;                       // 补全开关（见 setEnabled）
 };
 
 } // namespace cubeshell

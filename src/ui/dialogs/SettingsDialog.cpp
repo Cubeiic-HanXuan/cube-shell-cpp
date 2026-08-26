@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFontComboBox>
@@ -53,6 +54,7 @@ static const char kDeviceListFontSize[] = "settings/device_list_font_size";
 static const char kSshTimeout[] = "settings/ssh_timeout";
 static const char kEncoding[]   = "settings/terminal_encoding";
 static const char kScrollback[] = "settings/scrollback_lines";
+static const char kCommandCompletion[] = "settings/command_completion";
 } // namespace settings_keys
 
 // 对应Python: function/theme.py::MainWindow.__init__（设置窗布局）
@@ -186,6 +188,13 @@ QWidget *SettingsDialog::createGeneralTab()
                                 "行数越大越占内存，排查线上日志建议 10000 以上。"));
     unifyFieldWidth(m_scrollback);
     form->addRow(tr("终端回滚行数："), m_scrollback);
+
+    // 命令补全总开关：关掉后终端输入时不再弹候选窗、Ctrl+Space 也不唤起。
+    // 默认开启，保持加开关之前的行为；历史命令始终照常记录。
+    m_commandCompletion = new QCheckBox(tr("启用（输入时自动弹出候选，Ctrl+Space 手动唤起）"), page);
+    m_commandCompletion->setToolTip(tr("开启后在终端输入时自动弹出命令补全候选（历史命令 + 常用命令）。\n"
+                                       "关闭则完全不弹候选窗，Ctrl+Space 也不再唤起。"));
+    form->addRow(tr("终端命令补全："), m_commandCompletion);
     return page;
 }
 
@@ -231,6 +240,10 @@ void SettingsDialog::loadCurrentSettings()
 
     m_scrollback->setValue(
         qs.value(settings_keys::kScrollback, state.scrollbackLines()).toInt());
+
+    m_commandCompletion->setChecked(
+        qs.value(settings_keys::kCommandCompletion,
+                 state.commandCompletionEnabled()).toBool());
 }
 
 int SettingsDialog::sshTimeoutSeconds() const
@@ -274,6 +287,10 @@ void SettingsDialog::accept()
     const bool scrollbackDirty = scrollback != state.scrollbackLines();
     state.setScrollbackLines(scrollback);
 
+    const bool completion = m_commandCompletion->isChecked();
+    const bool completionDirty = completion != state.commandCompletionEnabled();
+    state.setCommandCompletionEnabled(completion);
+
     // QSettings 持久化（本对话框全部设置项）。
     qs.setValue(settings_keys::kTheme, appearance);
     qs.setValue(settings_keys::kLanguage, m_language->currentData().toString());
@@ -283,6 +300,7 @@ void SettingsDialog::accept()
     qs.setValue(settings_keys::kSshTimeout, m_sshTimeout->value());
     qs.setValue(settings_keys::kEncoding, m_encoding->currentText());
     qs.setValue(settings_keys::kScrollback, scrollback);
+    qs.setValue(settings_keys::kCommandCompletion, completion);
 
     // theme.json 同步写回（与 Python 版共享配置）。
     QString err;
@@ -297,6 +315,8 @@ void SettingsDialog::accept()
         emit deviceListFontSizeChanged(deviceListSize);
     if (scrollbackDirty)
         emit scrollbackLinesChanged(scrollback);
+    if (completionDirty)
+        emit commandCompletionEnabledChanged(completion);
 
     // 语言切换（LanguageManager 内部会写回 GlobalState 并持久化）。
     const QString langCode = m_language->currentData().toString();

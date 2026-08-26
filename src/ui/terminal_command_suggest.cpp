@@ -14,6 +14,7 @@
 #include "qtermwidget.h"
 #include "TerminalDisplay.h"
 
+#include "config/GlobalState.h"
 #include "terminal/CommandHistory.h"
 #include "terminal/CommandIndex.h"
 
@@ -66,6 +67,10 @@ TerminalCommandSuggest::TerminalCommandSuggest(QTermWidget *term,
     , m_profileKey(profileKey)
     , m_history(std::make_unique<CommandHistory>())
 {
+    // 补全总开关的初值直接取自全局设置（设置 → 通用 → 终端命令补全），
+    // 这样每个新建终端都自动跟随用户偏好，调用方无需逐个下发。
+    m_enabled = GlobalState::instance().commandCompletionEnabled();
+
     // 历史底层数据同进程按文件路径共享（多 Tab 不互相覆盖），
     // 磁盘文件与 Python 侧共用同一 command_history.json。
     // 对应Python: self._history_data = self._load_history_data() (L7336-7340)
@@ -114,6 +119,20 @@ void TerminalCommandSuggest::setPaused(bool paused)
     }
     m_inputBuffer.clear();
     m_lastInput.clear();
+}
+
+// 补全开关：关闭时立刻收起已弹出的候选窗并停掉待触发的防抖定时器。
+// 不清 m_inputBuffer —— 输入跟踪与回车写历史继续照常工作，用户回头再开启时
+// 历史候选是完整的。
+void TerminalCommandSuggest::setEnabled(bool enabled)
+{
+    if (m_enabled == enabled)
+        return;
+    m_enabled = enabled;
+    if (!enabled) {
+        m_timer->stop();
+        hideSuggestions();
+    }
 }
 
 // 弹窗可见时拦截"导航/选择"按键；隐藏时所有按键交给终端。
@@ -377,6 +396,9 @@ QList<SuggestionItem> TerminalCommandSuggest::suggestionItems(const QString &tex
 // 对应Python: _schedule_suggestions (L7907-7915)
 void TerminalCommandSuggest::scheduleSuggestions()
 {
+    // 补全已关闭：不算候选、不起定时器（自动弹出路径的唯一入口）。
+    if (!m_enabled)
+        return;
     if (m_term->isAppScreenMode())
         return;
     m_timer->start(80);
@@ -425,6 +447,9 @@ void TerminalCommandSuggest::autoShowSuggestions()
 // 对应Python: _show_suggestions_menu (L7996-8031)
 void TerminalCommandSuggest::showSuggestionsMenu()
 {
+    // 补全已关闭：连 Ctrl+Space 手动唤起也不弹（那条分支直接调到这里）。
+    if (!m_enabled)
+        return;
     const QString text = lstripped(m_inputBuffer);
     const QList<SuggestionItem> items = suggestionItems(text);
     if (items.isEmpty()) {

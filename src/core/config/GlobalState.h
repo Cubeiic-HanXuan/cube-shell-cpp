@@ -133,6 +133,12 @@ public:
     int scrollbackLines() const;
     void setScrollbackLines(int lines);
 
+    // 终端命令补全总开关 (theme.json 的 "command_completion")，默认开启。
+    // 关闭后终端不再弹候选窗、Ctrl+Space 也不唤起；历史命令仍照常记录，
+    // 便于再次开启时立刻有候选可用。
+    bool commandCompletionEnabled() const;
+    void setCommandCompletionEnabled(bool enabled);
+
     // 设备列表字号 (theme.json 的 "device_list_font_size")。
     // C++ 侧新增键；Python 版读不到该键时按自己的默认走，互不影响。
     // 默认值与设备列表历史硬编码一致（macOS 15，其它平台 14）。

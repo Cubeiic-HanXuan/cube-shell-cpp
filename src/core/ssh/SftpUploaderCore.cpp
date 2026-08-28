@@ -568,10 +568,18 @@ void SftpUploaderCore::batchUpload(const QHash<QString, QPair<QString, QString>>
 // 对应Python: cancel_upload
 void SftpUploaderCore::cancelUpload(const QString &fileId)
 {
-    QMutexLocker locker(&m_ctx->lock);
-    auto it = m_ctx->cancelFlags.find(fileId);
-    if (it != m_ctx->cancelFlags.end())
-        it.value()->store(true);
+    {
+        QMutexLocker locker(&m_ctx->lock);
+        auto it = m_ctx->cancelFlags.find(fileId);
+        if (it != m_ctx->cancelFlags.end())
+            it.value()->store(true);
+    }
+    // 传输走的是连接池的克隆连接，那是**阻塞模式** session：正卡在
+    // libssh2_sftp_write 里的流不会回到分片边界去看取消标志，只会挂到 TCP
+    // 超时，终态信号迟迟不发，界面就一直停在"正在上传"。打断它们的 socket，
+    // 让阻塞调用立刻带错误返回、工作线程随即发出终态信号，取消才是即时的。
+    // 与下载侧 SftpClient::cancelTransfer 同款处理。
+    m_transferPool->shutdownTransferSockets();
 }
 
 bool SftpUploaderCore::isCancelRequested(const QString &fileId) const

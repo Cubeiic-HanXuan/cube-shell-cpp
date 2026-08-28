@@ -138,6 +138,18 @@ target_link_libraries(upload_teardown_test PRIVATE
     cube_core
 )
 
+# 取消上传后立即重传不能卡死（手动运行，需要活的 sshd；不注册进 ctest）。
+qt_add_executable(cancel_reupload_test
+    cancel_reupload_test.cpp
+)
+target_include_directories(cancel_reupload_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(cancel_reupload_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # 并行上传吞吐对比工具（手动运行，需要活的 sshd；不注册进 ctest）。
 qt_add_executable(parallel_bench
     parallel_bench.cpp

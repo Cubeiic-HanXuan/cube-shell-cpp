@@ -355,9 +355,14 @@ void SftpBrowserWidget::setClient(std::shared_ptr<SshClient> client)
         // 否则各文件的信号会把同一个进度条来回拉扯。
         connect(m_uploader, &SftpUploaderCore::progressChanged, this,
                 [this](const QString &fileId, qint64 done, qint64 total) {
-                    auto &entry = m_activeUploads[fileId];
-                    entry.done = done;
-                    entry.total = total;
+                    // 用 find 而不是 operator[]：已完成/失败/取消后迟到的进度
+                    // （上一个被取消的同名列还在收尾时会再发 progressChanged），
+                    // operator[] 会把已删除的条目重新插回去，让进度条复活卡住。
+                    auto it = m_activeUploads.find(fileId);
+                    if (it == m_activeUploads.end())
+                        return;
+                    it->done = done;
+                    it->total = total;
                     refreshUploadProgress();
                 }, Qt::QueuedConnection);
         connect(m_uploader, &SftpUploaderCore::uploadCompleted, this,

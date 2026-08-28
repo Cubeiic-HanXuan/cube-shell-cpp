@@ -831,6 +831,26 @@ void SshClient::freeChannel(_LIBSSH2_CHANNEL *channel)
     if (!channel)
         return;
     QMutexLocker locker(&m_sessionMutex);
+    // socket 已被 shutdown（取消传输 / 关标签页，见 shutdownSocket）：对端不可达，
+    // 没有可优雅关闭的对象。这时若仍走下面的阻塞式 libssh2_channel_close，它会
+    // 在 _libssh2_wait_socket 的 select 里永远等不到 close-ack —— 取消传输后连接池
+    // 拆除跳板死连接、把 UI 线程一起钉死的实测卡死就发生在这里（调用链：
+    // lease 清理 → disconnectFromHost → ~JumpChainTransport → teardownLink →
+    // freeChannel）。与 closeChannelLocked 同款处置：保持非阻塞 + 有界重试，
+    // 无论对端是否应答都本地释放。
+    if (m_socketShutdown.load() || m_sock < 0) {
+        libssh2_channel_set_blocking(channel, 0);
+        for (int i = 0; i < 20; ++i) {        // 最多 ~100ms 尝试优雅关闭
+            if (libssh2_channel_close(channel) != LIBSSH2_ERROR_EAGAIN)
+                break;
+            struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 5000; // 让出 5ms 再重试
+            ::select(0, nullptr, nullptr, nullptr, &tv);
+        }
+        libssh2_channel_free(channel);
+        return;
+    }
+    // 活连接：翻回阻塞再 close，这才是能把 EOF/close 报文真正发出去的时机
+    // （见 SshJumpChain 中继线程把 EOF/close 留给这里的注释）。
     libssh2_channel_set_blocking(channel, 1);
     libssh2_channel_close(channel);
     libssh2_channel_free(channel);

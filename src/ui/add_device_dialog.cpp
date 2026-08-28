@@ -22,6 +22,42 @@
 
 namespace cubeshell {
 
+// 让 QStackedWidget 只按**当前页**要高度。
+//
+// QStackedLayout::sizeHint() 取的是所有页的最大值，与正在显示哪一页无关。
+// 认证栈的私钥页有两行（私钥类型 + 私钥文件）、密码页只有一行，于是停在密码页
+// 时密码框下面会空出整一行（实测 33px）——SSH 的「密码登录」，以及固定停在密码
+// 页的 RDP / Telnet，三者都吃这个亏。
+//
+// QWidgetItem::sizeHint() 对 Ignored 的方向返回 0，所以把非当前页的**纵向**策略
+// 设成 Ignored，就能把它们从那个 max 里摘掉。横向刻意不动：横向也 Ignored 的话，
+// 最宽的那页（私钥文件行还带个「浏览…」按钮）不再参与宽度计算，切到私钥页时
+// 对话框会突然变宽。
+static void fitStackToCurrentPage(QStackedWidget *stack)
+{
+    if (!stack)
+        return;
+    const QWidget *cur = stack->currentWidget();
+    for (int i = 0; i < stack->count(); ++i) {
+        QWidget *page = stack->widget(i);
+        if (!page)
+            continue;
+        page->setSizePolicy(QSizePolicy::Preferred,
+                            page == cur ? QSizePolicy::Preferred
+                                        : QSizePolicy::Ignored);
+    }
+    // 必须显式通知栈控件自己"我的尺寸建议变了"。
+    //
+    // 上面改的是**页**的策略，而 QStackedWidget 把非当前页设成了 hidden，
+    // QWidgetPrivate::updateGeometry_helper 对隐藏控件不会向上层布局传播失效。
+    // 于是外层 QFormLayout 里缓存栈控件尺寸建议的那个 QWidgetItemV2 不会被清，
+    // 本函数返回后 dialog->sizeHint() 还是**换页前**的高度（实测：切到私钥页读到
+    // 397、切回密码页读到 430，正好差一行），refitHeight() 按这个陈旧值 resize
+    // 就等于没收。加这一句才让缓存同步失效——单靠再多调几次 invalidate()/
+    // activate() 是没用的，那个缓存只认 updateGeometry()。
+    stack->updateGeometry();
+}
+
 AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     : QDialog(parent)
 {
@@ -105,6 +141,17 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     form->addRow(tr("端口："), m_port);
     form->addRow(tr("认证方式："), m_authMethod);
     form->addRow(m_authStack);
+
+    // 代理（仅 SSH 可见）。放在认证之后、协议专属字段之前：它属于"怎么连到
+    // 这台机器"，而下面那些是各协议自己的参数。
+    //
+    // 无标签的整行（同 m_authStack）而不是 addRow("代理：", m_proxy)：控件
+    // 内部第一行就是"代理类型："，塞进字段列的话它会被外层标签宽度再缩进一次。
+    m_proxy = new ProxySettingsWidget(this);
+    form->addRow(m_proxy);
+    // 类型切换会改变行数，跟着重算对话框高度。
+    connect(m_proxy, &ProxySettingsWidget::typeChanged, this,
+            &AddDeviceDialog::refitHeight);
 #ifdef CUBESHELL_WITH_RDP
     // RDP 认证方式 + 域（仅 RDP 时可见）。
     // 对应Python: _inject_protocol_fields（cube-shell.py:6024-6033）
@@ -214,6 +261,7 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     collectLabel(form, m_host);
     collectLabel(form, m_port);
     collectLabel(form, m_authMethod);
+    formLabels += m_proxy->formLabels();   // 代理控件内部那张表也纳入同一列
     collectLabel(pwForm, m_password);
     collectLabel(keyForm, m_keyType);
     collectLabel(keyForm, keyFileRow);
@@ -329,9 +377,38 @@ void AddDeviceDialog::setDevice(const DeviceEntry &e)
         m_password->setText(e.password);
     }
     onAuthMethodChanged(m_authMethod->currentIndex());
+    // 代理。setProxyDeviceCatalog 由调用方在 setDevice 前后任意时机调用都行
+    //（控件内部两个函数都会拿存着的目录重建下拉）。
+    m_proxy->setConfig(e.proxy);
     // 回填不算用户编辑——setText 会触发 textEdited 之外的信号，但我们连的是
     // textEdited（仅用户输入才发），这里再清一次是为了防止将来改用 textChanged。
     m_passwordEdited = false;
+}
+
+void AddDeviceDialog::setHasStoredProxyPassword(bool has)
+{
+    m_proxy->setHasStoredPassword(has);
+}
+
+bool AddDeviceDialog::proxyPasswordEdited() const
+{
+    return m_proxy->passwordEdited();
+}
+
+void AddDeviceDialog::setProxyDeviceCatalog(const QList<ProxyDeviceItem> &devices,
+                                            const QString &excludeId)
+{
+    m_proxy->setDeviceCatalog(devices, excludeId);
+}
+
+void AddDeviceDialog::setProxyPasswordResolver(std::function<QString(const QString &)> resolver)
+{
+    m_proxyPasswordResolver = std::move(resolver);
+}
+
+void AddDeviceDialog::setJumpHostPublisher(std::function<void(const QStringList &)> publisher)
+{
+    m_jumpHostPublisher = std::move(publisher);
 }
 
 void AddDeviceDialog::setHasStoredPassword(bool has)
@@ -370,6 +447,10 @@ void AddDeviceDialog::onTestConnection()
     // 得拿钥匙串里的真实密码去测，否则一改端口再测就误报认证失败。
     if (e.password.isEmpty() && !e.usesKey() && m_passwordResolver)
         e.password = m_passwordResolver(e.id);
+    // 代理口令同理，语义逐字对应。不补的话"代理需要认证"的设备一测就红，
+    // 而真正连接时明明是通的——这个按钮给出与实际相反的结论比没有它更糟。
+    if (e.proxy.password.isEmpty() && m_proxyPasswordResolver)
+        e.proxy.password = m_proxyPasswordResolver(e.id);
 
     // 密码非必填（见 validate）：SSH 密码登录却一个密码都没有时别真去连——
     // 「测试连接」不做交互式应答（promptCb 传 nullptr），空密码只会撞回
@@ -385,6 +466,14 @@ void AddDeviceDialog::onTestConnection()
     m_testStatus->setText(tr("正在测试连接…"));
     m_testStatus->setStyleSheet(QString());
     m_testStatus->setVisible(true);
+
+    // 把这一刻选中的跳板机推给建连路径。必须在起测之**前**：建链跑在工作线程上，
+    // 按 id 查的是 GlobalState 里那份快照，而快照只认已保存的设备，对话框里刚
+    // 选好还没保存的这一跳不在其中（详见 setJumpHostPublisher 的说明）。
+    // 只在类型确实是「跳转服务器」时推：别的类型下 hopIds 可能是切类型留下的
+    // 残留，照着它去解析凭据等于白读一次钥匙串。
+    if (e.proxy.type == ProxyType::JumpHost && m_jumpHostPublisher)
+        m_jumpHostPublisher(e.proxy.hopIds);
 
     bool started;
 #ifdef CUBESHELL_WITH_SERIAL
@@ -496,12 +585,32 @@ DeviceEntry AddDeviceDialog::device() const
         e.keyType.clear();
         e.keyFile.clear();
     }
+    // 代理只对 SSH 取值：上面 4 个提前 return（串口 / telnet+tcp / RDP）都不
+    // 经过这里，于是那些协议的条目 proxy.type 恒为 None——与本轮"只接线 SSH"
+    // 的范围一致（见 SshClient::setProxyConfig），也不会在 devices.json 里
+    // 留下一份永远不会被读的代理配置。
+    e.proxy = m_proxy->config();
     return e;
 }
 
 void AddDeviceDialog::onAuthMethodChanged(int index)
 {
     m_authStack->setCurrentIndex(index);
+    // 密码页一行、私钥页两行，换页后高度真的变了，得重新收一次——
+    // 不收的话，私钥页切回密码页会在密码框下面留出那一行空白。
+    fitStackToCurrentPage(m_authStack);
+    refitHeight();
+}
+
+void AddDeviceDialog::refitHeight()
+{
+    // invalidate() 丢弃各层缓存的 sizeHint，activate() 立即重算。
+    m_form->invalidate();
+    if (QLayout *top = layout()) {
+        top->invalidate();
+        top->activate();
+    }
+    resize(width(), sizeHint().height());
 }
 
 QString AddDeviceDialog::selectedProtocol() const
@@ -567,9 +676,13 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
     // 密码页在 SSH/RDP/Telnet 下可见（后两者固定停在密码页）。
     m_form->setRowVisible(m_authMethod, isSsh);
     m_form->setRowVisible(m_authStack, isSsh || isRdp || isTelnet);
+    // 代理只有 SSH 需要：本轮只给 SSH 接线（Telnet/TCP 走 TcpClient，是另一条
+    // 建连路径）。给 RDP/串口显示一个连接期不会被读的代理配置，比不显示更糟。
+    m_form->setRowVisible(m_proxy, isSsh);
     if (!isSsh)
         m_authMethod->setCurrentIndex(0);
     m_authStack->setCurrentIndex(isSsh ? m_authMethod->currentIndex() : 0);
+    fitStackToCurrentPage(m_authStack);
 
 #ifdef CUBESHELL_WITH_RDP
     m_form->setRowVisible(m_rdpAuth, isRdp);
@@ -621,19 +734,8 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
         }
     }
 
-    // 行显隐后把对话框收回到内容高度。
-    // QFormLayout 隐藏行会让 sizeHint 变小，但 QDialog 不会自动跟着缩小
-    //（窗口尺寸一旦被撑大就保持不变），多出来的高度会在表单和按钮之间
-    // 显示成一块空白，且每次切到字段更多的协议再切回来就多留一截。
-    // invalidate() 丢弃各层缓存的 sizeHint，activate() 立即重算。
-    m_form->invalidate();
-    if (QLayout *top = layout()) {
-        top->invalidate();
-        top->activate();
-    }
-    // 只收高度、保留当前宽度：adjustSize() 会把宽度一并打回 sizeHint，
-    // 用户手动拉宽过对话框的话每次切协议都被打回去，很难用。
-    resize(width(), sizeHint().height());
+    // 行显隐后把对话框收回到内容高度（见 refitHeight 的说明）。
+    refitHeight();
 }
 
 void AddDeviceDialog::onBrowseKey()
@@ -683,6 +785,10 @@ bool AddDeviceDialog::validate(QString *err) const
     if (m_authMethod->currentIndex() == 1) {
         if (m_keyFile->text().trimmed().isEmpty()) { *err = tr("请选择私钥文件。"); return false; }
     }
+    // 代理（只有 SSH 会走到这里）。填了一半的代理配置比没填更糟：连接期只会
+    // 得到一句"连接超时"，看不出是代理地址空着。
+    if (!m_proxy->validate(err))
+        return false;
     // 密码登录：密码可留空——连接时在终端里就地输入（见 TerminalPrompt），
     // 只在本次会话内有效、不写钥匙串，比强制预存更安全。
     return true;

@@ -206,6 +206,11 @@ MainWindow::MainWindow(QWidget *parent)
     setupTunnels();
     setupBastion();
     loadDevices();
+    // 放在 loadDevices 之后：要等密码迁移跑完（它会重写整张密码表），也要覆盖
+    // 「没找到配置文件」那条提前返回的路径——全局代理口令不属于任何设备，
+    // 没有 devices.json 时它照样可能存在。隧道是懒建连（setupTunnels 只装
+    // resolver），所以排在它后面也不迟。
+    publishGlobalProxyPassword();
 }
 
 MainWindow::~MainWindow()
@@ -1447,6 +1452,9 @@ void MainWindow::setupTunnels()
             spec.sshPassword = e.password;
             spec.keyType = e.keyType;
             spec.keyFile = e.keyFile;
+            // 代理也得带上：设备本身走代理，它的隧道当然也要走同一条路，
+            // 否则"终端能连、隧道连不上"。
+            spec.proxy = e.proxy;
             return true;
         });
 }
@@ -1603,6 +1611,109 @@ void MainWindow::loadDevices()
     refreshDeviceList();
 }
 
+// 把「设置 → 代理」那份全局代理的口令推给建连路径。
+//
+// 为什么要推：口令只在钥匙串里（theme.json 不存明文），而 SSH 建连跑在工作
+// 线程上，DeviceConfigStore 又没有锁——让工作线程去查它会与 UI 线程的设备
+// 编辑撞车。所以由这里取出来放进 GlobalState 那把锁后面，见
+// GlobalState::setSshProxyPassword。
+//
+// 调用点只有两个：启动装载完设备之后，以及设置页改完之后。放在这两处而不是
+// 每个建连入口各调一次，是因为建连入口有 5 个（终端 / 测试连接 / 隧道 /
+// SFTP 克隆 / FRP），漏一个的表现是那条路径上"要认证的全局代理"静默失败。
+void MainWindow::publishGlobalProxyPassword()
+{
+    GlobalState &state = GlobalState::instance();
+    // 没配全局代理就别去碰钥匙串——解锁可能弹授权框，而绝大多数用户压根没用
+    // 这个功能。sshProxyConfig() 只读已在内存里的 theme.json，不碰钥匙串。
+    if (state.sshProxyConfig().type == ProxyType::None) {
+        state.setSshProxyPassword(QString());
+        return;
+    }
+    state.setSshProxyPassword(m_store.resolvedGlobalProxyPassword());
+}
+
+// 把「被引用为跳板机的设备 + 它们的凭据」推给建连路径。
+//
+// 为什么必须推：makeSshJumpDialer 拿到的是一份按值捕获的设备快照
+//（见 SshJumpChain.h）。建链跑在工作线程上，而 DeviceConfigStore 没有锁，让
+// 工作线程回头去查它会与 UI 线程的设备编辑撞车；何况跳板机的密码只在钥匙串里，
+// 条目自身的 password 字段是空的。不推的结果不是"退化成直连"而是**每次跳板
+// 连接都失败**，报"跳板机 xxx 已不存在"——名字还在侧栏里摆着，极难对上。
+//
+// 只放**真的被谁引用了**的设备，不是全部：解析凭据要读钥匙串，而绝大多数用户
+// 一台跳板机都没配。空集合的情况下这个函数一次钥匙串都不碰。
+//
+// 引用关系要取传递闭包：A 的跳板是 B、B 自己的跳板是 C，展平时会下钻到 C
+//（见 flattenJumpChain），C 不在快照里那条链照样断。
+void MainWindow::publishJumpHostCatalog(const QStringList &extraHopIds)
+{
+    // --- 收集被引用的 id（含传递闭包）---
+    QSet<QString> wanted;
+    QStringList pending;
+    const auto enqueue = [&](const QStringList &ids) {
+        for (const QString &id : ids) {
+            if (!id.isEmpty() && !wanted.contains(id)) {
+                wanted.insert(id);
+                pending.append(id);
+            }
+        }
+    };
+
+    // 先塞未落盘的那份（对话框里刚选好、还没保存的引用），再扫存储。
+    // 顺序无所谓——wanted 去重，下面的下钻队列会把两边的嵌套一起展开。
+    enqueue(extraHopIds);
+
+    const QList<DeviceEntry> devices = m_store.devices();
+    for (const DeviceEntry &e : devices) {
+        if (e.proxy.type == ProxyType::JumpHost)
+            enqueue(e.proxy.hopIds);
+    }
+    // 全局代理也可以是「跳转服务器」，那一份的 hopIds 同样要能查到。
+    const ProxyConfig globalProxy = GlobalState::instance().sshProxyConfig();
+    if (globalProxy.type == ProxyType::JumpHost)
+        enqueue(globalProxy.hopIds);
+
+    // 下钻。pending 是工作队列，wanted 兼作已访问集合，所以配置成环也会自然收敛
+    //（真正的环检测在 flattenJumpChain 里，这里只需保证不死循环）。
+    while (!pending.isEmpty()) {
+        const QString id = pending.takeLast();
+        for (const DeviceEntry &e : devices) {
+            if (e.id != id)
+                continue;
+            if (e.proxy.type == ProxyType::JumpHost)
+                enqueue(e.proxy.hopIds);
+            break;
+        }
+    }
+
+    if (wanted.isEmpty()) {
+        GlobalState::instance().setJumpHostCatalog({});
+        return;
+    }
+
+    // --- 解析凭据 ---
+    // 这里才第一次碰钥匙串。DeviceConfigStore 是聚合条目 + 读一次就缓存
+    //（见 ensureSecretsLoaded），所以哪怕引用了十台跳板机也只有一次解锁。
+    QList<DeviceEntry> catalog;
+    catalog.reserve(wanted.size());
+    for (const DeviceEntry &e : devices) {
+        if (!wanted.contains(e.id))
+            continue;
+        DeviceEntry snapshot = e;
+        // 用密钥登录的跳板机不需要密码；不判这一下会让「有密钥的设备」也去
+        // 读一次钥匙串，白白多一次解锁。
+        if (!snapshot.usesKey())
+            snapshot.password = m_store.resolvedPassword(e.id);
+        // 跳板机自己可能还在 HTTP/SOCKS5 代理后面（第一跳会尊重这份配置，
+        // 见 SshJumpChain 的 effectiveHopProxy），那个代理的口令也得带上。
+        if (snapshot.proxy.needsHostPort())
+            snapshot.proxy.password = m_store.resolvedProxyPassword(e.id);
+        catalog.append(std::move(snapshot));
+    }
+    GlobalState::instance().setJumpHostCatalog(catalog);
+}
+
 // 明文密码 → 钥匙串的一次性迁移。详见 core/config/SecretMigration.h。
 void MainWindow::migrateSecrets()
 {
@@ -1647,6 +1758,13 @@ void MainWindow::refreshDeviceList()
 {
     m_deviceList->setDevices(m_store.devices());
     m_deviceList->setStatus(tr("共 %1 个设备").arg(m_store.count()));
+    // 设备集合变了 → 跳板机快照跟着重发一次。
+    //
+    // 挂在这里而不是在每个改设备的地方各调一次：改设备的入口有 6 个（装载 /
+    // 新增 / 编辑 / 删除 / 导入 / 分组变更），而 refreshDeviceList 是它们共同的
+    // 收尾。漏一个的表现是编辑完跳板机之后仍在用旧凭据连——那种 bug 从现象上
+    // 完全看不出根因。没有跳板机时这一步不碰钥匙串（见 publishJumpHostCatalog）。
+    publishJumpHostCatalog();
 }
 
 bool MainWindow::saveDevices()
@@ -1670,15 +1788,50 @@ bool MainWindow::saveDevices()
     return true;
 }
 
+namespace {
+
+// 跳板机下拉的候选设备。
+//
+// 只列 SSH 设备：跳板机得能开 direct-tcpip 通道，串口/RDP/裸 TCP 主机做不到。
+// 按名字排序是必要的而不是好看——devices() 出自 QHash，顺序每次运行都可能不同，
+// 不排的话下拉里的条目会随机跳位置。
+QList<ProxyDeviceItem> proxyDeviceCatalog(const DeviceConfigStore &store)
+{
+    QList<ProxyDeviceItem> out;
+    for (const DeviceEntry &e : store.devices()) {
+        if (!e.isSsh() || e.id.isEmpty())
+            continue;   // id 为空的条目引用不了（hopIds 存的就是 id）
+        out.append({e.id, e.name});
+    }
+    std::sort(out.begin(), out.end(), [](const ProxyDeviceItem &a, const ProxyDeviceItem &b) {
+        return a.name.localeAwareCompare(b.name) < 0;
+    });
+    return out;
+}
+
+} // namespace
+
 void MainWindow::addDevice()
 {
     AddDeviceDialog dlg(this);
     // 测试连接用：新建设备密码就在表单里，这个回调通常返回空，仅为统一接口。
     dlg.setPasswordResolver([this](const QString &id) { return m_store.resolvedPassword(id); });
-    if (dlg.exec() != QDialog::Accepted)
+    // 跳板机候选。新建设备还没有 id，不必排除自己。
+    dlg.setProxyDeviceCatalog(proxyDeviceCatalog(m_store));
+    dlg.setProxyPasswordResolver(
+        [this](const QString &id) { return m_store.resolvedProxyPassword(id); });
+    // 「测试连接」用：把对话框里刚选好、还没保存的跳板机推进快照，否则一测就报
+    // "跳板机已不存在"（见 AddDeviceDialog::setJumpHostPublisher）。
+    dlg.setJumpHostPublisher(
+        [this](const QStringList &hopIds) { publishJumpHostCatalog(hopIds); });
+    if (dlg.exec() != QDialog::Accepted) {
+        // 测试连接可能往快照里塞过一台没落盘的跳板机，撤销时收回来：
+        // 那份快照带着解析好的明文凭据，没必要为一个被放弃的编辑一直留在内存里。
+        publishJumpHostCatalog();
         return;
+    }
     // 新建设备：dlg.device() 已在构造时分配好 id，密码随条目带进来，
-    // addDevice 负责把它搬进密码表。
+    // addDevice 负责把它搬进密码表（代理口令同办，见其实现）。
     m_store.addDevice(dlg.device());
     refreshDeviceList();
     saveDevices();
@@ -1694,14 +1847,25 @@ void MainWindow::editDevice(const QString &name)
     const DeviceEntry old = *found;
 
     AddDeviceDialog dlg(this);
+    // 先喂目录再 setDevice：两种顺序都对（控件内部会拿存着的目录重建下拉），
+    // 但先喂目录能让 setDevice 一次就把跳板机选中，少一轮重建。
+    dlg.setProxyDeviceCatalog(proxyDeviceCatalog(m_store), old.id);
     dlg.setDevice(old);
     // 钥匙串里已有密码时，密码框允许留空（校验放行、占位符提示）。
     // 不告诉对话框这件事，迁移一完成所有 RDP 设备就都保存不了了。
     dlg.setHasStoredPassword(m_store.hasPassword(old.id));
+    dlg.setHasStoredProxyPassword(m_store.hasProxyPassword(old.id));
     // 测试连接用：编辑态密码框可能留空（"留空则不修改"），按 id 取钥匙串里的真实密码。
     dlg.setPasswordResolver([this](const QString &id) { return m_store.resolvedPassword(id); });
-    if (dlg.exec() != QDialog::Accepted)
+    dlg.setProxyPasswordResolver(
+        [this](const QString &id) { return m_store.resolvedProxyPassword(id); });
+    // 同 addDevice：测试连接要能看到还没保存的那一跳。
+    dlg.setJumpHostPublisher(
+        [this](const QStringList &hopIds) { publishJumpHostCatalog(hopIds); });
+    if (dlg.exec() != QDialog::Accepted) {
+        publishJumpHostCatalog();   // 撤销：收回测试连接临时推进去的凭据
         return;
+    }
 
     DeviceEntry edited = dlg.device();
     edited.id = old.id;    // 改名也好改协议也好，id 终生不变——它是密码的索引
@@ -1713,6 +1877,10 @@ void MainWindow::editDevice(const QString &name)
     // 照单全收会让人一改端口就把密码丢了。
     if (dlg.passwordEdited())
         m_store.setPassword(old.id, edited.password);
+    // 代理口令同理。addDevice 已经收下了非空的那份，这里补的是"用户主动清空"
+    // 这一种情况——setProxyPassword(id, "") 才会真的删掉已存的口令。
+    if (dlg.proxyPasswordEdited())
+        m_store.setProxyPassword(old.id, edited.proxy.password);
 
     refreshDeviceList();
     saveDevices();
@@ -1726,8 +1894,9 @@ void MainWindow::removeDevice(const QString &name)
         return;
     // 先清密码再删条目：flushSecrets 只保留仍被引用的 id，
     // 顺序反了这条密码就会在钥匙串里变成永远清理不掉的孤儿。
+    // forgetSecrets 而非 setPassword(id, "")：代理口令也要一起清（见其注释）。
     if (const DeviceEntry *e = m_store.find(name))
-        m_store.setPassword(e->id, QString());
+        m_store.forgetSecrets(e->id);
     m_store.removeDevice(name);
     refreshDeviceList();
     saveDevices();
@@ -2874,6 +3043,11 @@ void MainWindow::showSettings(int tabIndex)
 {
     SettingsDialog dlg(this);
     dlg.setCurrentTab(tabIndex);
+    // 代理页需要设备存储才能填的两样东西（对话框自己不认识 DeviceConfigStore）。
+    // hasStoredProxyPassword 会解锁钥匙串——这是用户主动打开设置页，不是启动期，
+    // 弹一次授权框可以接受（启动期刻意不碰，见 DeviceConfigStore 的「密码」段）。
+    dlg.setProxyDeviceCatalog(proxyDeviceCatalog(m_store));
+    dlg.setHasStoredProxyPassword(m_store.hasGlobalProxyPassword());
     connect(&dlg, &SettingsDialog::fontChanged, this,
             [this](const QString &family, int pointSize) {
                 // 即时应用到所有打开的终端。
@@ -2907,7 +3081,24 @@ void MainWindow::showSettings(int tabIndex)
         for (TerminalCommandSuggest *s : suggests)
             s->setEnabled(on);
     });
-    dlg.exec();
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    // 全局代理口令。语义同设备口令：只有用户真的动过口令框才覆盖已存的那份。
+    if (dlg.proxyPasswordEdited()) {
+        m_store.setGlobalProxyPassword(dlg.proxyPassword());
+        QString err;
+        if (!m_store.flushSecrets(&err)) {
+            QMessageBox::warning(this, tr("保存代理口令失败"),
+                                 tr("代理设置已保存，但口令未能写入系统钥匙串：%1").arg(err));
+        }
+    }
+    // 推给建连路径：GlobalState 里那份代理配置不含口令（明文只进钥匙串），
+    // 而工作线程不能直接问 m_store。见 GlobalState::setSshProxyPassword。
+    publishGlobalProxyPassword();
+    // 全局代理若是「跳转服务器」，它的 hopIds 刚才可能被改过，而设备集合没动，
+    // refreshDeviceList 那条路走不到这里，所以要显式再发一次快照。
+    publishJumpHostCatalog();
 }
 
 // AI 设置对话框：关闭后刷新面板模型名，并把所有已缓存 Agent 的偏好重新从磁盘加载，

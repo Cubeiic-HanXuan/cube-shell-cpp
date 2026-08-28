@@ -138,11 +138,18 @@ void FrpConnectWorker::run()
     const HostPort hp = parseHostPort(m_params.host);
 
     // 对应Python: self.status_updated.emit("正在检查服务器连接...")
-    emit statusUpdated(QStringLiteral("正在检查服务器连接..."));
-    if (!checkServerAccessibility(hp.host, hp.port)) {
-        emit finishedSignal(false, QStringLiteral("服务器无法连接，请检查网络或服务器状态。"),
-                            !m_isStop);
-        return;
+    //
+    // 配了代理就跳过这一步：探测是**直连**一个 TCP（见 checkServerAccessibility），
+    // 而代理的存在通常正说明目标直连不通。照探的话内网穿透在代理场景下会稳定
+    // 停在"服务器无法连接"，连 SSH 都不会尝试。代理路径下的可达性由下面的
+    // connectToHost 自己判定，它的错误消息还能指明是代理段还是目标段出问题。
+    if (m_params.proxy.isDirect()) {
+        emit statusUpdated(QStringLiteral("正在检查服务器连接..."));
+        if (!checkServerAccessibility(hp.host, hp.port)) {
+            emit finishedSignal(false, QStringLiteral("服务器无法连接，请检查网络或服务器状态。"),
+                                !m_isStop);
+            return;
+        }
     }
 
     // C++ 特有：调用方已请求中断（对话框正在关闭/析构）时静默收尾。
@@ -158,6 +165,10 @@ void FrpConnectWorker::run()
     ssh.setPassword(m_params.password);
     if (!m_params.keyType.isEmpty() && !m_params.keyFile.isEmpty())
         ssh.setPrivateKey(m_params.keyType, m_params.keyFile);
+    // 代理由 params 带进来（见 FrpConnectParams::proxy）。内网穿透的服务端
+    // 往往就在代理后面——不带代理这一步会卡在上面的可达性探测，或者探测过了
+    // 却在这里握手失败。
+    ssh.setProxyConfig(m_params.proxy);
 
     SshError error;
     // 对应Python: ssh_conn.connect()（失败抛异常 → finished_signal(False, str(e), ...)）

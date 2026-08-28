@@ -21,8 +21,9 @@
 
 namespace cubeshell {
 
-// theme.json 中 SSH 超时的键（C++ 侧新增，Python 侧未知键会被原样保留）。
-static const char kSshTimeoutKey[] = "ssh_timeout";
+// theme.json 中 SSH 超时的键现由 GlobalState::sshConnectTimeoutSeconds() 持有
+// （之前是本文件的 kSshTimeoutKey）。挪过去是因为要有人**读**它：SshClient
+// 建连时取这个值当预算，在此之前这个设置项写了没人看，纯装饰。
 
 // 表单字段统一最小宽度：各 Tab 里所有输入框/下拉框同宽，
 // 避免长短不一显得杂乱，也给长下拉值留出显示空间。
@@ -68,6 +69,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_tabWidget->addTab(createThemeTab(), tr("主题设置"));
     m_tabWidget->addTab(createLanguageTab(), tr("语言设置"));
     m_tabWidget->addTab(createGeneralTab(), tr("通用"));
+    // 代理页排在最后：既有的 setCurrentTab 调用点用的是 0/1/2 三个字面量
+    // （见其声明处的注释），插在中间会把那些入口全部错位。
+    m_tabWidget->addTab(createProxyTab(), tr("代理"));
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &SettingsDialog::accept);
@@ -198,6 +202,42 @@ QWidget *SettingsDialog::createGeneralTab()
     return page;
 }
 
+// 代理 Tab：那份「全局代理」。设备的代理类型选「全局代理」时取的就是这里。
+// Python 版没有代理功能，故无对应实现。
+QWidget *SettingsDialog::createProxyTab()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+
+    auto *tip = new QLabel(
+        tr("这里配置的是「全局代理」：在设备的代理类型里选「全局代理」的设备都走这一份，\n"
+           "改一处即全部生效。设备也可以各自配自己的代理，与这份互不影响。"),
+        page);
+    tip->setWordWrap(true);
+    tip->setStyleSheet(QStringLiteral("color: gray;"));
+    layout->addWidget(tip);
+
+    // 关掉「全局代理」这一项：这一页**自己就是**全局代理，选出 Global→Global
+    // 是唯一的无限递归入口（见 ProxySettingsWidget::setGlobalOptionEnabled）。
+    m_proxy = new ProxySettingsWidget(page);
+    m_proxy->setGlobalOptionEnabled(false);
+    layout->addWidget(m_proxy);
+    layout->addStretch(1);
+    return page;
+}
+
+void SettingsDialog::setProxyDeviceCatalog(const QList<ProxyDeviceItem> &devices)
+{
+    // excludeId 留空：全局代理不属于任何设备，没有"自己"要排除。
+    // （成环由连接期的 flattenJumpChain 兜住——某台跳板机自己又选了「全局代理」
+    //   而全局代理正是跳转服务器时会绕回来。）
+    m_proxy->setDeviceCatalog(devices);
+}
+
+void SettingsDialog::setHasStoredProxyPassword(bool has) { m_proxy->setHasStoredPassword(has); }
+bool SettingsDialog::proxyPasswordEdited() const { return m_proxy->passwordEdited(); }
+QString SettingsDialog::proxyPassword() const { return m_proxy->config().password; }
+
 // 对应Python: function/theme.py::MainWindow._load_current_settings
 // QSettings 优先，缺省回退 GlobalState（theme.json，与 Python 版共享）。
 void SettingsDialog::loadCurrentSettings()
@@ -231,7 +271,7 @@ void SettingsDialog::loadCurrentSettings()
 
     m_sshTimeout->setValue(qs.value(
         settings_keys::kSshTimeout,
-        state.theme().value(QLatin1String(kSshTimeoutKey)).toInt(15)).toInt());
+        state.sshConnectTimeoutSeconds()).toInt());
 
     const int encIdx = m_encoding->findText(
         qs.value(settings_keys::kEncoding, QStringLiteral("UTF-8")).toString());
@@ -244,6 +284,14 @@ void SettingsDialog::loadCurrentSettings()
     m_commandCompletion->setChecked(
         qs.value(settings_keys::kCommandCompletion,
                  state.commandCompletionEnabled()).toBool());
+
+    // 全局代理：**只从 GlobalState 读**，不走 QSettings。
+    //
+    // 上面每一项都是双写（QSettings + theme.json），因为那些键 Python 版也在用。
+    // 代理是 C++ 独有的，而真正读它的只有 GlobalState::sshProxyConfig()
+    //（SshClient 建连时取），再存一份 QSettings 副本就是造出第二个真相源——
+    // 两边一旦不一致，连接期用的是哪一份完全看不出来。
+    m_proxy->setConfig(state.sshProxyConfig());
 }
 
 int SettingsDialog::sshTimeoutSeconds() const
@@ -262,6 +310,16 @@ void SettingsDialog::accept()
     GlobalState &state = GlobalState::instance();
     QSettings qs;
 
+    // 代理页先校验，不通过就停在原地。填了一半的代理配置比压根不填更糟：
+    // 连接期只会得到一句"连接超时"，没人能从那句话看出是代理地址空着。
+    QString proxyErr;
+    if (!m_proxy->validate(&proxyErr)) {
+        if (QWidget *proxyPage = m_proxy->parentWidget())
+            m_tabWidget->setCurrentIndex(m_tabWidget->indexOf(proxyPage));
+        QMessageBox::warning(this, tr("代理设置"), proxyErr);
+        return;   // 刻意不调 QDialog::accept()：对话框留着让用户改
+    }
+
     // 主题：实时预览已应用，这里确认并落盘。
     QString appearance = m_originalAppearance;
     if (QListWidgetItem *item = m_themeList->currentItem())
@@ -279,9 +337,12 @@ void SettingsDialog::accept()
     const bool deviceListFontDirty = deviceListSize != state.deviceListFontSize();
     state.setDeviceListFontSize(deviceListSize);
 
-    QJsonObject theme = state.theme();
-    theme[QLatin1String(kSshTimeoutKey)] = m_sshTimeout->value();
-    state.setTheme(theme);
+    state.setSshConnectTimeoutSeconds(m_sshTimeout->value());
+
+    // 全局代理：只写 GlobalState（理由见 loadCurrentSettings 里那段）。
+    // 口令不在这里——writeJson 不写它，落钥匙串由 MainWindow 在本对话框
+    // 返回之后办（见 proxyPasswordEdited()）。
+    state.setSshProxyConfig(m_proxy->config());
 
     const int scrollback = m_scrollback->value();
     const bool scrollbackDirty = scrollback != state.scrollbackLines();

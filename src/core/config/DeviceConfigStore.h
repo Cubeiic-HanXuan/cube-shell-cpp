@@ -12,6 +12,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "net/ProxyConfig.h"
+
 namespace cubeshell {
 
 // Split/format "host:port" like cube-shell's util.parse_host_port /
@@ -86,6 +88,17 @@ struct DeviceEntry {
     QString termType = QStringLiteral("xterm-256color");         // TERMINAL-TYPE 上报值
     bool    autoLogin = false;                                   // 匹配提示自动送凭据
 
+    // 代理配置（本轮只接线 SSH，见 SshClient::setProxyConfig）。
+    //
+    // 嵌一个结构体而不是平铺 6 个成员：SshClient 收的就是 ProxyConfig，
+    // 平铺的话每个建连入口都得现场把它拼回来。**JSON 里仍然是平铺的**
+    //（proxyType/proxyHost/…，见 ProxyConfig::writeJson），与上面串口、
+    // TCP 字段的既有风格一致。
+    //
+    // proxy.password 与 DeviceEntry::password 同一条不变量：只在内存里，
+    // 从 find()/devices() 拿到的条目它恒为空；要真实值走 resolved()。
+    ProxyConfig proxy;
+
     // 该条目由 jms:// URL 现场构造，连的是 JumpServer 跳板机（koko）而非资产本身。
     // **纯运行时标记，不参与 JSON 序列化**（toJsonArray/loadJson 都是逐字段枚举，
     // 不会顺带写盘）——它描述的是"这次连接怎么来的"，不是设备的持久属性；
@@ -138,11 +151,13 @@ public:
 
     // --- 密码 ---------------------------------------------------------------
     //
-    // 不变量：m_devices 里的条目**永远不带密码**。密码只在 m_secrets 里，按 id 索引。
-    // 于是「这里没有密码」是编译期可见的事实而不是运行期惊喜：设备树、搜索、
-    // 分组都不会碰钥匙串，只有真要发起连接或编辑时才碰。
+    // 不变量：m_devices 里的条目**永远不带密码**（`password` 与 `proxy.password`
+    // 都算）。密码只在 m_secrets 里，按 id（设备口令）或派生 key（代理口令，
+    // 见 proxySecretKey）索引。于是「这里没有密码」是编译期可见的事实而不是
+    // 运行期惊喜：设备树、搜索、分组都不会碰钥匙串，只有真要发起连接或编辑时才碰。
 
-    // find() 的值副本 + 填好密码。首次调用会解锁钥匙串（可能弹一次授权框）。
+    // find() 的值副本 + 填好密码（设备口令与代理口令都填）。
+    // 首次调用会解锁钥匙串（可能弹一次授权框）。
     // 找不到该名字时返回一个 name 为空的默认条目。
     DeviceEntry resolved(const QString &name) const;
 
@@ -156,6 +171,46 @@ public:
 
     // 显式设置/清除密码（空串即清除）。要落盘还得调 flushSecrets()。
     void setPassword(const QString &id, const QString &password);
+
+    // --- 代理口令 ----------------------------------------------------------
+    //
+    // 与设备口令同住**一个**聚合钥匙串条目，靠派生 key "<id>:proxy" 区分
+    //（见 proxySecretKey）。不新开条目是刻意的：ad-hoc 签名下每个条目升级后
+    // 都要各弹一次授权框，聚合成一条只弹一次，ACL 强度不变——这正是当初做
+    // 聚合的原因（见 secretAccount）。
+    //
+    // 语义与上面那组逐一对应，编辑设备时「留空 = 没动过」的处理也一样。
+    bool hasProxyPassword(const QString &id) const;
+    QString resolvedProxyPassword(const QString &id) const;
+    void setProxyPassword(const QString &id, const QString &password);
+
+    // 忘掉这台设备的全部口令（设备口令 + 代理口令）。删设备时调。
+    //
+    // 有这个函数而不是让调用方逐个 setXxxPassword(id, "")：以后再加第三种
+    // 口令时，漏改的表现是钥匙串里留一条清不掉的孤儿，没人会注意到。
+    void forgetSecrets(const QString &id);
+
+    // 聚合表里代理口令的 key。公开是为了让测试能直接断言"代理口令没进 JSON、
+    // 而是进了这个 key"。deviceId 为空时返回空串（不生成 ":proxy" 这种孤儿键）。
+    static QString proxySecretKey(const QString &deviceId);
+
+    // --- 全局代理口令 ------------------------------------------------------
+    //
+    // 「设置 → 代理」那份全局代理的口令。企业里典型的全局代理场景恰恰是
+    // "一个要认证的公司代理 + 很多台设备"，没有口令这个功能等于白做。
+    //
+    // 配置本身在 GlobalState/theme.json 里（见 GlobalState::sshProxyConfig），
+    // 口令在这里——与设备的拆法逐字对应：结构进 JSON，明文进钥匙串。
+    //
+    // 借住在设备表这个聚合条目里，而不是另开一条钥匙串条目：另开就是升级后
+    // 多弹一次授权框，而"只弹一次"正是当初做聚合的目的（见 secretAccount）。
+    // 它没有归属设备，因此 flushSecrets 对这一个 key 免除存活裁剪。
+    bool hasGlobalProxyPassword() const;
+    QString resolvedGlobalProxyPassword() const;
+    void setGlobalProxyPassword(const QString &password);
+    // 保留 key，公开供测试断言。'@' 前缀不会与设备 id 相撞：newDeviceId()
+    // 产出的是 QUuid 的十六进制串。
+    static QString globalProxySecretKey();
 
     // 只看内存表，**绝不碰钥匙串**。用于导入：外部文件带进来的密码已经在
     // 内存里了，此时若走 resolved() 会顺带去解锁本机钥匙串，既没必要，
@@ -210,6 +265,9 @@ private:
     QJsonArray toJsonArray(bool withSecrets, bool withIds) const;
     // 按需从钥匙串加载整张表（幂等；已在内存里的条目优先，不被覆盖）。
     void ensureSecretsLoaded() const;
+    // 派生 key 的反向映射：这条口令属于哪台设备。flushSecrets 靠它判断
+    // 「设备还在不在」——直接拿 key 当 id 比对会把每条代理口令都当成孤儿删掉。
+    static QString secretKeyOwner(const QString &key);
 
     QHash<QString, DeviceEntry> m_devices;
 

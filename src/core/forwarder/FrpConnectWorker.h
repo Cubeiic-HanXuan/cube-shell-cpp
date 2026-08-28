@@ -25,6 +25,8 @@
 #include <QString>
 #include <QThread>
 
+#include "net/ProxyConfig.h"
+
 namespace cubeshell {
 
 class SshClient;
@@ -43,6 +45,10 @@ struct FrpConnectParams {
     QString antType;   // "TCP"/"UDP"/"HTTP"/...
     QString localPort;
     QString serverPort; // 对应Python: params['server_prot']
+
+    // 代理（C++ 特有；Python 版没有代理功能）。与 password 一样由调用方从
+    // resolved() 出来的设备条目里带进来，见 NatDialog::onConnectClicked。
+    ProxyConfig proxy;
 };
 
 class FrpConnectWorker : public QThread {

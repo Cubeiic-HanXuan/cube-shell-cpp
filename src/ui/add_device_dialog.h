@@ -16,6 +16,7 @@
 
 #include <functional>
 
+#include "ProxySettingsWidget.h"
 #include "config/DeviceConfigStore.h"
 
 class QCheckBox;
@@ -55,6 +56,33 @@ public:
     // "留空则在连接时输入"）。密码本身不再是必填项——见 validate()。
     void setHasStoredPassword(bool has);
 
+    // --- 代理 ---------------------------------------------------------------
+    //
+    // 与密码那三个函数逐一对应。代理口令也是「留空 = 没动过」的语义，
+    // 只有 proxyPasswordEdited() 为真时调用方才该去改存储里的代理口令。
+    void setHasStoredProxyPassword(bool has);
+    bool proxyPasswordEdited() const;
+
+    // 跳板机下拉的候选设备（由持有 DeviceConfigStore 的 MainWindow 提供）。
+    // 编辑既有设备时 excludeId 传当前设备 id，把自己从候选里摘掉。
+    void setProxyDeviceCatalog(const QList<ProxyDeviceItem> &devices,
+                              const QString &excludeId = QString());
+
+    // 注入「按 id 取已存代理口令」的回调。用途同 setPasswordResolver：
+    // 编辑既有设备、代理口令框留空时，「测试连接」要拿钥匙串里的真实口令去测，
+    // 否则走需要认证的代理会误报失败。
+    void setProxyPasswordResolver(std::function<QString(const QString &deviceId)> resolver);
+
+    // 注入「把这些跳板机连同凭据推给建连路径」的回调。
+    //
+    // 「测试连接」专用，且**必须**注入，否则「跳转服务器」一测就报
+    // "跳板机 xxx 已不存在（可能已被删除）"：建链在工作线程上按 id 查的是
+    // GlobalState 里那份快照（见 GlobalState::setJumpHostCatalog），而快照是
+    // MainWindow 扫**已保存的设备**攒出来的。对话框里刚选好还没保存的那一跳
+    // 不在任何已存条目的 hopIds 里，快照里自然没有它——设备明明在侧栏里摆着，
+    // 报的却是"已不存在"，极难对上。
+    void setJumpHostPublisher(std::function<void(const QStringList &hopIds)> publisher);
+
     // 注入「按 id 取已存密码」的回调（由持有 DeviceConfigStore 的 MainWindow 提供）。
     // 测试连接时用：编辑既有设备、密码框留空（"留空则不修改"）的情况下，
     // 得拿钥匙串里的真实密码去测，否则会误报认证失败。新建设备无需设置。
@@ -88,6 +116,13 @@ private:
     void onRefreshPorts();
 #endif
 
+    // 行显隐 / 换页之后把对话框收回到内容高度。
+    // QFormLayout 隐藏行会让 sizeHint 变小，但 QDialog 不会自动跟着缩小
+    //（窗口尺寸一旦被撑大就保持不变），多出来的高度会显示成一块空白。
+    // 只收高度、保留当前宽度：连 adjustSize() 一起用会把用户手动拉宽的
+    // 对话框每次都打回 sizeHint。
+    void refitHeight();
+
     QFormLayout *m_form = nullptr;
     QComboBox *m_protocol = nullptr;        // Row 0: SSH | RDP | Serial | Telnet | TCP
     QLineEdit *m_name = nullptr;
@@ -97,6 +132,9 @@ private:
 
     QComboBox *m_authMethod = nullptr;      // 0 = password, 1 = private key
     QStackedWidget *m_authStack = nullptr;
+
+    // 代理（仅 SSH 可见——本轮只接线 SSH，见 SshClient::setProxyConfig）。
+    ProxySettingsWidget *m_proxy = nullptr;
 
     // password page
     QLineEdit *m_password = nullptr;
@@ -149,6 +187,8 @@ private:
     QLabel *m_testStatus = nullptr;          // 行内结果反馈（绿✓/红✗）
     ConnectionTester *m_tester = nullptr;
     std::function<QString(const QString &)> m_passwordResolver;
+    std::function<QString(const QString &)> m_proxyPasswordResolver;
+    std::function<void(const QStringList &)> m_jumpHostPublisher;
 };
 
 } // namespace cubeshell

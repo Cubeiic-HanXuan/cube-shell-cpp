@@ -463,6 +463,37 @@ target_link_libraries(telnet_test PRIVATE
     cube_ui
 )
 
+# 「代理命令」拨号器（子进程 stdin/stdout ↔ socket pair 双向中继）。用 /bin/cat
+# 当回环载体，不需要任何外部服务。与实现同一个门控——CUBESHELL_WITH_LOCALPROC
+# 关掉时 ProxyCommandDialer.cpp 压根不进 cube_core，链接会缺符号。
+if(CUBESHELL_WITH_LOCALPROC)
+    qt_add_executable(proxy_command_test
+        proxy_command_test.cpp
+    )
+    target_include_directories(proxy_command_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core
+    )
+    target_link_libraries(proxy_command_test PRIVATE
+        Qt6::Core
+        Qt6::Network
+        cube_core
+    )
+endif()
+
+# 代理功能端到端集成测试（HTTP CONNECT / SOCKS5 / 代理命令 / 跳转服务器）。
+# 需要 tests/docker/proxy 那套 compose 在跑；探不到就 exit(2) → SKIPPED。
+qt_add_executable(proxy_integration_test
+    proxy_integration_test.cpp
+)
+target_include_directories(proxy_integration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(proxy_integration_test PRIVATE
+    Qt6::Core
+    Qt6::Network
+    cube_core
+)
+
 # Telnet 端到端集成测试（需要一个可达的 telnetd；见文件头的 socat 一行命令）。
 # 目标不可达时 exit(2) → CTest 记为 SKIPPED。
 qt_add_executable(telnet_integration_test
@@ -501,6 +532,7 @@ add_test(NAME connection_tester_test COMMAND connection_tester_test)
 if(CUBESHELL_WITH_LOCALPROC)
     add_test(NAME docker_manager_test COMMAND docker_manager_test)
     add_test(NAME frp_installer_test COMMAND frp_installer_test)
+    add_test(NAME proxy_command_test COMMAND proxy_command_test)
 endif()
 add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME terminal_prompt_test COMMAND terminal_prompt_test)
@@ -525,12 +557,18 @@ add_test(NAME upload_teardown_test COMMAND upload_teardown_test)
 add_test(NAME transfer_pool_test COMMAND transfer_pool_test)
 add_test(NAME channel_multiplex_test COMMAND channel_multiplex_test)
 add_test(NAME telnet_integration_test COMMAND telnet_integration_test)
+add_test(NAME proxy_integration_test COMMAND proxy_integration_test)
 set_tests_properties(ssh_integration_test sftp_integration_test
     command_executor_test uploader_test upload_teardown_test
     channel_multiplex_test
-    telnet_integration_test PROPERTIES
+    telnet_integration_test
+    proxy_integration_test PROPERTIES
     SKIP_RETURN_CODE 2
 )
+
+# 代理测试要逐个场景建 SSH 链（含 2 跳的跳板链）再灌 400KB 数据，比其它测试慢，
+# 单独放宽超时。默认的 1500s 其实也够，写出来是为了让"卡死"和"慢"分得开。
+set_tests_properties(proxy_integration_test PROPERTIES TIMEOUT 600)
 
 
 

@@ -173,6 +173,10 @@ void SshTerminalWidget::startConnect(const QString &password)
         client->setPrivateKey(device.keyType, device.keyFile);
     else
         client->setPassword(password);
+    // 代理。device 是 MainWindow::openSshSession 用 resolved() 取出来的，
+    // 代理口令已经填好（见 DeviceConfigStore::resolved）。
+    // 类型是「全局代理」时不必在这里读设置——connectToHost 自己会去取。
+    client->setProxyConfig(device.proxy);
 
     // Keyboard-interactive MFA: libssh2 invokes this callback from the worker
     // thread, but it must show a dialog on the UI thread. We bounce through the

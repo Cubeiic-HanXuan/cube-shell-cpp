@@ -127,6 +127,25 @@ QString DeviceConfigStore::newDeviceId()
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
+// 代理口令的派生 key。设备 id 是 QUuid 的十六进制形式，不含冒号，
+// 所以 ':' 可以安全地当分隔符。
+QString DeviceConfigStore::proxySecretKey(const QString &deviceId)
+{
+    if (deviceId.isEmpty())
+        return QString();   // 别造出 ":proxy" 这种谁都认不回去的孤儿键
+    return deviceId + QLatin1String(":proxy");
+}
+
+QString DeviceConfigStore::secretKeyOwner(const QString &key)
+{
+    // 只削掉**确切**的已知后缀，不按最后一个 ':' 切分：手改配置塞进来的
+    // id 里可能就带冒号，按 ':' 切会把那种 id 削错，于是它的密码被当成孤儿删掉。
+    static const QLatin1String suffix(":proxy");
+    if (key.endsWith(suffix))
+        return key.chopped(suffix.size());
+    return key;   // 设备口令：key 本身就是 id
+}
+
 void DeviceConfigStore::ensureSecretsLoaded() const
 {
     if (m_secretsLoaded)
@@ -162,6 +181,10 @@ void DeviceConfigStore::addDevice(const DeviceEntry &entry)
     if (!e.password.isEmpty())
         m_secrets.insert(e.id, e.password);
     e.password.clear();       // 不变量：m_devices 里永远不带密码
+    // 代理口令同办，语义逐字对应（空串 = 没重输，不动已存的那份）。
+    if (!e.proxy.password.isEmpty())
+        m_secrets.insert(proxySecretKey(e.id), e.proxy.password);
+    e.proxy.password.clear();
     m_devices.insert(e.name, e);
 }
 
@@ -173,6 +196,7 @@ DeviceEntry DeviceConfigStore::resolved(const QString &name) const
     ensureSecretsLoaded();
     DeviceEntry e = it.value();
     e.password = m_secrets.value(e.id);
+    e.proxy.password = m_secrets.value(proxySecretKey(e.id));
     return e;
 }
 
@@ -202,6 +226,66 @@ void DeviceConfigStore::setPassword(const QString &id, const QString &password)
         m_secrets.insert(id, password);
 }
 
+bool DeviceConfigStore::hasProxyPassword(const QString &id) const
+{
+    if (id.isEmpty())
+        return false;
+    ensureSecretsLoaded();
+    return !m_secrets.value(proxySecretKey(id)).isEmpty();
+}
+
+QString DeviceConfigStore::resolvedProxyPassword(const QString &id) const
+{
+    if (id.isEmpty())
+        return QString();
+    ensureSecretsLoaded();
+    return m_secrets.value(proxySecretKey(id));
+}
+
+void DeviceConfigStore::setProxyPassword(const QString &id, const QString &password)
+{
+    if (id.isEmpty())
+        return;
+    const QString key = proxySecretKey(id);
+    if (password.isEmpty())
+        m_secrets.remove(key);
+    else
+        m_secrets.insert(key, password);
+}
+
+void DeviceConfigStore::forgetSecrets(const QString &id)
+{
+    if (id.isEmpty())
+        return;
+    m_secrets.remove(id);
+    m_secrets.remove(proxySecretKey(id));
+}
+
+QString DeviceConfigStore::globalProxySecretKey()
+{
+    return QStringLiteral("@global:proxy");
+}
+
+bool DeviceConfigStore::hasGlobalProxyPassword() const
+{
+    ensureSecretsLoaded();
+    return !m_secrets.value(globalProxySecretKey()).isEmpty();
+}
+
+QString DeviceConfigStore::resolvedGlobalProxyPassword() const
+{
+    ensureSecretsLoaded();
+    return m_secrets.value(globalProxySecretKey());
+}
+
+void DeviceConfigStore::setGlobalProxyPassword(const QString &password)
+{
+    if (password.isEmpty())
+        m_secrets.remove(globalProxySecretKey());
+    else
+        m_secrets.insert(globalProxySecretKey(), password);
+}
+
 QHash<QString, QString> DeviceConfigStore::secretsSnapshot() const
 {
     return m_secrets;
@@ -227,8 +311,17 @@ bool DeviceConfigStore::flushSecrets(QString *errorOut) const
 
     QJsonObject obj;
     for (auto it = m_secrets.constBegin(); it != m_secrets.constEnd(); ++it) {
-        if (!it.value().isEmpty() && live.contains(it.key()))
-            obj.insert(it.key(), it.value());
+        if (it.value().isEmpty())
+            continue;
+        // 按**归属设备**判断存活，不能直接拿 key 比对 live：代理口令的 key 是
+        // 派生出来的 "<id>:proxy"，它永远不等于任何 e.id，于是每一次保存都会
+        // 把刚设好的代理口令当成孤儿丢掉——存了却读不回来。
+        //
+        // 全局代理口令免除裁剪：它压根没有归属设备（见 globalProxySecretKey），
+        // 照规则走的话第一次保存就会把它删掉。
+        if (it.key() != globalProxySecretKey() && !live.contains(secretKeyOwner(it.key())))
+            continue;
+        obj.insert(it.key(), it.value());
     }
 
     if (obj.isEmpty()) {
@@ -347,6 +440,14 @@ QJsonArray DeviceConfigStore::toJsonArray(bool withSecrets, bool withIds) const
         o[QStringLiteral("telnetNegotiate")] = e.telnetNegotiate;
         o[QStringLiteral("termType")]        = e.termType;
         o[QStringLiteral("autoLogin")]       = e.autoLogin;
+        // 代理字段（平铺成 proxyType/proxyHost/…，见 ProxyConfig::writeJson）。
+        //
+        // 代理口令**任何情况下都不写进 JSON**，包括 withSecrets 为真的迁移窗口期：
+        // 这个键在旧文件里从来不存在，所以不存在"明文只剩一个副本"的问题——
+        // 它从第一天起就只进钥匙串（见 proxySecretKey）。
+        //
+        // hopIds 随 withIds 一起关掉：它装的是设备 id（详见 writeJson 注释）。
+        e.proxy.writeJson(o, /*withHopIds=*/withIds);
         arr.append(o);
     }
     return arr;
@@ -434,6 +535,10 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         e.termType = termType.isEmpty() ? QStringLiteral("xterm-256color") : termType;
         // autoLogin 缺键回落 false：自动送密码是需要用户显式开启的行为。
         e.autoLogin = o[QStringLiteral("autoLogin")].toBool(false);
+        // 代理字段。旧 devices.json 里这些键全都不存在 → fromJson 给出
+        // type == None，即直连，行为与加代理功能之前逐字节一致。
+        // proxyPassword 键不存在也不会被读（口令只在钥匙串里）。
+        e.proxy = ProxyConfig::fromJson(o);
         if (e.name.isEmpty())
             continue;
         // id 缺失（旧格式）就地补一个。此刻它还没落盘——由迁移的 pass-1 负责

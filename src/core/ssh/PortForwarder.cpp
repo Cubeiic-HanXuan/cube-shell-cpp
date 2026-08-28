@@ -9,6 +9,8 @@
 
 #include <cstring>
 
+#include "net/SocketUtil.h"
+
 #ifdef Q_OS_WIN
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
@@ -28,125 +30,12 @@ Q_LOGGING_CATEGORY(fwdLog, "cubeshell.forwarder")
 
 namespace cubeshell {
 
-namespace {
-
-// Close a raw socket fd portably.
-void closeSocket(qintptr &sock)
-{
-    if (sock < 0)
-        return;
-#ifdef Q_OS_WIN
-    ::closesocket(sock);
-#else
-    ::close(sock);
-#endif
-    sock = -1;
-}
-
-// By-value overload for closing a socket captured in a (const-capture) lambda.
-void closeFd(qintptr sock)
-{
-    if (sock < 0)
-        return;
-#ifdef Q_OS_WIN
-    ::closesocket(sock);
-#else
-    ::close(sock);
-#endif
-}
-
-// Blocking recv of exactly buf.size() bytes with a per-call timeout; returns
-// bytes actually read (>0), 0 on clean EOF, -1 on error/timeout.
-qint64 recvSome(qintptr sock, char *buf, int maxBytes, int timeoutMs)
-{
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(sock, &rfds);
-    struct timeval tv;
-    tv.tv_sec = timeoutMs / 1000;
-    tv.tv_usec = (timeoutMs % 1000) * 1000;
-    int rc = ::select(int(sock) + 1, &rfds, nullptr, nullptr, &tv);
-    if (rc <= 0)
-        return rc == 0 ? -1 : -1; // timeout or error -> caller aborts handshake
-    ssize_t n = ::recv(sock, buf, maxBytes, 0);
-    if (n < 0)
-        return -1;
-    return qint64(n); // 0 == orderly shutdown
-}
-
-// Create + bind + listen a TCP server socket. Returns fd or -1 (fills errMsg).
-qintptr makeListenSocket(const QString &host, quint16 port, QString &errMsg)
-{
-    struct addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-    const QByteArray h = host.toUtf8();
-    const QByteArray p = QByteArray::number(port);
-    struct addrinfo *res = nullptr;
-    if (::getaddrinfo(h.isEmpty() ? nullptr : h.constData(), p.constData(), &hints, &res) != 0) {
-        errMsg = QStringLiteral("Cannot resolve bind address %1").arg(host);
-        return -1;
-    }
-
-    qintptr sock = -1;
-    for (auto *ai = res; ai; ai = ai->ai_next) {
-        sock = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (sock < 0)
-            continue;
-        int one = 1;
-        ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&one), sizeof(one));
-        if (::bind(sock, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(sock, 100) == 0)
-            break;
-        closeSocket(sock);
-    }
-    ::freeaddrinfo(res);
-
-    if (sock < 0) {
-        // Distinguish "address in use" / "permission denied" like forwarder.py.
-#ifdef Q_OS_WIN
-        int e = WSAGetLastError();
-        if (e == WSAEADDRINUSE)
-#else
-        int e = errno;
-        if (e == EADDRINUSE)
-#endif
-            errMsg = QStringLiteral("Port %1 is already in use").arg(port);
-#ifndef Q_OS_WIN
-        else if (e == EACCES)
-            errMsg = QStringLiteral("No permission to bind port %1 (use a port > 1024)").arg(port);
-#endif
-        else
-            errMsg = QStringLiteral("Failed to bind %1:%2 (errno %3)").arg(host).arg(port).arg(e);
-    }
-    return sock;
-}
-
-// Connect a TCP socket to host:port. Returns fd or -1.
-qintptr connectTcp(const QString &host, quint16 port)
-{
-    struct addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    const QByteArray h = host.toUtf8();
-    const QByteArray p = QByteArray::number(port);
-    struct addrinfo *res = nullptr;
-    if (::getaddrinfo(h.constData(), p.constData(), &hints, &res) != 0)
-        return -1;
-    qintptr sock = -1;
-    for (auto *ai = res; ai; ai = ai->ai_next) {
-        sock = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (sock < 0)
-            continue;
-        if (::connect(sock, ai->ai_addr, ai->ai_addrlen) == 0)
-            break;
-        closeSocket(sock);
-    }
-    ::freeaddrinfo(res);
-    return sock;
-}
-
-} // namespace
+// closeSocket / closeFd / recvSome / makeListenSocket / connectTcp 原本是本文件
+// 匿名 namespace 里的私有件，现已提取到 net/SocketUtil.h 与 SSH 代理共用
+// （代理要用同一套东西在真 socket 上就地完成 HTTP CONNECT / SOCKS5 握手）。
+// 行为不变，只是 connectTcp 现在带超时——原来那个是裸阻塞 ::connect，
+// 目标主机半死时会把转发线程钉在内核 SYN 重传上（macOS 约 75 秒）。
+using namespace socket_util;
 
 // ===========================================================================
 // PortForwarder (base)
@@ -421,7 +310,9 @@ void RemotePortForwarder::run()
 void RemotePortForwarder::handleConnection(_LIBSSH2_CHANNEL *channel)
 {
     // Connect to the local target.
-    qintptr sock = connectTcp(m_targetHost, m_targetPort);
+    // 目标一般在本机或同一局域网，默认 15 秒预算足够；关键是别再无限等——
+    // 之前这里是裸 ::connect，目标半死就会永久占住一条转发线程。
+    qintptr sock = connectTcp(m_targetHost, m_targetPort, kDefaultConnectTimeoutMs);
     if (sock < 0) {
         emit logMessage(QStringLiteral("Remote forward: cannot reach %1:%2")
                             .arg(m_targetHost).arg(m_targetPort));

@@ -2,12 +2,21 @@
 
 #include "SshClient.h"
 
+#include <QDeadlineTimer>
 #include <QLoggingCategory>
 #include <QMutexLocker>
 
 #include <libssh2.h>
 
 #include <cstring>
+
+#include "config/GlobalState.h"
+#include "net/SocketUtil.h"
+#include "SshJumpChain.h"
+
+#ifdef CUBESHELL_WITH_LOCALPROC
+#  include "net/ProxyCommandDialer.h"
+#endif
 
 #ifdef Q_OS_WIN
 #  include <winsock2.h>
@@ -81,54 +90,156 @@ static void fillSessionError(_LIBSSH2_SESSION *session, SshError &error, const Q
         error.message += QStringLiteral(": ") + QString::fromLatin1(msg, len);
 }
 
+// 本次建连的总预算（毫秒）。显式设过就用设置值，否则取设置页「SSH 连接超时」。
+//
+// 这个预算要覆盖 TCP 建连（含代理握手）+ SSH 握手 + 认证三段。在此之前这三段
+// **一个超时都没有**：TCP 是裸阻塞 ::connect，只能靠内核 SYN 重传兜底
+// （macOS 约 75 秒）；握手和认证则完全不设限。设置页那个 spinbox 一直是死设置，
+// 没有任何调用点读它。
+//
+// 在工作线程上读 GlobalState 是安全的：那个单例的 m_theme 已由 m_themeMutex
+// 保护（见 GlobalState.h——这正是为它加锁的直接原因）。
+int SshClient::effectiveConnectTimeoutMs() const
+{
+    int base = m_connectTimeoutMs;
+    if (base <= 0) {
+        const int seconds = GlobalState::instance().sshConnectTimeoutSeconds();
+        base = seconds > 0 ? seconds * 1000 : socket_util::kDefaultConnectTimeoutMs;
+    }
+    // 跳板机链按跳数放大。三跳链要做 4 次「TCP + 握手 + 认证」，共用一份 base
+    // 必然到点：用户把超时设成 15 秒，每跳只剩不到 4 秒，于是**任何**多跳配置
+    // 都会稳定误报超时。放大之后每跳拿到的仍是用户设定的那个量级。
+    //
+    // 一并修好了「测试连接」：ConnectionTester 的兜底表就是照这个函数算的
+    //（见 sshGuardMsFor），不放大的话那个按钮对多跳配置永远显示失败。
+    //
+    // hopIds 是**直接**跳板数；嵌套引用（跳板自己又配了跳板）展平后更多，
+    // 那时每跳分到的不足 base。这是有意的下界——宁可让极端嵌套配置偏紧，
+    // 也不要让一个写坏的配置把超时放大到几分钟。
+    if (m_proxy.type == ProxyType::JumpHost)
+        return base * (1 + int(m_proxy.hopIds.size()));
+    return base;
+}
+
+void SshClient::setProxyConfig(const ProxyConfig &proxy, const ProxyConfig &globalProxy)
+{
+    m_proxy = proxy;
+    m_globalProxy = globalProxy;
+}
+
 bool SshClient::connectToHost(SshPromptCallback promptCallback, SshError &error)
 {
     m_promptCallback = std::move(promptCallback);
+    // 上一次连接留下的取消标记不能带进这一次（连接池会复用同一个对象重连）。
+    m_dialCancelled = false;
 
-    // --- TCP connect ---
-    struct addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = nullptr;
-    const QByteArray host = m_host.toUtf8();
-    const QByteArray port = QByteArray::number(m_port);
-    if (::getaddrinfo(host.constData(), port.constData(), &hints, &res) != 0) {
-        error.message = QStringLiteral("Cannot resolve host %1").arg(m_host);
-        return false;
+    // 三段共享一份预算：先建连（含代理握手），剩下的给握手 + 认证。
+    QDeadlineTimer budget(effectiveConnectTimeoutMs());
+
+    // 选了「全局代理」但调用方没显式给出全局那一份时，自己去设置里取。
+    // 这样 5 个建连入口（终端 / 测试连接 / 隧道 / SFTP 克隆 / FRP）都不必各自
+    // 记得读一次设置——漏读的后果是"全局代理"静默退化成直连。
+    ProxyConfig globalProxy = m_globalProxy;
+    if (m_proxy.type == ProxyType::Global && globalProxy.type == ProxyType::None) {
+        globalProxy = GlobalState::instance().sshProxyConfig();
+        // 口令不在 theme.json 里（明文只进钥匙串），得单独补。
+        // 不补的话"要认证的全局代理"会表现成一句代理认证失败——而设置页里
+        // 口令明明填着，没人能从错误消息里看出是这一步丢了。
+        globalProxy.password = GlobalState::instance().sshProxyPassword();
     }
 
-    qintptr sock = -1;
-    for (auto *ai = res; ai; ai = ai->ai_next) {
-        sock = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (sock < 0)
-            continue;
-        if (::connect(sock, ai->ai_addr, ai->ai_addrlen) == 0)
-            break;
-#ifdef Q_OS_WIN
-        ::closesocket(sock);
-#else
-        ::close(sock);
+    // --- TCP connect（按需经代理）---
+    // 原来是 getaddrinfo + 逐地址裸阻塞 ::connect，没有超时也无法取消。
+    // proxyConnect 无论走哪种代理，交回来的都是一个**真的、可 select 的**阻塞
+    // 模式 fd，且已设好 SO_NOSIGPIPE / TCP_NODELAY——与那段裸 ::connect 的产物
+    // 状态一致，所以下面的 handshake / openShell / socketFd() 一行都不用改。
+    ProxyDialRequest dial;
+    dial.host          = m_host;
+    dial.port          = m_port;
+    dial.user          = m_username;
+    dial.proxy         = m_proxy;
+    dial.globalProxy   = globalProxy;
+    dial.timeoutMs     = int(budget.remainingTime());
+    dial.cancelled     = &m_dialCancelled;
+    // 默认的跳板拨号器也就地补上，理由与下面代理命令那段完全相同（5 个建连入口）。
+    // 凭据取自 GlobalState 里那份由 UI 线程推来的快照——工作线程不许碰
+    // DeviceConfigStore（它没有锁），见 GlobalState::setJumpHostCatalog。
+    //
+    // **每次现造，不缓存到 m_jumpDialer**：它要捕获本次连接的 promptCallback
+    // （链上每跳都可能要动态码，提示文本得前缀上跳板机名才分得清是谁在问），
+    // 而那个回调是 connectToHost 的入参，重连时可以是另一个。外部显式注入过的
+    // （测试里塞的假拨号器）优先，不覆盖。
+    dial.jumpDialer = m_jumpDialer
+                          ? m_jumpDialer
+                          : makeSshJumpDialer(GlobalState::instance().jumpHostCatalog(),
+                                              m_promptCallback);
+#ifdef CUBESHELL_WITH_LOCALPROC
+    // 默认的代理命令拨号器就地补上，而不是让每个调用方各自注入：connectToHost
+    // 有 5 个调用点（终端 / 连接测试 / 隧道 / SFTP 并行克隆 / frp），靠每处记得
+    // 注入，早晚有一处漏掉——漏掉的表现是那条路径上「代理命令」静默不生效。
+    // 已经注入过的（测试里塞的假拨号器）不覆盖。
+    if (!m_commandDialer)
+        m_commandDialer = makeProxyCommandDialer();
 #endif
-        sock = -1;
-    }
-    ::freeaddrinfo(res);
+    dial.commandDialer = m_commandDialer;
 
+    QString connectErr;
+    // 载体先落在局部变量里，成功之后再在锁内挂到 m_transport 上。直接把
+    // &m_transport 交给 proxyConnect 会让「拨号线程正在写」和「shutdownSocket
+    // 在另一条线程读」撞上——shared_ptr 的赋值不是原子的。
+    ProxyTransportPtr transport;
+    const qintptr sock = proxyConnect(dial, &transport, &connectErr);
+    {
+        QMutexLocker lock(&m_transportMutex);
+        m_transport = transport;
+    }
     if (sock < 0) {
-        error.message = QStringLiteral("Cannot connect to %1:%2").arg(m_host).arg(m_port);
+        error.message = connectErr.isEmpty()
+                            ? QStringLiteral("Cannot connect to %1:%2").arg(m_host).arg(m_port)
+                            : connectErr;
+        // 拨号本身失败时载体一般已经自己拆干净了，但「起得来、随即退出」这种
+        // 形态会留下 stderr——那正是唯一说清病因的东西。
+        appendTransportDiagnostics(error);
+        transport.reset();
+        releaseTransport();
         return false;
     }
+
     m_sock = sock;
     m_socketShutdown = false; // 新 socket 就绪，清除可能残留的 shutdown 标记
 
-#ifdef Q_OS_MACOS
-    // Prevent SIGPIPE on this socket: macOS has no MSG_NOSIGNAL, so per-socket
-    // SO_NOSIGPIPE is the only way to prevent send() from raising SIGPIPE when
-    // the remote end has closed the connection (e.g. during SSH teardown).
-    {
-        int on = 1;
-        ::setsockopt(m_sock, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    return finishHandshake(sock, budget, error);
+}
+
+// 跳板链的中间跳走这里：传输是上一跳的 direct-tcpip 通道（已经变成一个普通 fd），
+// 没有拨号这一步。预算仍按 effectiveConnectTimeoutMs 算——链构建器会先给每跳
+// setConnectTimeoutMs(逐跳预算)，所以这里取到的就是那一份。
+bool SshClient::connectOverSocket(qintptr sock, ProxyTransportPtr transport,
+                                  SshPromptCallback promptCallback, SshError &error)
+{
+    m_promptCallback = std::move(promptCallback);
+    m_dialCancelled = false;
+
+    if (sock < 0) {
+        error.message = QStringLiteral("内部错误：跳板链交来的 socket 无效");
+        return false;
     }
-#endif
+
+    {
+        QMutexLocker lock(&m_transportMutex);
+        m_transport = std::move(transport);
+    }
+
+    m_sock = sock;
+    m_socketShutdown = false;
+
+    return finishHandshake(sock, QDeadlineTimer(effectiveConnectTimeoutMs()), error);
+}
+
+// session_init → handshake → authenticate。调用方已经把 sock 挂到 m_sock 上。
+bool SshClient::finishHandshake(qintptr sock, QDeadlineTimer budget, SshError &error)
+{
+    Q_UNUSED(sock);
 
     // --- SSH session + handshake ---
     m_session = libssh2_session_init();
@@ -138,17 +249,33 @@ bool SshClient::connectToHost(SshPromptCallback promptCallback, SshError &error)
     }
     libssh2_session_set_blocking(m_session, 1); // blocking for connect/auth simplicity
 
+    // 阻塞模式下 libssh2 的每个 API 调用都受这个超时约束（0 = 永不超时，
+    // 也就是改之前的行为）。握手和认证都要读远端应答，服务器只完成 TCP
+    // 三次握手却不发 banner 时，没有它就是永久挂住。
+    libssh2_session_set_timeout(m_session, long(qMax(qint64(1), budget.remainingTime())));
+
     if (libssh2_session_handshake(m_session, m_sock) != 0) {
         fillSessionError(m_session, error, QStringLiteral("SSH handshake failed"));
+        // 走代理时这一步的失败**几乎总是**代理链的问题而不是 SSH 的问题：载体
+        // 进程起得来、然后立刻因为 connection refused 之类退出，libssh2 只会说
+        // 一句 "Failed getting banner"。诊断要在 disconnectFromHost 之前取——
+        // 那一步会把载体连带它攒的 stderr 一起拆掉。
+        appendTransportDiagnostics(error);
         disconnectFromHost();
         return false;
     }
 
     // --- authenticate ---
+    libssh2_session_set_timeout(m_session, long(qMax(qint64(1), budget.remainingTime())));
     if (!authenticate(error)) {
+        appendTransportDiagnostics(error);
         disconnectFromHost();
         return false;
     }
+
+    // 建连预算只管建连。留着它会让后续所有阻塞调用（SFTP 传输、命令执行）
+    // 都带上一个几秒的上限，大文件传输会被判成超时。
+    libssh2_session_set_timeout(m_session, 0);
 
     return true;
 }
@@ -314,27 +441,19 @@ bool SshClient::openShell(const QByteArray &term, int width, int height, SshErro
         return false;
     }
 
-    // Switch to non-blocking for the bridge's poll-driven read loop.
-    libssh2_session_set_blocking(m_session, 0);
-
-    // The socket must also be non-blocking: libssh2 restores the original
-    // (blocking) socket state after session_handshake. Without this, recv()
-    // blocks inside libssh2_channel_read even though the session API is
-    // non-blocking, and the bridge read loop never returns EAGAIN.
-#ifndef Q_OS_WIN
-    {
-        int flags = fcntl(m_sock, F_GETFL, 0);
-        if (flags >= 0)
-            fcntl(m_sock, F_SETFL, flags | O_NONBLOCK);
-    }
-#else
-    {
-        u_long mode = 1;
-        ioctlsocket(m_sock, FIONBIO, &mode);
-    }
-#endif
+    setTransportNonBlocking();
 
     return true;
+}
+
+// 见 SshClient.h 里的注释：为什么 session 与 fd 两层都得翻，以及为什么这段
+// 必须能被 openShell() 之外的调用方（中转跳板机的 session）单独调到。
+void SshClient::setTransportNonBlocking()
+{
+    if (m_session)
+        libssh2_session_set_blocking(m_session, 0);
+    if (m_sock >= 0)
+        socket_util::setNonBlocking(m_sock, true);
 }
 
 QByteArray SshClient::readChannel(int maxBytes, bool *wouldBlock)
@@ -461,6 +580,23 @@ void SshClient::closeChannel()
 
 void SshClient::shutdownSocket()
 {
+    // 先置建连取消标志，再看 m_sock。顺序很要紧：整条代理链还在建的时候
+    // m_sock 仍是 -1，下面那个 early-return 会让这个函数什么都不做——用户在
+    // 第 3 跳还在连的时候关标签页，就只能等到 OS 超时。标志由 proxyConnect
+    // 一路传到每个 select 切片里，最多多等一个切片（kSelectSliceMs）。
+    m_dialCancelled = true;
+
+    // 载体也要一起叫醒（代理命令的泵线程 / 跳板链的中继线程）。不叫醒的话它会
+    // 一直守着一个已经没人读的 fd，关掉一个标签页就留下一个线程 + 一个子进程。
+    // 取本地拷贝再调用：shutdown() 里可能 join 线程，不能持锁做。
+    ProxyTransportPtr transport;
+    {
+        QMutexLocker lock(&m_transportMutex);
+        transport = m_transport;
+    }
+    if (transport)
+        transport->shutdown();
+
     // 只 shutdown，不 close：fd 的回收仍归 disconnectFromHost。shutdown(SHUT_RDWR)
     // 让阻塞在 select()/recv() 上的读循环/监控线程立刻拿到 EOF/错误返回，从而
     // 能快速重查各自的取消/运行标志退出——这是关闭标签页时避免 UI 线程死等
@@ -496,6 +632,9 @@ void SshClient::disconnectFromHost()
 #endif
             m_sock = -1;
         }
+        // 这条路径也必须拆载体。忘了它就是每次「锁忙」都漏一个子进程 + 一个
+        // 泵线程，而锁忙恰恰发生在关标签页这种最常见的时刻。
+        releaseTransport();
         return;
     }
     struct UnlockGuard { QRecursiveMutex &m; ~UnlockGuard() { m.unlock(); } } guard{m_sessionMutex};
@@ -513,6 +652,50 @@ void SshClient::disconnectFromHost()
 #endif
         m_sock = -1;
     }
+    // 最后才拆载体，顺序不能提前：上面那句 libssh2_session_disconnect 的 "bye"
+    // 还要经过载体发出去，先拆等于在说话中间把话筒拔掉。
+    releaseTransport();
+}
+
+void SshClient::releaseTransport()
+{
+    ProxyTransportPtr transport;
+    {
+        QMutexLocker lock(&m_transportMutex);
+        transport.swap(m_transport);
+    }
+    // 出了上面那个作用域才析构（也就是才真正 join 泵线程）：持着
+    // m_transportMutex 做 join 会把并发的 shutdownSocket() 一起堵住，
+    // 而 shutdownSocket 的全部意义就是"不会堵"。
+}
+
+void SshClient::appendTransportDiagnostics(SshError &error) const
+{
+    ProxyTransportPtr transport;
+    {
+        QMutexLocker lock(&m_transportMutex);
+        transport = m_transport;
+    }
+    if (!transport)
+        return;
+    const QString diag = transport->diagnostics().trimmed();
+    if (diag.isEmpty())
+        return;
+    error.message += QStringLiteral("\n代理载体输出：%1").arg(diag);
+}
+
+// 本连接 + 整条载体链是否都能在无人交互下重放。见 isAuthReplayable() 的声明处。
+bool SshClient::isAuthReplayable() const
+{
+    if (!m_authReplayable)
+        return false;
+    ProxyTransportPtr transport;
+    {
+        QMutexLocker lock(&m_transportMutex);
+        transport = m_transport;
+    }
+    // 直连 / Http / Socks5 / 系统代理没有载体，只看自己那一段。
+    return !transport || transport->isReplayable();
 }
 
 // ==========================================================================

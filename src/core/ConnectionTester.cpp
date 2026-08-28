@@ -10,9 +10,13 @@
 namespace cubeshell {
 
 namespace {
-// 兜底超时：SSH 的阻塞 connect() 自身不带超时（内核 SYN 重传可达一两分钟），
-// 到时即按失败回报并把 worker  detach 在后台（见 testSsh 注释）。
-constexpr int kSshGuardMs  = 15000;
+// 兜底超时：改之前 SSH 的阻塞 connect() 自身不带超时（内核 SYN 重传可达一两
+// 分钟），这张表是唯一的超时。现在 SshClient 自带预算，本表退化为"预算失效时
+// 的最后一道闸"，取值见 sshGuardMsFor()。
+//
+// 兜底表比预算多留的余量：预算只管 TCP+握手+认证，之后还有 disconnectFromHost
+// 与线程回切。余量太小会让正常收尾被判成超时。
+constexpr int kSshGuardMarginMs = 3000;
 constexpr int kTcpGuardMs  = 12000;  // 兜底；TcpClient 自身 connectTimeoutMs 更短
 constexpr int kTcpConnectMs = 8000;  // 写给 TcpSettings.connectTimeoutMs
 } // namespace
@@ -82,6 +86,13 @@ bool ConnectionTester::testSsh(const DeviceEntry &entry)
         client->setPrivateKey(entry.keyType, entry.keyFile);
     else
         client->setPassword(entry.password);
+    // 这里不设 setConnectTimeoutMs：不设时 SshClient 自己会去「设置 → 通用」
+    // 取那个「SSH 连接超时」（见 effectiveConnectTimeoutMs），跟终端建连路径
+    // 走同一份预算——「测试连接」通了而实连超时，或者反过来，都会很难解释。
+    //
+    // 代理必须一起测：不带代理去测，内网设备会显示"连接超时"，而真正连接时
+    // 走代理明明是通的——「测试连接」给出的结论与实际相反，比没有这个按钮更糟。
+    client->setProxyConfig(entry.proxy);
     m_sshClient = client;   // cancel() 靠它 shutdownSocket
 
     auto result = std::make_shared<SshResult>();
@@ -106,8 +117,21 @@ bool ConnectionTester::testSsh(const DeviceEntry &entry)
             }, Qt::QueuedConnection);
     worker->start();
 
-    startGuardTimer(kSshGuardMs);
+    startGuardTimer(sshGuardMsFor(*client));
     return true;
+}
+
+// 兜底表要盖住 SshClient 自己那份建连预算，不能是个写死的 15 秒。
+//
+// 改之前 SSH 的三段（TCP/握手/认证）一个超时都没有，这张表就是**唯一**的超时，
+// 15 秒够用。现在预算由设置页决定：用户设成 30 秒时，写死的 15 秒会先到点，
+// 于是明明还在正常握手的连接被稳定误报成"连接超时"。
+//
+// 用 effectiveConnectTimeoutMs() 而不是 connectTimeoutMs()：后者在"没显式设过"
+// 时返回 0，那正是本函数最需要知道真实预算的情形（本类就从不显式设它）。
+int ConnectionTester::sshGuardMsFor(const SshClient &client)
+{
+    return client.effectiveConnectTimeoutMs() + kSshGuardMarginMs;
 }
 
 void ConnectionTester::onSshDone(const std::shared_ptr<SshResult> &result)

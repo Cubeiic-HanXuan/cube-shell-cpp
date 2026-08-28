@@ -220,6 +220,8 @@ void NatDialog::onConnectClicked()
     params.password = entry.password;
     params.keyType = entry.keyType;
     params.keyFile = entry.keyFile;
+    // 代理：entry 是 resolved() 出来的，代理口令已填好（见 DeviceConfigStore::resolved）。
+    params.proxy = entry.proxy;
 
     // 密码非必填（见 AddDeviceDialog::validate），但内网穿透没有终端可以
     // 就地问密码（SSH 标签页走 TerminalPrompt），带着空密码去连只会撞回

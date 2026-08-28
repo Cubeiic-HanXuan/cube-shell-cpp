@@ -87,6 +87,8 @@ SshClient *ForwarderManager::connectClient(const TunnelSpec &spec, QString &erro
     client->setPassword(spec.sshPassword);
     if (!spec.keyFile.isEmpty())
         client->setPrivateKey(spec.keyType, spec.keyFile, spec.keyPassphrase);
+    // 代理与凭据一样由 spec 带进来（见 TunnelSpec::proxy）。
+    client->setProxyConfig(spec.proxy);
 
     // No interactive MFA prompt here — forwarders use password/key auth only
     // (forwarder.py passes no MFA callback either). Agent / default-key login is

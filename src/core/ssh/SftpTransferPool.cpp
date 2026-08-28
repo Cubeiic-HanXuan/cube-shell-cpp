@@ -257,10 +257,21 @@ bool SftpTransferPool::spawnClone(Slot &slot, QString *errorOut)
     const QString keyType = primary->keyType();
     const QString keyFile = primary->keyFile();
     const QString passphrase = primary->passphrase();
+    // 代理配置也算凭据的一部分，必须一起复制：漏了的话克隆连接会绕过代理直连，
+    // 在内网里就是"主连接好着、并行传输却连不上"这种极难定位的现象。
+    const ProxyConfig proxy = primary->proxyConfig();
+    const ProxyConfig globalProxy = primary->globalProxyConfig();
+    const int connectTimeoutMs = primary->connectTimeoutMs();
 
     auto client = std::make_unique<SshClient>();
     client->setHost(host, port);
     client->setUsername(user);
+    // 从主连接复制而不是各自去读配置：主连接建立时用的是哪份代理，克隆就该用
+    // 哪份。（唯一例外是"全局代理"且主连接当初也没显式给出全局那份的情况——
+    // 那时两边都会各自去设置里取，见 SshClient::connectToHost。）
+    // 超时同理：这里复制到的 0 表示"主连接也没显式设"，克隆照样去设置里取。
+    client->setProxyConfig(proxy, globalProxy);
+    client->setConnectTimeoutMs(connectTimeoutMs);
     if (!keyFile.isEmpty())
         client->setPrivateKey(keyType, keyFile, passphrase);
     else

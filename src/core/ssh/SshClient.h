@@ -11,6 +11,7 @@
 // (SshBridge) runs the read loop; the UI talks to it via Qt signals.
 
 #include <QByteArray>
+#include <QDeadlineTimer>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -20,6 +21,8 @@
 
 #include <QMutex>
 #include <QRecursiveMutex>
+
+#include "net/ProxyConnector.h"
 
 struct _LIBSSH2_SESSION;
 struct _LIBSSH2_CHANNEL;
@@ -65,6 +68,52 @@ public:
     // Returns true on success; on failure returns false and fills error.
     bool connectToHost(SshPromptCallback promptCallback, SshError &error);
 
+    // 用一个**已经连接好**的 fd 完成握手 + 认证，跳过拨号。
+    //
+    // 给跳板链的中间跳用（见 ssh/SshJumpChain）：第 2 跳及之后的传输是上一跳的
+    // direct-tcpip 通道（经 socket pair 变成一个普通 fd），压根没有"拨号"这一步，
+    // 也不该再去读它自己的 ProxyConfig——那条链已经在展平时算进去了。
+    //
+    // 本对象接管 sock 的所有权（disconnectFromHost 负责回收），失败时也一样。
+    // transport 非空时一并接管，拆除顺序与 connectToHost 完全一致。
+    bool connectOverSocket(qintptr sock, ProxyTransportPtr transport,
+                           SshPromptCallback promptCallback, SshError &error);
+
+    // 建连预算（毫秒），覆盖 TCP 建连（含代理握手）+ SSH 握手 + 认证三段。
+    // <=0 表示用「设置 → 通用」里那个「SSH 连接超时」（见 effectiveConnectTimeoutMs）。
+    //
+    // 在此之前这三段**一个超时都没有**：TCP 是裸阻塞 ::connect，只能靠内核 SYN
+    // 重传兜底（macOS 约 75 秒）；握手和认证则完全不设限。设置页那个
+    // 「SSH 连接超时」spinbox 一直是死设置，没有任何调用点读它。
+    void setConnectTimeoutMs(int timeoutMs) { m_connectTimeoutMs = timeoutMs; }
+    int connectTimeoutMs() const { return m_connectTimeoutMs; }
+
+    // 本次建连实际会用的预算：显式设过就用设置值，否则取「设置 → 通用」里那个
+    // 「SSH 连接超时」（缺省 15 秒）。ConnectionTester 的兜底定时器要按它定时长，
+    // 否则用户把超时调大之后兜底表会先到点，把正常握手误报成"连接超时"。
+    int effectiveConnectTimeoutMs() const;
+
+    // --- 代理 -------------------------------------------------------------
+
+    // 本连接走哪种代理。proxy.type == Global 时取 globalProxy 那一份
+    // （见 resolveGlobalProxy）；globalProxy 省略不传时由 connectToHost 自己去
+    // 「设置 → 代理」里取。不调用等于直连，行为与加代理之前一致。
+    //
+    // 两份一起设是刻意的：SftpTransferPool::spawnClone 复制凭据时必须两份都
+    // 复制过去，分成两个 setter 早晚漏一个——漏了的后果是克隆连接绕过代理
+    // 直连，在内网里就是无声失败。
+    void setProxyConfig(const ProxyConfig &proxy,
+                        const ProxyConfig &globalProxy = ProxyConfig{});
+    const ProxyConfig &proxyConfig() const { return m_proxy; }
+    const ProxyConfig &globalProxyConfig() const { return m_globalProxy; }
+
+    // 跳板机 / 代理命令的拨号器。net/ 层不许依赖 ssh/、也不起子进程，所以这两种
+    // 类型走依赖倒置由外部注入（见 ProxyConnector.h 的分层说明）。
+    // 没注入时对应类型给出可读错误，不会崩。
+    void setJumpDialer(JumpDialer dialer) { m_jumpDialer = std::move(dialer); }
+    void setCommandDialer(CommandDialer dialer) { m_commandDialer = std::move(dialer); }
+
+
     // Open an interactive shell channel with a pty.
     // term e.g. "xterm-256color"; width/height in characters.
     // Returns true on success.
@@ -92,7 +141,10 @@ public:
     // 本连接的认证方式是否可在无人交互的前提下重放（password / publickey 可以，
     // keyboard-interactive 的 OTP 一次一密不可以）。连接池据此决定能否克隆：
     // 返回 false 时退回单连接串行传输，不去骚扰用户再输一次动态码。
-    bool isAuthReplayable() const { return m_authReplayable; }
+    //
+    // 走跳板链时**整条链**都要算进来：目标机用密码、某台跳板用 OTP，重建一次
+    // 连接仍然要管用户要一次动态码。见 ProxyTransport::isReplayable()。
+    bool isAuthReplayable() const;
 
     // --- channel I/O (called from the bridge's threads) ---
     // Returns bytes read, or empty on EOF/closed. Sets *wouldBlock if the read
@@ -115,6 +167,19 @@ public:
 
     // Access the raw socket fd (for poll/select in the read loop).
     qintptr socketFd() const { return m_sock; }
+
+    // 把 session 与底层 fd 一起翻成非阻塞。
+    //
+    // 原本是 openShell() 内联的一段，提取出来是因为**中转跳板机的 session 也必须
+    // 这么翻**，而它们从不调用 openShell（跳板机上没有 shell，只有 direct-tcpip
+    // 通道）。阻塞模式的 session 上 libssh2_channel_read 会**持着 m_sessionMutex
+    // 阻塞**（见 readChannel），双向中继于是必然死锁：单线程时那个读永远不返回、
+    // 没有任何东西被写出去；双线程时写线程等的正是读线程持着的那把锁。
+    //
+    // fd 也要翻而不只是 session：libssh2 在 session_handshake 之后会把 socket
+    // 恢复成原来的阻塞状态，不翻 fd 的话 recv() 仍会阻塞在 libssh2_channel_read
+    // 里面，读循环永远等不到 EAGAIN。
+    void setTransportNonBlocking();
 
     // Block until the channel socket is readable (or timeoutMs elapses).
     // Used by the bridge's read loop to avoid a busy spin on non-blocking reads.
@@ -188,9 +253,21 @@ private:
     bool authPublicKey(SshError &error);
     bool authKeyboardInteractive(SshPromptCallback cb, SshError &error);
     bool waitSocket(int timeoutMs, SshError &error);
+
+    // 接管一个已连接的 fd，做 session_init → handshake → authenticate。
+    // connectToHost（拨号之后）与 connectOverSocket（跳板链的中间跳）共用这一段
+    // ——两者从这里往下逐字节相同，分开写早晚有一处漏掉超时或诊断。
+    bool finishHandshake(qintptr sock, QDeadlineTimer budget, SshError &error);
     // 在已持有 m_sessionMutex 的前提下非阻塞地关闭并释放 shell channel。
     // 供 closeChannel()/disconnectFromHost() 在持锁后调用（见 .cpp 注释）。
     void closeChannelLocked();
+
+    // 拆掉代理链的载体（若有）。必须**在 socket 关闭之后**调用，理由见 .cpp。
+    void releaseTransport();
+
+    // 把载体侧攒下的诊断（子进程 stderr、退出码）附到错误消息后面。
+    // 要在 disconnectFromHost() 之前调用——那一步会把载体连带诊断一起拆掉。
+    void appendTransportDiagnostics(SshError &error) const;
 
     QString m_host;
     quint16 m_port = 22;
@@ -204,6 +281,33 @@ private:
     // authenticate() 成功走的是 password/publickey（可重放）还是
     // keyboard-interactive（不可重放）。见 isAuthReplayable()。
     bool m_authReplayable = false;
+
+    // 建连预算（毫秒）。<=0 = 由 effectiveConnectTimeoutMs() 去「设置」里取。
+    // 见 setConnectTimeoutMs 的注释：在此之前这三段一个超时都没有。
+    int m_connectTimeoutMs = 0;
+
+    ProxyConfig m_proxy;
+    ProxyConfig m_globalProxy;
+    JumpDialer    m_jumpDialer;
+    CommandDialer m_commandDialer;
+
+    // 代理链的载体（代理命令的子进程 + 泵线程；跳板链的整条 SSH 会话链）。
+    // 直连 / Http / Socks5 / 系统代理都是空的——那几种握手完就是同一个 fd，
+    // 背后没有额外活物。它的存活期必须**恰好**覆盖 m_sock 的存活期，见
+    // ProxyTransport 的注释和 releaseTransport()。
+    //
+    // 单独一把锁：shutdownSocket() 明确允许在任意线程无锁调用，而它要碰这个
+    // 成员；拿 m_sessionMutex 会让「关标签页」重新变成可能死等 I/O 的操作，
+    // 那正是 shutdownSocket 存在的意义。这把锁**不许跨 I/O 持有**。
+    mutable QMutex m_transportMutex;
+    ProxyTransportPtr m_transport;
+
+    // 建连（含整条代理链）途中的取消标志。
+    //
+    // 为什么不能只靠 shutdownSocket()：那个函数在 m_sock < 0 时直接 return，
+    // 而建代理链的整个过程里 m_sock 都还是 -1（要等最后拿到 fd 才赋值）。用户在
+    // 第 3 跳还在连的时候关掉标签页，没有这个标志就只能等到 OS 超时。
+    std::atomic<bool> m_dialCancelled{false};
 
     qintptr m_sock = -1;
     // socket 已被 shutdownSocket() 打断（取消传输/关标签页）。isTransportAlive

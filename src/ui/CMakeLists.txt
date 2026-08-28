@@ -12,6 +12,8 @@ set(UI_SOURCES
     file_browser_common.cpp   # 两棵文件树共用的筛选/排序逻辑（见 file_browser_common.h）
     file_icons.cpp
     add_device_dialog.cpp
+    # 代理配置控件（设备对话框与设置页共用同一个，见其头注释）
+    ProxySettingsWidget.cpp
     status_box_item.cpp
     LanguageManager.cpp
     # --- TCP/Telnet UI（无条件编译，理由同 src/core/CMakeLists.txt 的 net/ 段） ---

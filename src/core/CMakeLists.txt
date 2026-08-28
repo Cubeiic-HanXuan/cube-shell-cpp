@@ -15,9 +15,13 @@ set(CORE_SOURCES
     ssh/MfaPromptHandler.cpp    # port of MFA prompt handling
     ssh/TunnelPool.cpp          # port of tunnel pool management
     ssh/SftpUploaderCore.cpp    # port of core/uploader (chunked/resumable upload)
+    ssh/SshJumpChain.cpp        # 「跳转服务器」代理：逐跳建链 + direct-tcpip 中继
 
-    # --- net (TCP / Telnet)：无条件编译。Qt6::Network 是顶层必需组件，
+    # --- net (TCP / Telnet / 代理)：无条件编译。Qt6::Network 是顶层必需组件，
     #     且这是唯一在鸿蒙上也能跑的新协议（那里 Serial/RDP 被强制关闭）。 ---
+    net/SocketUtil.cpp          # 裸 socket 跨平台工具（带超时的 connect / socket 对）
+    net/ProxyConfig.cpp         # 代理配置数据模型（6 种类型 + JSON + 跳板链展平）
+    net/ProxyConnector.cpp      # 代理拨号（HTTP CONNECT / SOCKS5 / 系统代理；跳板与代理命令走注入）
     net/LineEndings.cpp         # 协议无关的换行转换（原在 SerialBridge 里）
     net/TcpClient.cpp           # QTcpSocket 封装（建连/收发/超时/日志）
     net/TelnetProtocol.cpp      # RFC 854/855 IAC 选项协商状态机
@@ -109,8 +113,13 @@ endif()
 #   * frp 内网穿透  —— 需要下载并运行 frpc/frps 二进制
 #   * docker CLI    —— 需要调用本机 docker 命令（ComposeYaml 纯解析层不受影响，
 #                      走 SSH 管理远程 Docker 的路径也不在此列）
+#   * 代理命令      —— ProxyCommand 就是「起一个本机进程当传输载体」，而鸿蒙上
+#                      压根没有 nc/corkscrew 这类载体二进制
 if(CUBESHELL_WITH_LOCALPROC)
     list(APPEND CORE_SOURCES
+        # --- 代理（只有这一种代理类型要起子进程，其余都在无条件段里）---
+        net/ProxyCommandDialer.cpp  # ProxyCommand：子进程 stdin/stdout ↔ socket pair
+
         # --- tunnels / forwarding ---
         forwarder/FrpManager.cpp    # port of core/frp_manager.py
         forwarder/FrpInstaller.cpp  # port of core/frp_manager.py (下载/解压/远端部署)

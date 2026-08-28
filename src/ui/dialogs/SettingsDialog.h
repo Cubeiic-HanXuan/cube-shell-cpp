@@ -8,6 +8,8 @@
 
 #include <QDialog>
 
+#include "ProxySettingsWidget.h"
+
 class QCheckBox;
 class QComboBox;
 class QFontComboBox;
@@ -22,8 +24,21 @@ class SettingsDialog : public QDialog {
 public:
     explicit SettingsDialog(QWidget *parent = nullptr);
 
-    // 打开后选中指定 Tab（0=主题 1=语言 2=通用），供不同菜单入口定位。
+    // 打开后选中指定 Tab（0=主题 1=语言 2=通用 3=代理），供不同菜单入口定位。
     void setCurrentTab(int index);
+
+    // --- 代理页 ------------------------------------------------------------
+    //
+    // 全局代理的**配置**由本对话框自己读写（GlobalState/theme.json），但
+    // **口令**与**跳板机候选**都要设备存储才拿得到，而这个对话框刻意不认识
+    // DeviceConfigStore——由 MainWindow 喂进来 / 取回去，与 AddDeviceDialog
+    // 那套 resolver 同一个路子。
+    void setProxyDeviceCatalog(const QList<ProxyDeviceItem> &devices);
+    void setHasStoredProxyPassword(bool has);
+    // accept() 之后由 MainWindow 落进钥匙串：只有 edited 为真才该动已存的那份
+    //（空口令框是"没改"，不是"清空"）。
+    bool proxyPasswordEdited() const;
+    QString proxyPassword() const;
 
     // OK：保存并应用（外观即时应用；语言重启后全量生效）。
     void accept() override;
@@ -51,6 +66,7 @@ private:
     QWidget *createThemeTab();
     QWidget *createLanguageTab();
     QWidget *createGeneralTab();
+    QWidget *createProxyTab();
     void loadCurrentSettings();
 
     QTabWidget *m_tabWidget = nullptr;
@@ -63,6 +79,7 @@ private:
     QComboBox *m_encoding = nullptr;      // UTF-8 / GBK / GB2312
     QSpinBox *m_scrollback = nullptr;     // 终端回滚行数（搜索可检索的范围）
     QCheckBox *m_commandCompletion = nullptr; // 终端命令补全开关（默认开启）
+    ProxySettingsWidget *m_proxy = nullptr;   // 「代理」页：那份全局代理
     QString m_originalAppearance;         // Cancel 时还原实时预览
 };
 

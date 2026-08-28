@@ -98,6 +98,16 @@ private:
     void loadDevices();
     // 明文密码 → 钥匙串的一次性迁移（幂等；已迁移过则直接返回）。
     void migrateSecrets();
+    // 把「设置 → 代理」那份全局代理的口令从钥匙串取出推给建连路径
+    //（工作线程不能直接问 m_store，见实现处的注释）。
+    void publishGlobalProxyPassword();
+    // 把被引用为跳板机的设备连同凭据推给建连路径（同上，工作线程不能查 m_store）。
+    // 由 refreshDeviceList() 兜住所有改设备的入口，另在代理设置保存后补调一次。
+    //
+    // extraHopIds：**还没落盘**的引用。添加/编辑设备对话框里的「测试连接」要用：
+    // 那一刻用户刚选好跳板机但还没点保存，引用只存在于对话框里，扫 m_store 是
+    // 扫不到的，快照会是空的，于是测试连接必报"跳板机 xxx 已不存在"。
+    void publishJumpHostCatalog(const QStringList &extraHopIds = QStringList());
     void refreshDeviceList();
     bool saveDevices();
 

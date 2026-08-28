@@ -41,6 +41,11 @@ struct TunnelSpec {
     QString keyType;   // "Ed25519Key"/"RSAKey"/"ECDSAKey"/"DSSKey" (empty = password/agent)
     QString keyFile;
     QString keyPassphrase;
+
+    // 代理。由凭据解析回调从设备条目里带过来（见 MainWindow::setupTunnels）——
+    // 不能让 connectClient 自己去读配置：它跑在工作线程上，而且隧道用的是
+    // 哪台设备只有解析回调知道。
+    ProxyConfig proxy;
 };
 
 // 对应C++: class ForwarderManager

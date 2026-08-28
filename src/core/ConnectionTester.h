@@ -68,6 +68,8 @@ private:
 
     struct SshResult;   // 定义在 .cpp（含结果 + 代数令牌）
     void onSshDone(const std::shared_ptr<SshResult> &result);
+    // 本次 SSH 测试的兜底时长：盖住 client 自己那份建连预算（见 .cpp 注释）。
+    static int sshGuardMsFor(const SshClient &client);
 
     bool m_running = false;
     // 代数令牌：每次 start/cancel 递增。迟到的 SSH worker 结果凭它识别并丢弃，

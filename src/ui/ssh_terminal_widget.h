@@ -27,6 +27,8 @@
 
 class QTermWidget;
 class QThread;
+class QFrame;
+class QLabel;
 
 namespace cubeshell {
 
@@ -51,6 +53,10 @@ public:
     QTermWidget *terminal() const { return m_term; }
     // AI 交互式执行需要连接 bridge 的 rawDataForAi 信号（null 直到 connected()）。
     SshBridge *bridge() const { return m_bridge; }
+
+public slots:
+    // 显示断线重连覆盖层（心跳检测、网络异常等路径调用）。
+    void showReconnectOverlay(const QString &reason = QString());
 
 signals:
     // Emitted on the UI thread.
@@ -79,6 +85,11 @@ private:
     // 可能来自设备条目，也可能来自刚才的终端提示。
     void startConnect(const QString &password);
 
+    // 断开后显示的重连覆盖层。
+    void hideReconnectOverlay();
+    void reconnect();
+    void resizeEvent(QResizeEvent *event) override;
+
     // 密码认证失败后允许在终端里重问的总次数（同 ssh 默认的 3 次）。
     static constexpr int kMaxAuthAttempts = 3;
 
@@ -99,6 +110,10 @@ private:
     SshBridge *m_bridge = nullptr;         // child QObject
 
     bool m_started = false;
+
+    // 断线重连覆盖层
+    QFrame *m_reconnectOverlay = nullptr;
+    QLabel *m_reconnectReasonLabel = nullptr;
 
     // 连接中的 client/worker 登记：连接 worker 跑在后台，组件可能（关标签页）
     // 先于连接完成析构。worker 全程用 QPointer 回跳 UI；析构时凭

@@ -3,6 +3,8 @@
 #include "SshClient.h"
 
 #include <QDeadlineTimer>
+#include <QHash>
+#include <QLocalSocket>
 #include <QLoggingCategory>
 #include <QMutexLocker>
 
@@ -75,6 +77,36 @@ void SshClient::setPrivateKey(const QString &keyType, const QString &keyFile, co
     m_passphrase = passphrase;
 }
 
+void SshClient::setKnownHostsStore(std::shared_ptr<KnownHostsStore> store)
+{
+    m_knownHostsStore = std::move(store);
+}
+
+void SshClient::setHostKeyPromptCallback(HostKeyPromptCallback cb)
+{
+    m_hostKeyPromptCallback = std::move(cb);
+}
+
+void SshClient::setHostKeyVerification(HostKeyVerification v)
+{
+    m_hostKeyVerification = v;
+}
+
+HostKeyVerification SshClient::hostKeyVerification() const
+{
+    return m_hostKeyVerification;
+}
+
+void SshClient::setKeepaliveInterval(int seconds)
+{
+    m_keepaliveInterval = seconds;
+}
+
+void SshClient::setKeepaliveGracePeriod(int seconds)
+{
+    m_keepaliveGracePeriod = seconds;
+}
+
 bool SshClient::isConnected() const { return m_session != nullptr; }
 bool SshClient::isChannelOpen() const { return m_channel != nullptr; }
 
@@ -88,6 +120,24 @@ static void fillSessionError(_LIBSSH2_SESSION *session, SshError &error, const Q
     error.message = context;
     if (msg && len > 0)
         error.message += QStringLiteral(": ") + QString::fromLatin1(msg, len);
+}
+
+bool SshClient::sendKeepalive(SshError &error)
+{
+    if (!m_session || m_socketShutdown.load()) {
+        error.message = QStringLiteral("连接已断开");
+        return false;
+    }
+    QMutexLocker locker(&m_sessionMutex);
+    int secondsToNext = 0;
+    const int rc = libssh2_keepalive_send(m_session, &secondsToNext);
+    if (rc == LIBSSH2_ERROR_EAGAIN)
+        return true; // 非阻塞，稍后重试
+    if (rc != 0) {
+        fillSessionError(m_session, error, QStringLiteral("发送 keepalive 失败"));
+        return false;
+    }
+    return true;
 }
 
 // 本次建连的总预算（毫秒）。显式设过就用设置值，否则取设置页「SSH 连接超时」。
@@ -172,7 +222,8 @@ bool SshClient::connectToHost(SshPromptCallback promptCallback, SshError &error)
     dial.jumpDialer = m_jumpDialer
                           ? m_jumpDialer
                           : makeSshJumpDialer(GlobalState::instance().jumpHostCatalog(),
-                                              m_promptCallback);
+                                              m_promptCallback,
+                                              m_hostKeyPromptCallback);
 #ifdef CUBESHELL_WITH_LOCALPROC
     // 默认的代理命令拨号器就地补上，而不是让每个调用方各自注入：connectToHost
     // 有 5 个调用点（终端 / 连接测试 / 隧道 / SFTP 并行克隆 / frp），靠每处记得
@@ -236,6 +287,73 @@ bool SshClient::connectOverSocket(qintptr sock, ProxyTransportPtr transport,
     return finishHandshake(sock, QDeadlineTimer(effectiveConnectTimeoutMs()), error);
 }
 
+// ---------------------------------------------------------------------------
+// agent forwarding：sshd 回开的 auth-agent@openssh.com 通道 → 本地 agent 中继
+//
+// 这个回调【必须注册】，不只是为了转发能用：
+// libssh2 1.11.1 的 packet_authagent_open() 在 session->authagent 为空时回
+// SSH_MSG_CHANNEL_OPEN_FAILURE，但组包长度算的是 strlen("X11 Forward
+// Unavailable")=23、写进包的却是 "Auth Agent unavailable"=22 —— 多发一个
+// 未初始化字节。新版 OpenSSH sshd 严格校验，报
+// "channel_input_open_failure: parse msg/lang: unexpected bytes remain after
+// decoding" 后断开【整条连接】。于是远端执行 ssh-add -l / 二级跳 ssh 时，
+// shell 读循环吃到 -13 SOCKET_DISCONNECT，UI 误弹"连接已断开"遮罩。
+//
+// 注册回调后通道被正常确认（open-confirmation），永远走不到那条有 bug 的
+// open-failure 路径。
+//
+// 但回调里【不能做通道 IO】：它嵌在 _libssh2_transport_read 的解密/分发栈里，
+// 嵌套的 channel_read/channel_write 会复用同一个 session->packet 读缓冲，
+// 实测嵌套读返回 -41 OUT_OF_BOUNDARY（解密出垃圾包长）并最终踩空指针。
+// 所以回调只登记通道；真正的中继由 pumpAgentForwardChannels() 在
+// readChannel() 的正常调用栈里非阻塞完成——bridge 读循环每秒多次调用
+// readChannel，转发延迟在毫秒级。
+// ---------------------------------------------------------------------------
+
+// SshClient 的 agent 转发通道簿记（声明在头文件，定义留在这里以藏住
+// QLocalSocket）。
+struct SshClient::AgentForwardChannel {
+    LIBSSH2_CHANNEL *channel = nullptr;
+    QLocalSocket agent;          // 本地 agent 连接（Unix socket / Windows 命名管道）
+    QByteArray toChannel;        // agent → 通道 的积压（对端窗口满时暂存）
+    bool connectTried = false;   // 已发起过 connectToServer
+    bool remoteEof = false;      // 对端已 EOF（ssh-add 完事）；把残余应答发完就关
+};
+
+namespace {
+
+// 回调不携带 SshClient 指针，而通道 IO 又要挂到具体实例的锁和簿记上，
+// 用一张全局 session→client 表找回实例（finishHandshake 注册、
+// disconnectFromHost 注销；session 与 client 一对一）。
+QMutex s_agentCbMapMutex;
+QHash<LIBSSH2_SESSION *, SshClient *> s_agentCbMap;
+
+// 本机 agent 地址：Unix 走 SSH_AUTH_SOCK；Windows 上 OpenSSH agent 是命名管道，
+// 环境变量为空时回落到约定路径（与 authAgent() 的 Windows 回落一致）。
+QString localAgentAddress()
+{
+    QString path = qEnvironmentVariable("SSH_AUTH_SOCK");
+#ifdef Q_OS_WIN
+    if (path.isEmpty())
+        path = QStringLiteral("\\\\.\\pipe\\openssh-ssh-agent");
+#endif
+    return path;
+}
+
+// 非阻塞关闭并释放转发通道：与 closeChannelLocked 同款有界重试，绝不等对端。
+void freeAgentChannel(LIBSSH2_CHANNEL *channel)
+{
+    libssh2_channel_set_blocking(channel, 0);
+    for (int i = 0; i < 20; ++i) {
+        if (libssh2_channel_close(channel) != LIBSSH2_ERROR_EAGAIN)
+            break;
+        struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 5000; // 让出 5ms 再重试
+        ::select(0, nullptr, nullptr, nullptr, &tv);
+    }
+    libssh2_channel_free(channel);
+}
+
+} // namespace
 // session_init → handshake → authenticate。调用方已经把 sock 挂到 m_sock 上。
 bool SshClient::finishHandshake(qintptr sock, QDeadlineTimer budget, SshError &error)
 {
@@ -246,6 +364,17 @@ bool SshClient::finishHandshake(qintptr sock, QDeadlineTimer budget, SshError &e
     if (!m_session) {
         error.message = QStringLiteral("libssh2_session_init failed");
         return false;
+    }
+    // agent forwarding 的入站通道回调。必须注册：不注册时 libssh2 1.11.1 对
+    // auth-agent@openssh.com 回的 open-failure 包有一个多余字节，新版 OpenSSH
+    // 会因此断开整条连接（详见回调实现处的注释）。无论本连接是否请求转发，
+    // 注册都无副作用——不请求转发 sshd 根本不会回开这种通道。
+    libssh2_session_callback_set2(
+        m_session, LIBSSH2_CALLBACK_AUTHAGENT,
+        reinterpret_cast<libssh2_cb_generic *>(&authAgentChannelCallback));
+    {
+        QMutexLocker lock(&s_agentCbMapMutex);
+        s_agentCbMap.insert(m_session, this);
     }
     libssh2_session_set_blocking(m_session, 1); // blocking for connect/auth simplicity
 
@@ -265,6 +394,13 @@ bool SshClient::finishHandshake(qintptr sock, QDeadlineTimer budget, SshError &e
         return false;
     }
 
+    // --- host key verification (before authentication) ---
+    if (!verifyHostKey(error)) {
+        appendTransportDiagnostics(error);
+        disconnectFromHost();
+        return false;
+    }
+
     // --- authenticate ---
     libssh2_session_set_timeout(m_session, long(qMax(qint64(1), budget.remainingTime())));
     if (!authenticate(error)) {
@@ -277,6 +413,102 @@ bool SshClient::finishHandshake(qintptr sock, QDeadlineTimer budget, SshError &e
     // 都带上一个几秒的上限，大文件传输会被判成超时。
     libssh2_session_set_timeout(m_session, 0);
 
+    // keepalive：开启后由 UI 层的 SshKeepaliveTimer 周期性触发
+    // libssh2_keepalive_send。
+    const int keepaliveSec = m_keepaliveInterval > 0
+                                 ? m_keepaliveInterval
+                                 : GlobalState::instance().sshKeepaliveIntervalSeconds();
+    if (GlobalState::instance().sshKeepaliveEnabled() && keepaliveSec > 0)
+        libssh2_keepalive_config(m_session, /*want_reply*/ 1, keepaliveSec);
+
+    return true;
+}
+
+bool SshClient::verifyHostKey(SshError &error)
+{
+    if (m_hostKeyVerification == HostKeyVerification::Off)
+        return true;
+
+    if (!m_knownHostsStore) {
+        if (m_hostKeyVerification == HostKeyVerification::Strict) {
+            error.message = QStringLiteral("严格主机密钥校验已开启，但未配置 known_hosts 存储");
+            return false;
+        }
+        return true;
+    }
+
+    size_t keyLen = 0;
+    int keyType = LIBSSH2_HOSTKEY_TYPE_UNKNOWN;
+    const char *rawKey = libssh2_session_hostkey(m_session, &keyLen, &keyType);
+    if (!rawKey || keyLen == 0) {
+        error.message = QStringLiteral("无法获取服务器主机密钥");
+        return false;
+    }
+    const QByteArray publicKey(rawKey, int(keyLen));
+    const QByteArray fingerprint = KnownHostsStore::fingerprintSha256(publicKey);
+    const QString keyTypeString = KnownHostsStore::keyTypeFromLibssh2(keyType);
+    const QString fingerprintDisplay = KnownHostsStore::fingerprintDisplayString(fingerprint);
+
+    const auto checkResult = m_knownHostsStore->check(m_host, m_port, fingerprint, keyTypeString);
+
+    if (checkResult == KnownHostsStore::CheckResult::Match)
+        return true;
+
+    if (checkResult == KnownHostsStore::CheckResult::Mismatch) {
+        if (m_hostKeyVerification == HostKeyVerification::Strict) {
+            error.message = QStringLiteral("主机密钥与 known_hosts 中记录不一致，连接已被拒绝（%1）")
+                                .arg(fingerprintDisplay);
+            return false;
+        }
+        if (!m_hostKeyPromptCallback) {
+            error.message = QStringLiteral("主机密钥已变更：%1").arg(fingerprintDisplay);
+            return false;
+        }
+        const auto result = m_hostKeyPromptCallback(m_host, m_port, fingerprintDisplay, keyTypeString, true);
+        if (result == HostKeyPromptResult::Reject) {
+            error.message = QStringLiteral("用户拒绝了变更后的主机密钥");
+            return false;
+        }
+        if (result == HostKeyPromptResult::AcceptAndSave) {
+            QString saveErr;
+            if (!m_knownHostsStore->accept(m_host, m_port, publicKey, keyTypeString, &saveErr)) {
+                error.message = QStringLiteral("接受主机密钥但保存失败：%1").arg(saveErr);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // NotFound
+    if (m_hostKeyVerification == HostKeyVerification::Strict) {
+        error.message = QStringLiteral("主机 %1:%2 未在 known_hosts 中记录，连接已被拒绝")
+                            .arg(m_host).arg(m_port);
+        return false;
+    }
+    if (m_hostKeyVerification == HostKeyVerification::AcceptNew) {
+        QString saveErr;
+        if (!m_knownHostsStore->accept(m_host, m_port, publicKey, keyTypeString, &saveErr)) {
+            error.message = QStringLiteral("自动接受新主机密钥但保存失败：%1").arg(saveErr);
+            return false;
+        }
+        return true;
+    }
+    if (!m_hostKeyPromptCallback) {
+        error.message = QStringLiteral("主机密钥未记录，但未配置确认回调");
+        return false;
+    }
+    const auto result = m_hostKeyPromptCallback(m_host, m_port, fingerprintDisplay, keyTypeString, false);
+    if (result == HostKeyPromptResult::Reject) {
+        error.message = QStringLiteral("用户拒绝了未记录的主机密钥");
+        return false;
+    }
+    if (result == HostKeyPromptResult::AcceptAndSave) {
+        QString saveErr;
+        if (!m_knownHostsStore->accept(m_host, m_port, publicKey, keyTypeString, &saveErr)) {
+            error.message = QStringLiteral("接受主机密钥但保存失败：%1").arg(saveErr);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -287,6 +519,24 @@ bool SshClient::authenticate(SshError &error)
                                        m_username.toUtf8().size());
     const QString supported = list ? QString::fromUtf8(list) : QString();
     qCDebug(sshLog) << "server auth methods:" << supported;
+
+    // ssh-agent：凭据在本地 agent 里（m_keyFile/m_password 通常都为空）。
+    // 用户显式选了 agent，失败就报可读错误停在这里，不静默回落到密码——
+    // 回落成密码认证会让人误以为 agent 已经通了（方案 §2.4）。
+    if (m_credentialKind == SshCredentialKind::SshAgent
+        && supported.contains(QStringLiteral("publickey"))) {
+        if (authAgent(error))
+            return true;
+        // agent 失败且用户同时配置了私钥文件：回退到文件私钥。
+        if (!m_keyFile.isEmpty() && authPublicKey(error))
+            return true;
+        if (error.message.isEmpty())
+            error.message = QStringLiteral(
+                "ssh-agent 认证失败：请确认 agent 已运行"
+                "（检查 SSH_AUTH_SOCK，或用 ssh-add -l 查看已加载密钥）");
+        error.authFailed = true;
+        return false;
+    }
 
     // Prefer public key if a key file was supplied.
     if (!m_keyFile.isEmpty() && supported.contains(QStringLiteral("publickey")))
@@ -355,6 +605,229 @@ bool SshClient::authPublicKey(SshError &error)
     fillSessionError(m_session, error, QStringLiteral("Public key authentication failed"));
     error.authFailed = true;
     return false;
+}
+
+bool SshClient::authAgent(SshError &error)
+{
+    // agent 句柄绑定 m_session：libssh2_agent_init(session) 产出的对象只在
+    // 本 session 的认证里有效，不能跨 session 复用（跳板链每一跳各自 init）。
+    // 局部变量 + 出口统一释放，不留成员——成员会在重连/克隆路径上变成
+    // 又一处需要管理生命周期的状态。
+    LIBSSH2_AGENT *agent = libssh2_agent_init(m_session);
+    if (!agent) {
+        fillSessionError(m_session, error, QStringLiteral("无法初始化 ssh-agent 接口"));
+        return false;
+    }
+    const auto cleanup = [&agent]() {
+        libssh2_agent_disconnect(agent);
+        libssh2_agent_free(agent);
+    };
+
+    bool connected = (libssh2_agent_connect(agent) == 0);
+#ifdef Q_OS_WIN
+    if (!connected && qEnvironmentVariableIsEmpty("SSH_AUTH_SOCK")) {
+        // Windows 上 OpenSSH agent 走命名管道而不是 SSH_AUTH_SOCK：环境变量
+        // 为空时补一次显式路径再试（libssh2 1.11 起支持，依赖编译期 Win32
+        // agent 支持；不支持的构建这一步只是再失败一次，无副作用）。
+        libssh2_agent_set_identity_path(agent, "\\\\.\\pipe\\openssh-ssh-agent");
+        connected = (libssh2_agent_connect(agent) == 0);
+    }
+#endif
+    if (!connected) {
+        cleanup();
+        error.message = QStringLiteral(
+            "无法连接到本地 ssh-agent：请确认 agent 已运行"
+            "（检查 SSH_AUTH_SOCK，或用 ssh-add -l 查看已加载密钥）");
+        error.authFailed = true;
+        return false;
+    }
+    if (libssh2_agent_list_identities(agent) != 0) {
+        cleanup();
+        error.message = QStringLiteral("枚举 ssh-agent 身份密钥失败");
+        error.authFailed = true;
+        return false;
+    }
+
+    const QByteArray user = m_username.toUtf8();
+    libssh2_agent_publickey *identity = nullptr;
+    libssh2_agent_publickey *prev = nullptr;
+    int tried = 0;
+    while (true) {
+        const int rc = libssh2_agent_get_identity(agent, &identity, prev);
+        if (rc == 1)
+            break;   // 列表结束
+        if (rc < 0) {
+            cleanup();
+            error.message = QStringLiteral("读取 ssh-agent 身份密钥失败");
+            error.authFailed = true;
+            return false;
+        }
+        ++tried;
+        if (libssh2_agent_userauth(agent, user.constData(), identity) == 0) {
+            qCDebug(sshLog) << "ssh-agent auth succeeded after" << tried << "identities";
+            cleanup();
+            m_authReplayable = true; // agent 可重放 -> 允许克隆并行传输连接
+            return true;
+        }
+        prev = identity;
+    }
+
+    cleanup();
+    qCDebug(sshLog) << "ssh-agent auth: server rejected all" << tried << "identities";
+    error.message = tried == 0
+        ? QStringLiteral("ssh-agent 中没有已加载的密钥（用 ssh-add 添加后重试）")
+        : QStringLiteral("服务器拒绝了 ssh-agent 中的全部 %1 个身份密钥").arg(tried);
+    error.authFailed = true;
+    return false;
+}
+
+
+// libssh2 在收到 sshd 回开的 auth-agent@openssh.com 通道时【同步】调用本回调
+// ——调用点嵌在 readChannel 的协议包处理栈里，持的是同一把 m_sessionMutex
+// （递归锁，同线程重入安全）。这里只登记通道，不做任何通道 IO（原因见上）。
+void SshClient::authAgentChannelCallback(LIBSSH2_SESSION *session,
+                                         LIBSSH2_CHANNEL *channel,
+                                         void **abstract)
+{
+    Q_UNUSED(abstract);
+
+    SshClient *self = nullptr;
+    {
+        QMutexLocker lock(&s_agentCbMapMutex);
+        self = s_agentCbMap.value(session);
+    }
+    if (!self) {
+        // 找不到所属 client（不应发生）：立刻关掉，别让远端干等。
+        freeAgentChannel(channel);
+        return;
+    }
+
+    QMutexLocker lock(&self->m_sessionMutex);
+    auto *afc = new AgentForwardChannel;
+    afc->channel = channel;
+    self->m_agentForwardChannels.append(afc);
+    qCDebug(sshLog) << "agent forwarding: inbound auth-agent channel registered";
+}
+
+// 中继所有挂起的 agent 转发通道。非阻塞；调用方必须已持 m_sessionMutex。
+// readChannel() 每次被调都会带一遍，bridge 读循环是天然的驱动器。
+void SshClient::pumpAgentForwardChannels()
+{
+    for (int i = m_agentForwardChannels.size() - 1; i >= 0; --i) {
+        AgentForwardChannel *afc = m_agentForwardChannels.at(i);
+        LIBSSH2_CHANNEL *ch = afc->channel;
+
+        // --- 本地 agent 连接（异步发起；本地 socket 下一拍就好）---
+        if (afc->agent.state() != QLocalSocket::ConnectedState) {
+            if (!afc->connectTried) {
+                afc->connectTried = true;
+                const QString path = localAgentAddress();
+                if (!path.isEmpty())
+                    afc->agent.connectToServer(path);
+            }
+            if (afc->agent.state() == QLocalSocket::ConnectingState)
+                continue; // 等下一拍
+            if (afc->agent.state() != QLocalSocket::ConnectedState) {
+                // 本机没有可用 agent：通道已被确认，只能关掉——远端 ssh-add 报
+                // "communication with agent failed"，但连接和 shell 都不受影响。
+                qCWarning(sshLog) << "agent forwarding: local agent unreachable"
+                                     "(SSH_AUTH_SOCK empty or connect failed),"
+                                     "closing forwarded channel";
+                freeAgentChannel(ch);
+                delete afc;
+                m_agentForwardChannels.removeAt(i);
+            }
+            continue;
+        }
+
+        bool broken = false;
+
+        // --- 通道 → agent（agent 协议帧原样转发，无需解析内容）---
+        while (!afc->remoteEof) {
+            char buf[16384];
+            const ssize_t n = libssh2_channel_read(ch, buf, sizeof(buf));
+            if (n == LIBSSH2_ERROR_EAGAIN)
+                break;
+            if (n < 0) {
+                broken = true;
+                break;
+            }
+            if (n == 0) {
+                // 对端 EOF：请求已发完，应答可能还在本地 agent 回来的路上，
+                // 先把残余应答发完再关（下面统一处理）。
+                afc->remoteEof = true;
+                break;
+            }
+            if (afc->agent.write(buf, qint64(n)) != qint64(n)) {
+                broken = true;
+                break;
+            }
+        }
+
+        // --- agent → 通道 ---
+        // waitForReadyRead(0)：QLocalSocket 的内部缓冲靠 socket notifier 填充，
+        // 而 bridge 读循环的线程**没有事件循环**——不主动 poll 的话
+        // bytesAvailable 永远是 0，应答就卡死在 socket 里。
+        afc->agent.waitForReadyRead(0);
+        while (afc->agent.bytesAvailable() > 0) {
+            const QByteArray chunk = afc->agent.read(16384);
+            if (chunk.isEmpty())
+                break;
+            afc->toChannel += chunk;
+        }
+        while (!afc->toChannel.isEmpty()) {
+            const ssize_t n = libssh2_channel_write(ch, afc->toChannel.constData(),
+                                                    size_t(afc->toChannel.size()));
+            if (n == LIBSSH2_ERROR_EAGAIN)
+                break; // 对端窗口满，下拍再发
+            if (n < 0) {
+                broken = true;
+                break;
+            }
+            afc->toChannel.remove(0, int(n));
+        }
+        afc->agent.flush();
+
+        if (afc->agent.state() != QLocalSocket::ConnectedState)
+            broken = true; // 本地 agent 中途挂了
+
+        // 对端已 EOF：应答可能还在本地 agent 回来的路上（客户端发完请求就
+        // 半关的情况），先给本地 agent 一个有界等待（本地往返极快）再补收一轮，
+        // 免得把还差一口气就到通道的应答掐掉。
+        if (afc->remoteEof && !broken) {
+            if (afc->agent.waitForReadyRead(200)) {
+                while (afc->agent.bytesAvailable() > 0)
+                    afc->toChannel += afc->agent.read(16384);
+                while (!afc->toChannel.isEmpty()) {
+                    const ssize_t n = libssh2_channel_write(
+                        ch, afc->toChannel.constData(), size_t(afc->toChannel.size()));
+                    if (n == LIBSSH2_ERROR_EAGAIN)
+                        break;
+                    if (n < 0) {
+                        broken = true;
+                        break;
+                    }
+                    afc->toChannel.remove(0, int(n));
+                }
+            }
+        }
+
+        // --- 收尾：对端 EOF 且积压清空 / 通道出错 → 关闭释放 ---
+        if (broken || (afc->remoteEof && afc->toChannel.isEmpty())) {
+            freeAgentChannel(ch);
+            delete afc;
+            m_agentForwardChannels.removeAt(i);
+            continue;
+        }
+    }
+}
+
+void SshClient::clearAgentForwardChannels()
+{
+    // session 马上整体释放，channel 由 libssh2_session_free 回收——这里只清
+    // 本地簿记，不调任何通道函数（session 可能已处于拆除中段）。
+    qDeleteAll(m_agentForwardChannels);
+    m_agentForwardChannels.clear();
 }
 
 // C trampoline for libssh2's keyboard-interactive callback.
@@ -435,6 +908,20 @@ bool SshClient::openShell(const QByteArray &term, int width, int height, SshErro
         return false;
     }
 
+    // agent forwarding（auth-agent-req@openssh.com）：远端进程经本会话使用本机
+    // agent。服务器拒绝/不支持很常见，失败不阻断 shell，只记日志（方案 §2.4）。
+    //
+    // 只对 ssh-agent 认证的设备请求：UI 里转发开关只出现在 agent 登录页；
+    // 密码/私钥登录也请求转发的话，远端会平白多出一个 SSH_AUTH_SOCK，而socket
+    // 背后有没有可用 agent 全凭运气——用户实测"密码登录也打印
+    // /tmp/ssh-XXXX/agent.NN"的困惑就是这么来的。
+    if (m_agentForwarding && m_credentialKind == SshCredentialKind::SshAgent) {
+        if (libssh2_channel_request_auth_agent(m_channel) == 0)
+            qCDebug(sshLog) << "agent forwarding requested";
+        else
+            qCDebug(sshLog) << "agent forwarding request rejected (non-fatal)";
+    }
+
     if (libssh2_channel_shell(m_channel) != 0) {
         fillSessionError(m_session, error, QStringLiteral("invoke_shell failed"));
         closeChannel();
@@ -464,6 +951,10 @@ QByteArray SshClient::readChannel(int maxBytes, bool *wouldBlock)
         return {};
 
     QMutexLocker locker(&m_sessionMutex);
+    // 顺带中继挂起的 agent 转发通道。bridge 读循环每秒多次调本函数，是这些
+    // 通道的天然驱动器；回调里不做 IO 的原因见 authAgentChannelCallback。
+    if (!m_agentForwardChannels.isEmpty())
+        pumpAgentForwardChannels();
     QByteArray buf(maxBytes, 0);
     ssize_t n = libssh2_channel_read(m_channel, buf.data(), maxBytes);
     if (n == LIBSSH2_ERROR_EAGAIN) {
@@ -471,8 +962,19 @@ QByteArray SshClient::readChannel(int maxBytes, bool *wouldBlock)
             *wouldBlock = true;
         return {};
     }
-    if (n <= 0)
+    if (n <= 0) {
+        // n<0 是"读出错"而不是 EOF（EOF 时 n==0）。两类现在对调用方都表现成
+        // 空数据，但日志里必须分得开：bridge 把空数据判成 channelClosed，
+        // 错误码是判断"误报断开"的唯一线索。
+        if (n < 0) {
+            char *msg = nullptr;
+            int msglen = 0;
+            libssh2_session_last_error(m_session, &msg, &msglen, 0);
+            qCWarning(sshLog) << "readChannel error" << n
+                              << QString::fromLatin1(msg, msglen);
+        }
         return {}; // EOF or error
+    }
     buf.resize(int(n));
     return buf;
 }
@@ -618,6 +1120,12 @@ void SshClient::shutdownSocket()
 
 void SshClient::disconnectFromHost()
 {
+    // 先从 agent 转发回调的全局表里摘下来：本对象析构后若还有回调进来，
+    // 拿到的是悬空指针。
+    if (m_session) {
+        QMutexLocker lock(&s_agentCbMapMutex);
+        s_agentCbMap.remove(m_session);
+    }
     // 同 closeChannel：主线程关闭路径不能无限等 m_sessionMutex（见上注释）。
     // 拿不到锁就只关 socket（唤醒所有阻塞在 select/read 上的持锁线程），跳过
     // libssh2 层的优雅断开。
@@ -639,6 +1147,7 @@ void SshClient::disconnectFromHost()
     }
     struct UnlockGuard { QRecursiveMutex &m; ~UnlockGuard() { m.unlock(); } } guard{m_sessionMutex};
     closeChannelLocked();
+    clearAgentForwardChannels(); // channel 由下面的 session_free 回收
     if (m_session) {
         libssh2_session_disconnect(m_session, "bye");
         libssh2_session_free(m_session);

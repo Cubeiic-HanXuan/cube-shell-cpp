@@ -76,6 +76,7 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     m_authMethod = new QComboBox(this);
     m_authMethod->addItem(tr("密码登录"));
     m_authMethod->addItem(tr("私钥登录"));
+    m_authMethod->addItem(tr("ssh-agent 登录"));
 
     // --- auth stack ---
     m_authStack = new QStackedWidget(this);
@@ -108,8 +109,22 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     keyForm->addRow(tr("私钥类型："), m_keyType);
     keyForm->addRow(tr("私钥文件："), keyFileRow);
 
+    // page 2: ssh-agent（无凭据字段——密钥在本地 agent 里，不落任何文件）
+    auto *agentPage = new QWidget(this);
+    auto *agentForm = new QFormLayout(agentPage);
+    agentForm->setContentsMargins(0, 0, 0, 0);
+    auto *agentHint = new QLabel(
+        tr("使用本地 ssh-agent 中已加载的密钥认证。\n"
+           "请先确认 agent 已运行并已添加密钥（ssh-add -l 查看）。"), agentPage);
+    agentHint->setWordWrap(true);
+    m_agentForward = new QCheckBox(tr("转发本地 ssh-agent 到远端（agent forwarding）"), agentPage);
+    m_agentForward->setChecked(true);
+    agentForm->addRow(agentHint);
+    agentForm->addRow(m_agentForward);
+
     m_authStack->addWidget(pwPage);
     m_authStack->addWidget(keyPage);
+    m_authStack->addWidget(agentPage);
 
     // --- main form ---
     auto *form = new QFormLayout;
@@ -368,7 +383,10 @@ void AddDeviceDialog::setDevice(const DeviceEntry &e)
     // 回填过实际端口后，端口框里就不再是"某协议的默认值"了——切协议时
     // 不该把用户存的端口冲掉。
     m_portDefaultFor.clear();
-    if (e.usesKey()) {
+    if (e.usesAgent()) {
+        m_authMethod->setCurrentIndex(2);
+        m_agentForward->setChecked(e.agentForwarding);
+    } else if (e.usesKey()) {
         m_authMethod->setCurrentIndex(1);
         m_keyType->setCurrentText(e.keyType);
         m_keyFile->setText(e.keyFile);
@@ -445,7 +463,8 @@ void AddDeviceDialog::onTestConnection()
     DeviceEntry e = device();
     // 编辑既有设备且密码框留空时，device() 带出的是空密码（语义是"没改"），
     // 得拿钥匙串里的真实密码去测，否则一改端口再测就误报认证失败。
-    if (e.password.isEmpty() && !e.usesKey() && m_passwordResolver)
+    // ssh-agent 设备没有密码概念，不去碰钥匙串。
+    if (e.password.isEmpty() && !e.usesKey() && !e.usesAgent() && m_passwordResolver)
         e.password = m_passwordResolver(e.id);
     // 代理口令同理，语义逐字对应。不补的话"代理需要认证"的设备一测就红，
     // 而真正连接时明明是通的——这个按钮给出与实际相反的结论比没有它更糟。
@@ -456,7 +475,8 @@ void AddDeviceDialog::onTestConnection()
     // 「测试连接」不做交互式应答（promptCb 传 nullptr），空密码只会撞回
     // 「认证失败：用户名或密码错误」，把"压根没填密码"说成"密码错了"。
     // 就地填一个即可测；留空保存也行，连接时终端里会问（见 TerminalPrompt）。
-    if (e.isSsh() && !e.usesKey() && e.password.isEmpty()) {
+    // ssh-agent 设备无需密码，直接测。
+    if (e.isSsh() && !e.usesKey() && !e.usesAgent() && e.password.isEmpty()) {
         onTestFinished(false, tr("未填写密码，无法测试；可先填一个用于测试，"
                                  "或留空保存、连接时在终端中输入。"));
         return;
@@ -576,15 +596,25 @@ DeviceEntry AddDeviceDialog::device() const
         return e;
     }
 #endif
-    if (m_authMethod->currentIndex() == 1) {
+    const int authIdx = m_authMethod->currentIndex();
+    if (authIdx == 1) {
+        e.credentialKind = SshCredentialKind::PrivateKeyFile;
         e.keyType = m_keyType->currentText();
         e.keyFile = m_keyFile->text().trimmed();
         e.password.clear();
+    } else if (authIdx == 2) {
+        // ssh-agent：凭据全在本地 agent 里，什么都不落盘。
+        e.credentialKind = SshCredentialKind::SshAgent;
+        e.password.clear();
+        e.keyType.clear();
+        e.keyFile.clear();
     } else {
+        e.credentialKind = SshCredentialKind::Password;
         e.password = m_password->text();
         e.keyType.clear();
         e.keyFile.clear();
     }
+    e.agentForwarding = m_agentForward->isChecked();
     // 代理只对 SSH 取值：上面 4 个提前 return（串口 / telnet+tcp / RDP）都不
     // 经过这里，于是那些协议的条目 proxy.type 恒为 None——与本轮"只接线 SSH"
     // 的范围一致（见 SshClient::setProxyConfig），也不会在 devices.json 里

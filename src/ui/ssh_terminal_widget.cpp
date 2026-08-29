@@ -2,9 +2,12 @@
 
 #include <QDebug>
 #include <QFontDatabase>
+#include <QFrame>
 #include <QInputDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QThread>
 #include <QVBoxLayout>
 
@@ -12,9 +15,11 @@
 #include "Session.h"
 
 #include "ssh/SshBridge.h"
+#include "ssh/KnownHostsStore.h"
 #include "ssh/SshClient.h"
 
 #include "config/GlobalState.h"
+#include "dialogs/HostKeyDialog.h"
 
 #include "terminal_command_suggest.h"
 #include "terminal_prompt.h"
@@ -59,6 +64,33 @@ SshTerminalWidget::SshTerminalWidget(const DeviceEntry &device, QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(m_term);
+
+    // 断线重连覆盖层：默认隐藏，onDisconnected 时显示。
+    m_reconnectOverlay = new QFrame(this);
+    m_reconnectOverlay->setObjectName(QStringLiteral("reconnectOverlay"));
+    m_reconnectOverlay->setStyleSheet(
+        QStringLiteral("QFrame#reconnectOverlay { background: rgba(0, 0, 0, 180); }"));
+    m_reconnectOverlay->setVisible(false);
+
+    auto *overlayLayout = new QVBoxLayout(m_reconnectOverlay);
+    overlayLayout->setAlignment(Qt::AlignCenter);
+
+    m_reconnectReasonLabel = new QLabel(m_reconnectOverlay);
+    m_reconnectReasonLabel->setAlignment(Qt::AlignCenter);
+    m_reconnectReasonLabel->setStyleSheet(QStringLiteral("color: white; font-size: 14px;"));
+    overlayLayout->addWidget(m_reconnectReasonLabel);
+
+    auto *buttonLayout = new QHBoxLayout();
+    auto *reconnectBtn = new QPushButton(tr("重新连接"), m_reconnectOverlay);
+    auto *closeBtn = new QPushButton(tr("关闭标签页"), m_reconnectOverlay);
+    buttonLayout->addWidget(reconnectBtn);
+    buttonLayout->addWidget(closeBtn);
+    overlayLayout->addLayout(buttonLayout);
+
+    connect(reconnectBtn, &QPushButton::clicked, this, &SshTerminalWidget::reconnect);
+    connect(closeBtn, &QPushButton::clicked, this, [this]() {
+        emit connectionFailed(tr("用户关闭了已断开的标签页"));
+    });
 }
 
 // 析构时等待连接 worker 退出的上限：m_pendingClient->shutdownSocket() 之后
@@ -98,7 +130,8 @@ void SshTerminalWidget::connectToHost()
     // 密码没预存（且不是私钥登录）：先在终端画面里问一次，拿到了才建连。
     // 不能带着空密码去连——SshClient::authenticate() 会跳过 password 认证
     // 落到 keyboard-interactive，那条路的回调 promptForMfa() 是个对话框。
-    if (!m_device.usesKey() && m_device.password.isEmpty()) {
+    // ssh-agent 设备既没有密码也不该问密码：凭据在本地 agent 里。
+    if (!m_device.usesKey() && !m_device.usesAgent() && m_device.password.isEmpty()) {
         promptForPassword(QString());
         return;
     }
@@ -169,6 +202,8 @@ void SshTerminalWidget::startConnect(const QString &password)
     auto client = std::make_shared<SshClient>();
     client->setHost(hp.host, hp.port);
     client->setUsername(device.username);
+    client->setCredentialKind(device.credentialKind);
+    client->setAgentForwarding(device.agentForwarding);
     if (device.usesKey())
         client->setPrivateKey(device.keyType, device.keyFile);
     else
@@ -177,6 +212,33 @@ void SshTerminalWidget::startConnect(const QString &password)
     // 代理口令已经填好（见 DeviceConfigStore::resolved）。
     // 类型是「全局代理」时不必在这里读设置——connectToHost 自己会去取。
     client->setProxyConfig(device.proxy);
+
+    // 主机密钥校验。
+    client->setKnownHostsStore(KnownHostsStore::defaultInstance());
+    client->setHostKeyVerification(static_cast<HostKeyVerification>(
+        GlobalState::instance().hostKeyVerification()));
+    QPointer<SshTerminalWidget> hostKeySelf(this);
+    client->setHostKeyPromptCallback(
+        [hostKeySelf](const QString &host, quint16 port,
+                      const QString &fingerprint, const QString &keyType,
+                      bool keyChanged) -> HostKeyPromptResult {
+            if (!hostKeySelf || hostKeySelf->m_teardown)
+                return HostKeyPromptResult::Reject;
+
+            HostKeyPromptResult result = HostKeyPromptResult::Reject;
+            QMetaObject::invokeMethod(
+                hostKeySelf,
+                [hostKeySelf, host, port, fingerprint, keyType, keyChanged, &result]() {
+                    if (!hostKeySelf || hostKeySelf->m_teardown)
+                        return;
+                    HostKeyDialog dlg(host, port, fingerprint, keyType, keyChanged,
+                                      hostKeySelf->window());
+                    if (dlg.exec() == QDialog::Accepted)
+                        result = dlg.hostKeyResult();
+                },
+                Qt::BlockingQueuedConnection);
+            return result;
+        });
 
     // Keyboard-interactive MFA: libssh2 invokes this callback from the worker
     // thread, but it must show a dialog on the UI thread. We bounce through the
@@ -219,9 +281,11 @@ void SshTerminalWidget::startConnect(const QString &password)
                         return;
                     self->m_pendingClient.reset();
                     // 密码不对（含预存的旧密码）就在终端里重问，同 ssh 的
-                    // 三次机会。私钥登录没得重试，非认证类失败（网络不通、
+                    // 三次机会。私钥 / ssh-agent 登录没得重试（agent 失败该去
+                    // 检查 agent 而不是重输密码），非认证类失败（网络不通、
                     // 主机不存在）重问也没意义，都直接报错。
                     if (authFailed && !self->m_device.usesKey()
+                        && !self->m_device.usesAgent()
                         && self->m_authAttempt < kMaxAuthAttempts) {
                         self->promptForPassword(tr("认证失败，请重试。"));
                         return;
@@ -277,12 +341,53 @@ void SshTerminalWidget::startConnect(const QString &password)
                     self, &SshTerminalWidget::cwdChanged, Qt::QueuedConnection);
             self->m_bridge->start();
             // Hook already injected on the worker thread above — do NOT inject again.
+            self->hideReconnectOverlay();
             emit self->connected();
         }, Qt::QueuedConnection);
     });
     m_connectWorker = worker;
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     worker->start();
+}
+
+void SshTerminalWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    if (m_reconnectOverlay && m_reconnectOverlay->isVisible())
+        m_reconnectOverlay->setGeometry(rect());
+}
+
+void SshTerminalWidget::showReconnectOverlay(const QString &reason)
+{
+    if (!m_reconnectOverlay)
+        return;
+    m_reconnectReasonLabel->setText(reason.isEmpty()
+                                        ? tr("连接已断开")
+                                        : tr("连接已断开：%1").arg(reason));
+    m_reconnectOverlay->setGeometry(rect());
+    m_reconnectOverlay->setVisible(true);
+    m_reconnectOverlay->raise();
+}
+
+void SshTerminalWidget::hideReconnectOverlay()
+{
+    if (m_reconnectOverlay)
+        m_reconnectOverlay->setVisible(false);
+}
+
+void SshTerminalWidget::reconnect()
+{
+    hideReconnectOverlay();
+    m_started = false;
+    m_authAttempt = 0;
+    m_teardown = false;
+    m_client.reset();
+    if (m_bridge) {
+        m_bridge->stop();
+        m_bridge->deleteLater();
+        m_bridge = nullptr;
+    }
+    connectToHost();
 }
 
 bool SshTerminalWidget::promptForMfa(const QString &prompt, bool echo, QString &response)
@@ -304,6 +409,7 @@ void SshTerminalWidget::onMfaPrompt(const QString &prompt)
 
 void SshTerminalWidget::onDisconnected()
 {
+    showReconnectOverlay(QString());
     emit disconnected();
 }
 

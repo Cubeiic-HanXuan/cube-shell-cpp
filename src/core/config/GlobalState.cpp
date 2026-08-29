@@ -320,6 +320,54 @@ void GlobalState::setSshConnectTimeoutSeconds(int seconds)
     m_theme.insert(QStringLiteral("ssh_timeout"), seconds);
 }
 
+int GlobalState::hostKeyVerification() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("host_key_verification")).toInt(1); // default Ask
+}
+
+void GlobalState::setHostKeyVerification(int mode)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("host_key_verification"), mode);
+}
+
+bool GlobalState::sshKeepaliveEnabled() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("ssh_keepalive_enabled")).toBool(true);
+}
+
+void GlobalState::setSshKeepaliveEnabled(bool enabled)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("ssh_keepalive_enabled"), enabled);
+}
+
+int GlobalState::sshKeepaliveIntervalSeconds() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("ssh_keepalive_interval_sec")).toInt(30);
+}
+
+void GlobalState::setSshKeepaliveIntervalSeconds(int seconds)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("ssh_keepalive_interval_sec"), seconds);
+}
+
+int GlobalState::sshKeepaliveGraceSeconds() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("ssh_keepalive_grace_sec")).toInt(60);
+}
+
+void GlobalState::setSshKeepaliveGraceSeconds(int seconds)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("ssh_keepalive_grace_sec"), seconds);
+}
+
 // 全局代理。ProxyConfig 自带 JSON 读写，键名平铺（proxyType/proxyHost/...），
 // 与 devices.json 里设备自己那份代理配置**用同一组键名**——两处存的是同一种
 // 东西，键名一致才能让"把全局代理复制到某台设备"这类操作是纯搬运。

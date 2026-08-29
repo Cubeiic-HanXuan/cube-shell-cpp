@@ -42,6 +42,19 @@ quint16 defaultPortFor(const QString &protocol);
 QString defaultNewlineModeFor(const QString &protocol);
 
 // A single saved device/connection.
+// Authentication methods supported, mirroring ssh_func.py.
+enum class SshCredentialKind {
+    Password,
+    PrivateKeyFile,
+    SshAgent,
+    KeyboardInteractive
+};
+
+// JSON/界面互转。未知字符串一律回落 fallback（旧配置文件容错风格同上）。
+QString sshCredentialKindToString(SshCredentialKind kind);
+SshCredentialKind sshCredentialKindFromString(const QString &s,
+                                              SshCredentialKind fallback = SshCredentialKind::Password);
+
 struct DeviceEntry {
     // 稳定标识，与 name 解耦。钥匙串里就是按它索引密码的。
     //
@@ -60,6 +73,8 @@ struct DeviceEntry {
     quint16  port = 22;
     QString keyType;   // "Ed25519Key" | "RSAKey" | "ECDSAKey" | "DSSKey" | ""
     QString keyFile;
+    SshCredentialKind credentialKind = SshCredentialKind::Password;
+    bool agentForwarding = true;   // 是否请求 auth-agent-req@openssh.com
 
     // RDP 支持。对应Python: config.dat 中 RDP 条目为 dict，含 __type__/domain/auth
     // 字段（cube-shell.py::AddConfigUi.addDev，util.device_protocol）
@@ -119,6 +134,9 @@ struct DeviceEntry {
     HostPort hostPort() const;
     // True if this entry authenticates with a private key rather than password.
     bool usesKey() const { return !keyType.isEmpty() && !keyFile.isEmpty(); }
+    // ssh-agent 认证：凭据在 agent 里，既没有密码也没有私钥文件——所有
+    //「密码为空就终端里先问一次」的分支都要把它排除（见 SshTerminalWidget）。
+    bool usesAgent() const { return credentialKind == SshCredentialKind::SshAgent; }
 };
 
 class DeviceConfigStore {

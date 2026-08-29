@@ -155,6 +155,23 @@ public:
     int sshConnectTimeoutSeconds() const;
     void setSshConnectTimeoutSeconds(int seconds);
 
+    // 主机密钥校验策略 (theme.json 的 "host_key_verification")，默认 Ask。
+    // 对应 SshClient::HostKeyVerification：0=Strict, 1=Ask, 2=AcceptNew, 3=Off。
+    int hostKeyVerification() const;
+    void setHostKeyVerification(int mode);
+
+    // SSH keepalive 开关 (theme.json 的 "ssh_keepalive_enabled")，默认开启。
+    bool sshKeepaliveEnabled() const;
+    void setSshKeepaliveEnabled(bool enabled);
+
+    // SSH keepalive 间隔秒数 (theme.json 的 "ssh_keepalive_interval_sec")，默认 30。
+    int sshKeepaliveIntervalSeconds() const;
+    void setSshKeepaliveIntervalSeconds(int seconds);
+
+    // keepalive 无应答判定断开秒数 (theme.json 的 "ssh_keepalive_grace_sec")，默认 60。
+    int sshKeepaliveGraceSeconds() const;
+    void setSshKeepaliveGraceSeconds(int seconds);
+
     // 全局代理 (theme.json 里平铺的 proxyType/proxyHost/... 一组键)。
     // 设备的代理类型选「全局代理」时取的就是这一份，见
     // ProxyConfig::resolveGlobalProxy 与 SshClient::connectToHost

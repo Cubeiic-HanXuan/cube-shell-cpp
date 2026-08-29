@@ -74,7 +74,7 @@ static void testMigrationHappyPath()
     CHECK(f.open(QIODevice::ReadOnly));
     const QByteArray raw = f.readAll();
     f.close();
-    CHECK(!raw.contains("\"password\""));
+    CHECK(!raw.contains("\"password\":"));  // 按「键」匹配：credentialKind 的值也是 "password"
     CHECK(raw.contains("\"id\""));
 
     // 闸门已翻
@@ -122,7 +122,7 @@ static void testMigrationGateKeepsPlaintext()
     CHECK(f.open(QIODevice::ReadOnly));
     const QByteArray raw = f.readAll();
     f.close();
-    CHECK(raw.contains("\"password\""));   // 明文必须还在
+    CHECK(raw.contains("\"password\":"));  // 明文必须还在（按「键」匹配，避开 credentialKind 的值）
     CHECK(raw.contains("\"id\""));          // id 已补齐
 }
 
@@ -149,7 +149,7 @@ static void testFreshFormatNotMigrated()
     CHECK(f.open(QIODevice::ReadOnly));
     const QByteArray raw = f.readAll();
     f.close();
-    CHECK(!raw.contains("\"password\""));
+    CHECK(!raw.contains("\"password\":"));  // 按「键」匹配：credentialKind 的值也是 "password"
 }
 
 static void testAllProtocolIdsNonEmpty()

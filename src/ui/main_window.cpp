@@ -1440,6 +1440,11 @@ void MainWindow::setupTunnels()
             // 密码非必填（见 AddDeviceDialog::validate），但隧道没有终端可以
             // 像 SSH 标签页那样就地问（见 TerminalPrompt），空密码连上去只会
             // 得到一句「认证失败」。这里把真因说清楚。
+            if (e.usesAgent()) {
+                error = tr("设备“%1”使用 ssh-agent 认证；端口转发暂不支持 ssh-agent。")
+                            .arg(deviceName);
+                return false;
+            }
             if (!e.usesKey() && e.password.isEmpty()) {
                 error = tr("设备“%1”未保存密码；隧道需要预存密码，"
                            "或改用私钥登录。").arg(deviceName);
@@ -1701,9 +1706,9 @@ void MainWindow::publishJumpHostCatalog(const QStringList &extraHopIds)
         if (!wanted.contains(e.id))
             continue;
         DeviceEntry snapshot = e;
-        // 用密钥登录的跳板机不需要密码；不判这一下会让「有密钥的设备」也去
-        // 读一次钥匙串，白白多一次解锁。
-        if (!snapshot.usesKey())
+        // 用密钥 / ssh-agent 登录的跳板机不需要密码；不判这一下会让「有密钥
+        // 的设备」也去读一次钥匙串，白白多一次解锁。
+        if (!snapshot.usesKey() && !snapshot.usesAgent())
             snapshot.password = m_store.resolvedPassword(e.id);
         // 跳板机自己可能还在 HTTP/SOCKS5 代理后面（第一跳会尊重这份配置，
         // 见 SshJumpChain 的 effectiveHopProxy），那个代理的口令也得带上。

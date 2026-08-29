@@ -4,6 +4,8 @@
 set(CORE_SOURCES
     # --- ssh ---
     ssh/SshClient.cpp           # libssh2 wrapper (replaces paramiko.SSHClient)
+    ssh/KnownHostsStore.cpp     # OpenSSH-compatible known_hosts persistence
+    ssh/SshKeepaliveTimer.cpp   # periodic SSH keepalive sender
     ssh/SshBridge.cpp           # port of core/paramiko_bridge.py
     ssh/ShellMfaWatcher.cpp     # port of core/shell_mfa_watcher.py
     ssh/SftpClient.cpp          # port of SFTP operations (function/ssh_func.py)

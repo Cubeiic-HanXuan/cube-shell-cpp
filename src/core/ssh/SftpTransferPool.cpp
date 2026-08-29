@@ -257,6 +257,7 @@ bool SftpTransferPool::spawnClone(Slot &slot, QString *errorOut)
     const QString keyType = primary->keyType();
     const QString keyFile = primary->keyFile();
     const QString passphrase = primary->passphrase();
+    const SshCredentialKind credentialKind = primary->credentialKind();
     // 代理配置也算凭据的一部分，必须一起复制：漏了的话克隆连接会绕过代理直连，
     // 在内网里就是"主连接好着、并行传输却连不上"这种极难定位的现象。
     const ProxyConfig proxy = primary->proxyConfig();
@@ -272,6 +273,10 @@ bool SftpTransferPool::spawnClone(Slot &slot, QString *errorOut)
     // 超时同理：这里复制到的 0 表示"主连接也没显式设"，克隆照样去设置里取。
     client->setProxyConfig(proxy, globalProxy);
     client->setConnectTimeoutMs(connectTimeoutMs);
+    // 认证方式也一起复制：漏了的话 agent 认证的主连接克隆出来 credentialKind
+    // 回落成 Password 且密码为空，authenticate() 会静默走到 "No supported
+    // authentication method"，表现成"主连接好着、并行传输连不上"（方案 §2.6）。
+    client->setCredentialKind(credentialKind);
     if (!keyFile.isEmpty())
         client->setPrivateKey(keyType, keyFile, passphrase);
     else

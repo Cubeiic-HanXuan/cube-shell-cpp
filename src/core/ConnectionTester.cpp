@@ -82,6 +82,9 @@ bool ConnectionTester::testSsh(const DeviceEntry &entry)
     auto client = std::make_shared<SshClient>();
     client->setHost(hp.host, hp.port);
     client->setUsername(entry.username);
+    // 认证方式一起带上：ssh-agent 设备的 keyFile/password 都为空，不设的话
+    // authenticate() 会落到空密码认证，把"没选 agent"误报成"认证失败"。
+    client->setCredentialKind(entry.credentialKind);
     if (entry.usesKey())
         client->setPrivateKey(entry.keyType, entry.keyFile);
     else

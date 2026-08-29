@@ -79,6 +79,10 @@ private:
     QComboBox *m_encoding = nullptr;      // UTF-8 / GBK / GB2312
     QSpinBox *m_scrollback = nullptr;     // 终端回滚行数（搜索可检索的范围）
     QCheckBox *m_commandCompletion = nullptr; // 终端命令补全开关（默认开启）
+    QComboBox *m_hostKeyVerification = nullptr; // 主机密钥校验策略
+    QCheckBox *m_keepaliveEnabled = nullptr;    // SSH 保活开关
+    QSpinBox *m_keepaliveInterval = nullptr;    // SSH 保活间隔（秒）
+    QSpinBox *m_keepaliveGrace = nullptr;       // keepalive 无应答判定断开（秒）
     ProxySettingsWidget *m_proxy = nullptr;   // 「代理」页：那份全局代理
     QString m_originalAppearance;         // Cancel 时还原实时预览
 };

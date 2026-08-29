@@ -56,6 +56,10 @@ static const char kSshTimeout[] = "settings/ssh_timeout";
 static const char kEncoding[]   = "settings/terminal_encoding";
 static const char kScrollback[] = "settings/scrollback_lines";
 static const char kCommandCompletion[] = "settings/command_completion";
+static const char kHostKeyVerification[] = "settings/host_key_verification";
+static const char kKeepaliveEnabled[] = "settings/ssh_keepalive_enabled";
+static const char kKeepaliveInterval[] = "settings/ssh_keepalive_interval_sec";
+static const char kKeepaliveGrace[] = "settings/ssh_keepalive_grace_sec";
 } // namespace settings_keys
 
 // 对应Python: function/theme.py::MainWindow.__init__（设置窗布局）
@@ -199,6 +203,37 @@ QWidget *SettingsDialog::createGeneralTab()
     m_commandCompletion->setToolTip(tr("开启后在终端输入时自动弹出命令补全候选（历史命令 + 常用命令）。\n"
                                        "关闭则完全不弹候选窗，Ctrl+Space 也不再唤起。"));
     form->addRow(tr("终端命令补全："), m_commandCompletion);
+
+    // 主机密钥校验策略：决定首次连接或密钥变更时如何提示/阻断。
+    m_hostKeyVerification = new QComboBox(page);
+    m_hostKeyVerification->addItem(tr("询问（首次连接确认，变更时阻断）"), 1); // Ask
+    m_hostKeyVerification->addItem(tr("自动接受新密钥并保存"), 2);            // AcceptNew
+    m_hostKeyVerification->addItem(tr("严格（拒绝未知和变更）"), 0);           // Strict
+    m_hostKeyVerification->addItem(tr("关闭校验"), 3);                        // Off
+    m_hostKeyVerification->setToolTip(tr("严格模式会拒绝任何未知或已变更密钥的主机；\n"
+                                         "询问模式会在首次连接时弹窗确认；\n"
+                                         "自动接受新模式会静默记录首次密钥但拒绝变更。"));
+    unifyFieldWidth(m_hostKeyVerification);
+    addFullTextToolTip(m_hostKeyVerification);
+    form->addRow(tr("SSH 主机密钥校验："), m_hostKeyVerification);
+
+    m_keepaliveEnabled = new QCheckBox(tr("启用 SSH 保活"), page);
+    m_keepaliveEnabled->setToolTip(tr("周期性发送 SSH keepalive，防止 NAT/防火墙切断空闲连接。"));
+    form->addRow(tr("SSH 保活："), m_keepaliveEnabled);
+
+    m_keepaliveInterval = new QSpinBox(page);
+    m_keepaliveInterval->setRange(5, 600);
+    m_keepaliveInterval->setSuffix(tr(" 秒"));
+    m_keepaliveInterval->setToolTip(tr("向服务器发送 keepalive 的间隔。"));
+    unifyFieldWidth(m_keepaliveInterval);
+    form->addRow(tr("保活间隔："), m_keepaliveInterval);
+
+    m_keepaliveGrace = new QSpinBox(page);
+    m_keepaliveGrace->setRange(10, 300);
+    m_keepaliveGrace->setSuffix(tr(" 秒"));
+    m_keepaliveGrace->setToolTip(tr("连续多久未收到 keepalive 应答后判定连接已断开。"));
+    unifyFieldWidth(m_keepaliveGrace);
+    form->addRow(tr("无响应判定断开："), m_keepaliveGrace);
     return page;
 }
 
@@ -285,6 +320,19 @@ void SettingsDialog::loadCurrentSettings()
         qs.value(settings_keys::kCommandCompletion,
                  state.commandCompletionEnabled()).toBool());
 
+    const int hkv = qs.value(settings_keys::kHostKeyVerification,
+                             state.hostKeyVerification()).toInt();
+    const int hkvIdx = m_hostKeyVerification->findData(hkv);
+    if (hkvIdx >= 0)
+        m_hostKeyVerification->setCurrentIndex(hkvIdx);
+
+    m_keepaliveEnabled->setChecked(
+        qs.value(settings_keys::kKeepaliveEnabled, state.sshKeepaliveEnabled()).toBool());
+    m_keepaliveInterval->setValue(
+        qs.value(settings_keys::kKeepaliveInterval, state.sshKeepaliveIntervalSeconds()).toInt());
+    m_keepaliveGrace->setValue(
+        qs.value(settings_keys::kKeepaliveGrace, state.sshKeepaliveGraceSeconds()).toInt());
+
     // 全局代理：**只从 GlobalState 读**，不走 QSettings。
     //
     // 上面每一项都是双写（QSettings + theme.json），因为那些键 Python 版也在用。
@@ -338,6 +386,10 @@ void SettingsDialog::accept()
     state.setDeviceListFontSize(deviceListSize);
 
     state.setSshConnectTimeoutSeconds(m_sshTimeout->value());
+    state.setHostKeyVerification(m_hostKeyVerification->currentData().toInt());
+    state.setSshKeepaliveEnabled(m_keepaliveEnabled->isChecked());
+    state.setSshKeepaliveIntervalSeconds(m_keepaliveInterval->value());
+    state.setSshKeepaliveGraceSeconds(m_keepaliveGrace->value());
 
     // 全局代理：只写 GlobalState（理由见 loadCurrentSettings 里那段）。
     // 口令不在这里——writeJson 不写它，落钥匙串由 MainWindow 在本对话框
@@ -362,6 +414,10 @@ void SettingsDialog::accept()
     qs.setValue(settings_keys::kEncoding, m_encoding->currentText());
     qs.setValue(settings_keys::kScrollback, scrollback);
     qs.setValue(settings_keys::kCommandCompletion, completion);
+    qs.setValue(settings_keys::kHostKeyVerification, m_hostKeyVerification->currentData().toInt());
+    qs.setValue(settings_keys::kKeepaliveEnabled, m_keepaliveEnabled->isChecked());
+    qs.setValue(settings_keys::kKeepaliveInterval, m_keepaliveInterval->value());
+    qs.setValue(settings_keys::kKeepaliveGrace, m_keepaliveGrace->value());
 
     // theme.json 同步写回（与 Python 版共享配置）。
     QString err;

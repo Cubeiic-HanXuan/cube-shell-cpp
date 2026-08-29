@@ -14,6 +14,7 @@ namespace cubeshell {
 class SshTerminalWidget;
 class SftpBrowserWidget;
 class RemoteMonitor;
+class SshKeepaliveTimer;
 
 class SshSessionTab : public QWidget {
     Q_OBJECT
@@ -48,6 +49,7 @@ private:
     SshTerminalWidget *m_term = nullptr;
     SftpBrowserWidget *m_sftp = nullptr;
     RemoteMonitor *m_monitor = nullptr;
+    SshKeepaliveTimer *m_keepalive = nullptr;
 };
 
 } // namespace cubeshell

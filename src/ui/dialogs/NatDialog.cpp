@@ -226,6 +226,12 @@ void NatDialog::onConnectClicked()
     // 密码非必填（见 AddDeviceDialog::validate），但内网穿透没有终端可以
     // 就地问密码（SSH 标签页走 TerminalPrompt），带着空密码去连只会撞回
     // 一句「认证失败」，看不出真因。
+    if (entry.usesAgent()) {
+        QMessageBox::warning(hostWindow(), tr("不支持的认证方式"),
+                             tr("设备“%1”使用 ssh-agent 认证；内网穿透暂不支持 ssh-agent。")
+                                 .arg(device));
+        return;
+    }
     if (!entry.usesKey() && params.password.isEmpty()) {
         QMessageBox::warning(hostWindow(), tr("缺少密码"),
                              tr("设备“%1”未保存密码；内网穿透需要预存密码，"

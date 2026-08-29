@@ -15,6 +15,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 #include <atomic>
 #include <functional>
@@ -23,6 +24,8 @@
 #include <QRecursiveMutex>
 
 #include "net/ProxyConnector.h"
+#include "ssh/KnownHostsStore.h"
+#include "config/DeviceConfigStore.h"
 
 struct _LIBSSH2_SESSION;
 struct _LIBSSH2_CHANNEL;
@@ -49,6 +52,17 @@ struct SshError {
 // for the given prompt text. Used for OTP/MFA (see ssh_func.py's mfa_callback).
 using SshPromptCallback = std::function<QString(const QString &prompt, bool echo)>;
 
+// Result of a host-key confirmation dialog.
+enum class HostKeyPromptResult { Reject, AcceptOnce, AcceptAndSave };
+
+using HostKeyPromptCallback = std::function<HostKeyPromptResult(
+    const QString &host, quint16 port,
+    const QString &fingerprintDisplay, const QString &keyType,
+    bool keyChanged)>;
+
+// How strictly to enforce known_hosts verification.
+enum class HostKeyVerification { Strict, Ask, AcceptNew, Off };
+
 class SshClient : public QObject {
     Q_OBJECT
 public:
@@ -62,6 +76,31 @@ public:
     // keyType mirrors paramiko key class names: "Ed25519Key", "RSAKey",
     // "ECDSAKey", "DSSKey". keyFile is the private-key path; passphrase optional.
     void setPrivateKey(const QString &keyType, const QString &keyFile, const QString &passphrase = QString());
+
+    // 认证方式（DeviceEntry::credentialKind 的镜像；Password/PrivateKeyFile 时
+    // 行为与旧版一致，SshAgent 时 authenticate() 走 libssh2_agent_userauth）。
+    void setCredentialKind(SshCredentialKind kind) { m_credentialKind = kind; }
+    SshCredentialKind credentialKind() const { return m_credentialKind; }
+    // 是否在 shell channel 上请求 agent forwarding（auth-agent-req@openssh.com），
+    // 让远端进程能经由本会话使用本机 agent。默认 true（同 OpenSSH 习惯）。
+    // 请求被服务器拒绝不阻断 shell，仅记 debug 日志。
+    void setAgentForwarding(bool on) { m_agentForwarding = on; }
+    bool agentForwarding() const { return m_agentForwarding; }
+
+    // Host key verification. If no store is set, verification is skipped unless
+    // strict mode is requested (in which case the connection fails).
+    void setKnownHostsStore(std::shared_ptr<KnownHostsStore> store);
+    void setHostKeyPromptCallback(HostKeyPromptCallback cb);
+    void setHostKeyVerification(HostKeyVerification v);
+    HostKeyVerification hostKeyVerification() const;
+
+    // Keepalive configuration. intervalSec == 0 disables keepalive.
+    void setKeepaliveInterval(int seconds);
+    void setKeepaliveGracePeriod(int seconds);
+
+    // Send one keepalive packet. Returns false if the transport is dead.
+    // Must be called from a thread that owns an event loop (UI thread is fine).
+    bool sendKeepalive(SshError &error);
 
     // Establish the TCP connection + SSH handshake + authenticate.
     // promptCallback is used for keyboard-interactive MFA; may be null.
@@ -251,8 +290,33 @@ private:
     bool authenticate(SshError &error);
     bool authPassword(SshError &error);
     bool authPublicKey(SshError &error);
+    // 经本地 ssh-agent 认证（libssh2_agent_*）。agent 句柄是局部的：
+    // 它绑定 m_session，不能跨 session/线程复用（见实现注释）。
+    bool authAgent(SshError &error);
+    // sshd 回开 auth-agent@openssh.com 通道（agent forwarding）时的回调。
+    // 在 finishHandshake 里注册到每个新 session；static 是因为 libssh2 回调
+    // 不携带本对象指针（经全局 session→client 表找回实例）。
+    //
+    // 回调里【不许碰通道 IO】：它嵌在 _libssh2_transport_read 的解密/分发栈
+    // 里，嵌套读写会把读缓冲/解密状态搅乱（实测嵌套 channel_read 返回
+    //  -41 OUT_OF_BOUNDARY 并最终踩空指针）。回调只登记通道，真正的
+    // 通道↔本地 agent 中继由 pumpAgentForwardChannels() 在 readChannel 的
+    // 正常调用栈里非阻塞地完成。
+    static void authAgentChannelCallback(_LIBSSH2_SESSION *session,
+                                         _LIBSSH2_CHANNEL *channel,
+                                         void **abstract);
+    // 中继所有挂起的 agent 转发通道（非阻塞）。调用方必须已持 m_sessionMutex；
+    // readChannel() 每次被调都会带一遍。
+    void pumpAgentForwardChannels();
+    // 断开时清理转发通道簿记（不调 libssh2——channel 由 session_free 回收）。
+    void clearAgentForwardChannels();
     bool authKeyboardInteractive(SshPromptCallback cb, SshError &error);
     bool waitSocket(int timeoutMs, SshError &error);
+
+    // Verify the server's host key against the known_hosts store.
+    // Called from finishHandshake after the SSH handshake succeeds and before
+    // authentication begins.
+    bool verifyHostKey(SshError &error);
 
     // 接管一个已连接的 fd，做 session_init → handshake → authenticate。
     // connectToHost（拨号之后）与 connectOverSocket（跳板链的中间跳）共用这一段
@@ -276,7 +340,16 @@ private:
     QString m_keyType;
     QString m_keyFile;
     QString m_passphrase;
+    SshCredentialKind m_credentialKind = SshCredentialKind::Password;
+    bool m_agentForwarding = true;
     SshPromptCallback m_promptCallback;
+
+    std::shared_ptr<KnownHostsStore> m_knownHostsStore;
+    HostKeyPromptCallback m_hostKeyPromptCallback;
+    HostKeyVerification m_hostKeyVerification = HostKeyVerification::Ask;
+
+    int m_keepaliveInterval = 0;
+    int m_keepaliveGracePeriod = 0;
 
     // authenticate() 成功走的是 password/publickey（可重放）还是
     // keyboard-interactive（不可重放）。见 isAuthReplayable()。
@@ -316,6 +389,13 @@ private:
     std::atomic<bool> m_socketShutdown{false};
     _LIBSSH2_SESSION *m_session = nullptr;
     _LIBSSH2_CHANNEL *m_channel = nullptr;
+
+    // agent 转发通道簿记。struct 定义在 .cpp（含 QLocalSocket，不进头文件）。
+    // 元素只在本 session 的持锁路径上增删；断开时由 clearAgentForwardChannels
+    // 统一清理。
+    struct AgentForwardChannel;
+    QVector<AgentForwardChannel *> m_agentForwardChannels;
+
     QRecursiveMutex m_sessionMutex; // serializes all libssh2 calls on m_session
 };
 

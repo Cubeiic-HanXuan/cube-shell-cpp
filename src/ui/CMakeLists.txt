@@ -31,6 +31,7 @@ set(UI_SOURCES
     dialogs/CompressDialog.cpp
     dialogs/AboutDialog.cpp
     dialogs/SettingsDialog.cpp
+    dialogs/HostKeyDialog.cpp
     dialogs/AddTunnelDialog.cpp
     dialogs/TunnelConfigWidget.cpp
     dialogs/ProcessManagerDialog.cpp

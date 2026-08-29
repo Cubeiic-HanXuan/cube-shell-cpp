@@ -39,6 +39,30 @@ target_link_libraries(config_store_test PRIVATE
     cube_core
 )
 
+# KnownHostsStore parser / checker / persistence test.
+qt_add_executable(known_hosts_test
+    known_hosts_test.cpp
+)
+target_include_directories(known_hosts_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(known_hosts_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
+# SshCredentialKind JSON 序列化 + 旧格式推断 test.
+qt_add_executable(credential_kind_test
+    credential_kind_test.cpp
+)
+target_include_directories(credential_kind_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(credential_kind_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # GroupManager / FrequentlyUsedCommands / ConfigUtil / GlobalState / Secrets test.
 qt_add_executable(config_group_test
     config_group_test.cpp
@@ -86,6 +110,19 @@ target_link_libraries(ssh_integration_test PRIVATE
     qtermwidget
     cube_core
     cube_ui
+)
+
+# agent forwarding 回归测试（需要 tests/docker/ssh-enhance 环境；见文件头）。
+qt_add_executable(agent_forward_test
+    agent_forward_test.cpp
+)
+target_include_directories(agent_forward_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(agent_forward_test PRIVATE
+    Qt6::Core
+    Qt6::Network
+    cube_core
 )
 
 # SFTP integration test (needs a reachable sshd; see file header).
@@ -550,6 +587,8 @@ target_link_libraries(telnet_integration_test PRIVATE
 add_test(NAME qterm_smoke COMMAND qterm_smoke)
 add_test(NAME pickle_test COMMAND pickle_test)
 add_test(NAME config_store_test COMMAND config_store_test)
+add_test(NAME known_hosts_test COMMAND known_hosts_test)
+add_test(NAME credential_kind_test COMMAND credential_kind_test)
 add_test(NAME config_group_test COMMAND config_group_test)
 add_test(NAME util_test COMMAND util_test)
 add_test(NAME url_dispatch_test COMMAND url_dispatch_test)
@@ -581,6 +620,7 @@ add_test(NAME telnet_test COMMAND telnet_test)
 # Integration tests need a reachable sshd; they exit(2) when the target host
 # is unavailable, which CTest records as SKIPPED instead of FAILED.
 add_test(NAME ssh_integration_test COMMAND ssh_integration_test)
+add_test(NAME agent_forward_test COMMAND agent_forward_test)
 add_test(NAME sftp_integration_test COMMAND sftp_integration_test)
 add_test(NAME command_executor_test COMMAND command_executor_test)
 add_test(NAME uploader_test COMMAND uploader_test)
@@ -590,6 +630,7 @@ add_test(NAME channel_multiplex_test COMMAND channel_multiplex_test)
 add_test(NAME telnet_integration_test COMMAND telnet_integration_test)
 add_test(NAME proxy_integration_test COMMAND proxy_integration_test)
 set_tests_properties(ssh_integration_test sftp_integration_test
+    agent_forward_test
     command_executor_test uploader_test upload_teardown_test
     channel_multiplex_test
     telnet_integration_test

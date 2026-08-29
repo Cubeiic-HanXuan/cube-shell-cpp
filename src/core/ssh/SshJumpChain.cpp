@@ -565,7 +565,8 @@ ProxyConfig effectiveHopProxy(const ProxyConfig &proxy, const QString &label)
 } // namespace
 
 JumpDialer makeSshJumpDialer(const QList<DeviceEntry> &catalog,
-                             const SshPromptCallback &prompt)
+                             const SshPromptCallback &prompt,
+                             const HostKeyPromptCallback &hostKeyPrompt)
 {
     // 按 id 建索引一次。lambda 按值捕获这份表：建链跑在工作线程上，而
     // DeviceConfigStore 没有锁（见 SshJumpChain.h 对 catalog 的说明）。
@@ -576,7 +577,7 @@ JumpDialer makeSshJumpDialer(const QList<DeviceEntry> &catalog,
             byId.insert(e.id, e);
     }
 
-    return [byId, prompt](const QString &targetHost, quint16 targetPort,
+    return [byId, prompt, hostKeyPrompt](const QString &targetHost, quint16 targetPort,
                           const QStringList &hops, int timeoutMs,
                           const std::atomic<bool> *cancelled,
                           ProxyTransportPtr *transportOut, QString *errorOut) -> qintptr {
@@ -678,6 +679,10 @@ JumpDialer makeSshJumpDialer(const QList<DeviceEntry> &catalog,
             entry.client = new SshClient();
             entry.client->setHost(hp.host, hp.port);
             entry.client->setUsername(hop.username);
+            // ssh-agent 的跳板：credentialKind 必须带上，否则 keyFile/password
+            // 都为空时 authenticate() 会落到空密码认证（同 ConnectionTester）。
+            // agent 句柄每跳各自 init，不跨 session 复用（方案 §2.6）。
+            entry.client->setCredentialKind(hop.credentialKind);
             if (hop.usesKey())
                 entry.client->setPrivateKey(hop.keyType, hop.keyFile);
             else
@@ -692,6 +697,25 @@ JumpDialer makeSshJumpDialer(const QList<DeviceEntry> &catalog,
                 hopPrompt = [prompt, label](const QString &text, bool echo) {
                     return prompt(QStringLiteral("%1：%2").arg(label, text), echo);
                 };
+            }
+
+            // 主机密钥校验同样要覆盖每一跳——但只在有人能应答弹窗时。
+            //
+            // 校验模式为「询问」时遇到未知主机必须问人；没有回调的调用方
+            // （SFTP 并行克隆、隧道、proxy_integration_test 这类 headless 路径）
+            // 问了没人答，fail-closed 会把整条链打死。这些路径退回接入本功能
+            // 之前的行为（不校验），与「SshClient 未设 store 即跳过校验」一致：
+            // 交互终端那条首连仍然走完整校验并把指纹写进 known_hosts。
+            if (hostKeyPrompt) {
+                entry.client->setKnownHostsStore(KnownHostsStore::defaultInstance());
+                entry.client->setHostKeyVerification(static_cast<HostKeyVerification>(
+                    GlobalState::instance().hostKeyVerification()));
+                entry.client->setHostKeyPromptCallback(
+                    [hostKeyPrompt, label](const QString &host, quint16 port,
+                                           const QString &fingerprint,
+                                           const QString &keyType, bool changed) {
+                        return hostKeyPrompt(label, port, fingerprint, keyType, changed);
+                    });
             }
 
             SshError hopErr;

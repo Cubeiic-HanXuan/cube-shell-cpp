@@ -17,6 +17,27 @@
 namespace cubeshell {
 
 // Mirrors util.parse_host_port: IPv4 "[v6]:port", bare IPv6, host:port, host.
+QString sshCredentialKindToString(SshCredentialKind kind)
+{
+    switch (kind) {
+    case SshCredentialKind::PrivateKeyFile:      return QStringLiteral("privateKey");
+    case SshCredentialKind::SshAgent:            return QStringLiteral("sshAgent");
+    case SshCredentialKind::KeyboardInteractive: return QStringLiteral("keyboardInteractive");
+    case SshCredentialKind::Password:            break;
+    }
+    return QStringLiteral("password");
+}
+
+SshCredentialKind sshCredentialKindFromString(const QString &s, SshCredentialKind fallback)
+{
+    if (s == QLatin1String("password"))            return SshCredentialKind::Password;
+    if (s == QLatin1String("privateKey"))          return SshCredentialKind::PrivateKeyFile;
+    if (s == QLatin1String("agent") || s == QLatin1String("sshAgent"))
+        return SshCredentialKind::SshAgent;
+    if (s == QLatin1String("keyboardInteractive")) return SshCredentialKind::KeyboardInteractive;
+    return fallback;
+}
+
 HostPort parseHostPort(const QString &hostStr, quint16 defaultPort)
 {
     HostPort out{hostStr.trimmed(), defaultPort};
@@ -395,6 +416,10 @@ bool DeviceConfigStore::load(const QString &configDatPath, QString *errorOut)
             if (f0.size() > 2) e.host     = f0[2];
             if (f0.size() > 3) e.keyType  = f0[3];
             if (f0.size() > 4) e.keyFile  = f0[4];
+            // pickle 没有 credentialKind 的概念，按 usesKey() 的判别推回去
+            //（与 loadJson 对旧 JSON 的回落逻辑一致）。
+            e.credentialKind = e.usesKey() ? SshCredentialKind::PrivateKeyFile
+                                           : SshCredentialKind::Password;
         } else {
             continue;   // 其它类型条目不识别，跳过
         }
@@ -422,6 +447,9 @@ QJsonArray DeviceConfigStore::toJsonArray(bool withSecrets, bool withIds) const
         o[QStringLiteral("port")]     = int(e.port);
         o[QStringLiteral("keyType")]  = e.keyType;
         o[QStringLiteral("keyFile")]  = e.keyFile;
+        // SSH 认证方式与 agent 转发。老版本读这份 JSON 时会忽略未知键，无兼容问题。
+        o[QStringLiteral("credentialKind")]  = sshCredentialKindToString(e.credentialKind);
+        o[QStringLiteral("agentForwarding")] = e.agentForwarding;
         // RDP 字段。对应Python: RDP dict 的 __type__/domain/auth
         o[QStringLiteral("protocol")] = e.protocol;
         o[QStringLiteral("domain")]   = e.domain;
@@ -506,6 +534,17 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         e.port     = quint16(o[QStringLiteral("port")].toInt(defaultPortFor(e.protocol)));
         e.keyType  = o[QStringLiteral("keyType")].toString();
         e.keyFile  = o[QStringLiteral("keyFile")].toString();
+        // 认证方式。旧 JSON 无 credentialKind 键：按 usesKey() 的既有判别推回去
+        //（keyType/keyFile 齐 → 私钥文件，否则密码），行为与升级前逐字节一致。
+        if (o.contains(QStringLiteral("credentialKind"))) {
+            e.credentialKind = sshCredentialKindFromString(
+                o[QStringLiteral("credentialKind")].toString());
+        } else {
+            e.credentialKind = e.usesKey() ? SshCredentialKind::PrivateKeyFile
+                                           : SshCredentialKind::Password;
+        }
+        // 缺键回落 true（新增字段，老文件没有；转发默认同 OpenSSH 习惯开启）。
+        e.agentForwarding = o[QStringLiteral("agentForwarding")].toBool(true);
         e.domain   = o[QStringLiteral("domain")].toString();
         const QString auth = o[QStringLiteral("auth")].toString();
         e.auth = auth.isEmpty() ? QStringLiteral("ntlm") : auth;

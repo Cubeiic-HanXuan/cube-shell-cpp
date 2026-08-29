@@ -130,7 +130,7 @@ private:
     QLineEdit *m_host = nullptr;
     QLineEdit *m_port = nullptr;
 
-    QComboBox *m_authMethod = nullptr;      // 0 = password, 1 = private key
+    QComboBox *m_authMethod = nullptr;      // 0 = password, 1 = private key, 2 = ssh-agent
     QStackedWidget *m_authStack = nullptr;
 
     // 代理（仅 SSH 可见——本轮只接线 SSH，见 SshClient::setProxyConfig）。
@@ -142,6 +142,10 @@ private:
     QComboBox *m_keyType = nullptr;         // Ed25519Key / RSAKey / ECDSAKey / DSSKey
     QLineEdit *m_keyFile = nullptr;
     QPushButton *m_browseKey = nullptr;
+    // agent page
+    // 转发开关放在 agent 页里：它是"要不要把本机 agent 借给远端"的选项，
+    // 只有用户已经在用 agent 时才有意义。
+    QCheckBox *m_agentForward = nullptr;
 
     // 端口框里当前放的是哪个协议的默认值。切协议时据此判断"用户没改过端口"，
     // 从而可以安全地换成新协议的默认端口（用户手填过的端口不动）。

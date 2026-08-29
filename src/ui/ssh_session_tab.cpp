@@ -6,6 +6,7 @@
 #include "ssh_terminal_widget.h"
 #include "ssh/RemoteMonitor.h"
 #include "ssh/SshClient.h"
+#include "ssh/SshKeepaliveTimer.h"
 
 namespace cubeshell {
 
@@ -45,12 +46,26 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
             m_monitor->start();
             emit monitorReady();
         }
+        // keepalive 定时器：连接成功后启动，周期性发送 SSH keepalive。
+        if (!m_keepalive && m_term->sshClient()) {
+            m_keepalive = new SshKeepaliveTimer(m_term->sshClient(), this);
+            connect(m_keepalive, &SshKeepaliveTimer::connectionDied,
+                    this, [this](const QString &reason) {
+                        // 心跳失败先显示重连层，不直接报错关标签页。
+                        if (m_term)
+                            m_term->showReconnectOverlay(reason);
+                        emit disconnected();
+                    });
+            m_keepalive->start();
+        }
         emit connected();
     });
     connect(m_term, &SshTerminalWidget::connectionFailed, this, &SshSessionTab::connectionFailed);
     connect(m_term, &SshTerminalWidget::disconnected, this, [this]() {
         if (m_monitor)
             m_monitor->stop();
+        if (m_keepalive)
+            m_keepalive->stop();
         emit disconnected();
     });
     connect(m_term, &SshTerminalWidget::mfaRequested, this, &SshSessionTab::mfaRequested);
@@ -71,6 +86,8 @@ SshSessionTab::~SshSessionTab()
         m_term->sshClient()->shutdownSocket();
     if (m_monitor)
         m_monitor->stop();
+    if (m_keepalive)
+        m_keepalive->stop();
 }
 
 void SshSessionTab::connectToHost()

@@ -43,7 +43,10 @@ namespace cubeshell {
 // prompt 是目标连接自己的 keyboard-interactive 回调，可为空。链构建器会给每跳
 // 包一层，把提示文本前缀成「跳板机 bastion-hk：Verification code:」——原样复用的
 // 话用户看到的是一句光秃秃的 "Verification code:"，分不清是哪一跳在要动态码。
+//
+// hostKeyPrompt 同理：给每跳的主机密钥确认框带上跳板机标签。
 JumpDialer makeSshJumpDialer(const QList<DeviceEntry> &catalog,
-                             const SshPromptCallback &prompt = {});
+                             const SshPromptCallback &prompt = {},
+                             const HostKeyPromptCallback &hostKeyPrompt = {});
 
 } // namespace cubeshell

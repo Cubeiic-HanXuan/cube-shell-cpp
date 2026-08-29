@@ -136,7 +136,7 @@ private:
 
     void addDevice();
     void editDevice(const QString &name);
-    void removeDevice(const QString &name);
+    void removeDevice(const QStringList &names);
     void exportDevices();
     void importDevices();
 

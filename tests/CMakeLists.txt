@@ -379,6 +379,24 @@ target_link_libraries(file_browser_test PRIVATE
     cube_core
 )
 
+# 设备列表右键菜单的作用范围（多选删除 / 右键落在选区外时收敛选区）。
+# 走真实的 onContextMenu + QMenu，离屏平台，不碰用户 groups.json。
+qt_add_executable(device_list_test
+    device_list_test.cpp
+)
+target_include_directories(device_list_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget
+)
+target_link_libraries(device_list_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    cube_ui
+    cube_core
+)
+
 # Screen reflow unit test (resizeImage with reflow=true; pure logic, no GUI).
 qt_add_executable(screen_reflow_test
     screen_reflow_test.cpp
@@ -550,6 +568,7 @@ add_test(NAME command_suggest_test COMMAND command_suggest_test)
 add_test(NAME terminal_prompt_test COMMAND terminal_prompt_test)
 add_test(NAME sftp_browser_test COMMAND sftp_browser_test)
 add_test(NAME file_browser_test COMMAND file_browser_test)
+add_test(NAME device_list_test COMMAND device_list_test)
 add_test(NAME screen_reflow_test COMMAND screen_reflow_test)
 add_test(NAME terminal_search_test COMMAND terminal_search_test)
 add_test(NAME update_checker_test COMMAND update_checker_test)

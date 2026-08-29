@@ -1886,18 +1886,37 @@ void MainWindow::editDevice(const QString &name)
     saveDevices();
 }
 
-void MainWindow::removeDevice(const QString &name)
+void MainWindow::removeDevice(const QStringList &names)
 {
-    if (QMessageBox::question(this, tr("删除配置"),
-                              tr("确定要删除“%1”吗？此操作无法恢复。").arg(name))
-            != QMessageBox::Yes)
+    if (names.isEmpty())
         return;
-    // 先清密码再删条目：flushSecrets 只保留仍被引用的 id，
-    // 顺序反了这条密码就会在钥匙串里变成永远清理不掉的孤儿。
-    // forgetSecrets 而非 setPassword(id, "")：代理口令也要一起清（见其注释）。
-    if (const DeviceEntry *e = m_store.find(name))
-        m_store.forgetSecrets(e->id);
-    m_store.removeDevice(name);
+
+    // 批量删除的确认框要把名字都列出来，而不是只报个数字：这一步不可撤销，
+    // 「确定删除 7 个配置吗」等于让人盲签。列表过长就截断，免得对话框超出屏幕。
+    QString detail;
+    if (names.size() == 1) {
+        detail = tr("确定要删除“%1”吗？此操作无法恢复。").arg(names.constFirst());
+    } else {
+        constexpr int kMaxListed = 10;
+        QStringList listed = names.mid(0, kMaxListed);
+        if (names.size() > kMaxListed)
+            listed << tr("…（其余 %1 项）").arg(names.size() - kMaxListed);
+        detail = tr("确定要删除以下 %1 个配置吗？此操作无法恢复。").arg(names.size())
+            + QStringLiteral("\n\n") + listed.join(QLatin1Char('\n'));
+    }
+    if (QMessageBox::question(this, tr("删除配置"), detail) != QMessageBox::Yes)
+        return;
+
+    for (const QString &name : names) {
+        // 先清密码再删条目：flushSecrets 只保留仍被引用的 id，
+        // 顺序反了这条密码就会在钥匙串里变成永远清理不掉的孤儿。
+        // forgetSecrets 而非 setPassword(id, "")：代理口令也要一起清（见其注释）。
+        if (const DeviceEntry *e = m_store.find(name))
+            m_store.forgetSecrets(e->id);
+        m_store.removeDevice(name);
+    }
+    // 刷新与落盘在循环外只做一次：refreshDeviceList 会重发跳板机快照、
+    // saveDevices 会写 JSON + 钥匙串，塞进循环就是 N 倍开销和 N 次失败弹窗。
     refreshDeviceList();
     saveDevices();
 }

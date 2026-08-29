@@ -178,6 +178,21 @@ QString DeviceListWidget::selectedName() const
     return item->data(0, kNameRole).toString();
 }
 
+QStringList DeviceListWidget::selectedDeviceNames() const
+{
+    QStringList out;
+    const QList<QTreeWidgetItem *> items = m_tree->selectedItems();
+    out.reserve(items.size());
+    for (const QTreeWidgetItem *item : items) {
+        if (item->data(0, kTypeRole).toString() != kTypeDevice)
+            continue;   // 分组节点也可能被框进选区，批量操作不管它
+        const QString name = item->data(0, kNameRole).toString();
+        if (!name.isEmpty() && !out.contains(name))
+            out << name;
+    }
+    return out;
+}
+
 bool DeviceListWidget::followFolderEnabled() const
 {
     return m_followFolder->isChecked();
@@ -192,28 +207,50 @@ bool DeviceListWidget::remoteMonitoringEnabled() const
 void DeviceListWidget::onContextMenu(const QPoint &pos)
 {
     QTreeWidgetItem *item = m_tree->itemAt(pos);
+    // 右键点在选区之外时，把选区收敛到被点的那个节点。
+    //
+    // 树是 ExtendedSelection，但右键本身不改选区：不做这一步，菜单作用的对象就
+    // 取决于一份用户看不见的旧选区，而高亮的却是另外几行——「删了不该删的」。
+    // 点在选区之内则保留整个多选，这样多选后右键其中一台仍是批量操作。
+    // （与文件管理器/IDE 一致）
+    if (item && !item->isSelected()) {
+        m_tree->clearSelection();
+        item->setSelected(true);
+        m_tree->setCurrentItem(item);
+    }
+
     const QString type = item ? item->data(0, kTypeRole).toString() : QString();
     const QString name = item ? item->data(0, kNameRole).toString() : QString();
+    // 批量操作（删除 / 移到分组）的目标：整个选区，而不是光标下那一个。
+    const QStringList names = selectedDeviceNames();
     QMenu menu(this);
 
     if (type == kTypeDevice) {
         // 设备节点：连接 / 编辑配置 / 删除配置 / 移到分组
+        // 连接与编辑仍只作用于被点的那台——多开 N 个会话、弹 N 个编辑框都不是这里该做的事。
         menu.addAction(tr("连接"), this, [this, item]() { onItemActivated(item, 0); });
         menu.addAction(tr("编辑配置"), this, [this, name]() { emit editRequested(name); });
-        menu.addAction(tr("删除配置"), this, [this, name]() { emit removeRequested(name); });
+        // 菜单文案带上条数：批量删除不可撤销，先让人在点下去之前看到范围。
+        menu.addAction(names.size() > 1 ? tr("删除配置（%1 项）").arg(names.size())
+                                        : tr("删除配置"),
+                       this, [this, names]() { emit removeRequested(names); });
         menu.addSeparator();
-        QMenu *moveMenu = menu.addMenu(tr("移到分组"));
+        QMenu *moveMenu = menu.addMenu(names.size() > 1
+                                           ? tr("移到分组（%1 项）").arg(names.size())
+                                           : tr("移到分组"));
         const GroupData data = m_groups.loadGroups();
         for (const QString &group : data.groups) {
-            moveMenu->addAction(group, this, [this, name, group]() {
-                m_groups.moveDeviceToGroup(name, group);
+            moveMenu->addAction(group, this, [this, names, group]() {
+                for (const QString &n : names)
+                    m_groups.moveDeviceToGroup(n, group);
                 rebuildTree();
             });
         }
         if (!data.groups.isEmpty())
             moveMenu->addSeparator();
-        moveMenu->addAction(tr("移出分组"), this, [this, name]() {
-            m_groups.removeDeviceFromGroup(name);
+        moveMenu->addAction(tr("移出分组"), this, [this, names]() {
+            for (const QString &n : names)
+                m_groups.removeDeviceFromGroup(n);
             rebuildTree();
         });
     } else if (type == kTypeGroup) {

@@ -10,6 +10,7 @@
 // bottom of the left panel in the Python UI.
 
 #include <QElapsedTimer>
+#include <QStringList>
 #include <QWidget>
 
 #include "config/DeviceConfigStore.h"
@@ -33,6 +34,9 @@ public:
     void setStatus(const QString &text);
     // Currently selected device name (empty if none or a group is selected).
     QString selectedName() const;
+    // 全部选中的设备名（树是 ExtendedSelection，右键菜单要按整个选区操作）。
+    // 分组节点被过滤掉；选区里没有设备时返回空列表。
+    QStringList selectedDeviceNames() const;
 
     // 对应Python: ui.follow_folder / ui.remote_monitoring 复选框状态
     bool followFolderEnabled() const;
@@ -55,7 +59,8 @@ signals:
     // CRUD requests (handled by the main window, which owns the store).
     void addRequested();
     void editRequested(const QString &name);
-    void removeRequested(const QString &name);
+    // 批量：删除作用于整个选区，单选时就是一个元素的列表。
+    void removeRequested(const QStringList &names);
     // Persist the current store (Save button) -> main window writes JSON.
     void saveRequested();
     // 对应Python: _on_follow_folder_changed / _on_remote_monitoring_changed

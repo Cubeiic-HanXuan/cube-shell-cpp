@@ -54,6 +54,11 @@ if(CUBESHELL_WITH_LOCALPROC)
         dialogs/DockerSoftDialog.cpp
         dialogs/NatDialog.cpp
 
+        # --- Kubernetes 集群管理（对应 docs/Kubernetes功能实现方案.md §5） ---
+        dialogs/KubeManagerDialog.cpp
+        dialogs/KubeLogViewer.cpp
+        editors/KubeYamlEditor.cpp
+
         # --- Docker Compose 可视化编辑器 (对应Python: core/docker/docker_compose_editor.py) ---
         editors/DockerComposeEditor.cpp
         editors/ServiceConfigWidget.cpp

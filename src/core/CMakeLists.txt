@@ -79,6 +79,9 @@ set(CORE_SOURCES
     # --- docker (compose YAML 解析；纯数据层，不起子进程) ---
     docker/ComposeYaml.cpp      # port of yaml.safe_load/dump + util.get_compose_service
 
+    # --- kube (kubectl -o json 纯解析层 + 资源类型注册表，不起子进程) ---
+    kube/KubeResourceParser.cpp # 对应 docs/Kubernetes功能实现方案.md §3
+
     # --- update ---
     update/UpdateChecker.cpp    # port of core/update/ (version + github_api + platform_match)
     update/UpdateDownloader.cpp # port of core/update/installer.py (下载+安装器调起)
@@ -131,6 +134,9 @@ if(CUBESHELL_WITH_LOCALPROC)
 
         # --- docker (CLI 驱动部分) ---
         docker/DockerManager.cpp    # port of core/docker/ (CLI + compose 编辑)
+
+        # --- kube (kubectl CLI 驱动部分；纯解析层 KubeResourceParser 在无条件段) ---
+        kube/KubeManager.cpp        # 对应 docs/Kubernetes功能实现方案.md §4
 
         # --- DeepSeek Harness（dsh web 本机进程管理；Python 版无对应实现） ---
         dsh/DshManager.cpp          # QProcess 托管 `npx @deepseek-ai/dsh web` + 端口健康检查

@@ -38,6 +38,8 @@ class CommandExecutor;
 class DockerManager;
 class DockerManagerDialog;
 class DockerSoftDialog;
+class KubeManager;
+class KubeManagerDialog;
 class ProcessManagerDialog;
 class NatDialog;
 class FrpManager;
@@ -304,6 +306,7 @@ private:
     void showDockerManager();
     void showDockerSoft();
     void showNatDialog();
+    void showKubeManager();
 #endif
     void showProcessManager();
 
@@ -319,6 +322,18 @@ private:
     // 活动 SSH 会话的 CommandExecutor 喂给它（无活动连接则置空回本地态）。
     // 对应Python: cube-shell.py:1007-1077 懒加载 + isConnected 上下文
     void ensureDockerManager();
+
+    // Kubernetes 管理（懒加载），语义同 ensureDockerManager：懒建
+    // KubeManager 并恢复持久化配置；仅在用户选择「SSH 会话」后端且当前
+    // 有活动 SSH 会话时才快照 executor，否则回「本机 kubectl」。
+    // 对应 docs/Kubernetes功能实现方案.md §5.5
+    void ensureKubeManager();
+    // 对话框后端下拉的切换落点：换 executor + 持久化偏好 + 刷新。
+    void onKubeBackendChanged(bool useRemote);
+    // docker exec / kubectl exec 共用的「命令送进当前活动终端」助手
+    // （命令已带 \n 结尾；Windows ConPTY 需要 \r 才能执行）。
+    // 对应Python: cube-shell.py:3767-3785 terminal.sendText
+    void sendCommandToActiveTerminal(const QString &command);
 #endif
 
     void onBastionConnect(const BastionConnectParams &params);
@@ -362,6 +377,13 @@ private:
     DockerSoftDialog *m_dockerSoftDialog = nullptr;
     // DockerManager 侧持裸指针；QPointer 守卫会话销毁后的悬垂 executor。
     QPointer<CommandExecutor> m_dockerExecutor;
+
+    // Kubernetes 管理（全部懒加载）。
+    // 对应 docs/Kubernetes功能实现方案.md §5.5
+    KubeManager *m_kubeManager = nullptr;
+    KubeManagerDialog *m_kubeManagerDialog = nullptr;
+    QPointer<CommandExecutor> m_kubeExecutor;
+    bool m_kubeUseRemoteBackend = false; // 后端偏好（QSettings 持久化）
 #endif
 
     // 远程进程管理（懒加载）。

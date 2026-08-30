@@ -51,6 +51,7 @@
 #ifdef CUBESHELL_WITH_LOCALPROC
 #include "dialogs/DockerManagerDialog.h"
 #include "dialogs/DockerSoftDialog.h"
+#include "dialogs/KubeManagerDialog.h"
 #endif
 #include "dialogs/LinuxCommandsDialog.h"
 #include "dialogs/ProcessManagerDialog.h"
@@ -72,6 +73,7 @@
 #include "claude_code/ClaudeCodePanel.h"
 #ifdef CUBESHELL_WITH_LOCALPROC
 #include "docker/DockerManager.h"
+#include "kube/KubeManager.h"
 #include "dsh/DshPanel.h"
 #endif
 #include "hermes/HermesPanel.h"
@@ -790,6 +792,9 @@ void MainWindow::setupToolbar()
             tr("Docker 容器管理"), &MainWindow::showDockerManager);
     addTool(QStringLiteral(":/icons8-container-48.png"), tr("常用容器"),
             tr("常用容器安装"), &MainWindow::showDockerSoft);
+    // Kubernetes 管理同样由 kubectl CLI 子进程驱动（KubeManager）；鸿蒙摘除。
+    addTool(QStringLiteral(":/icons8-kubernetes-48.png"), tr("Kubernetes"),
+            tr("Kubernetes 集群管理"), &MainWindow::showKubeManager);
 #endif
     addTool(QStringLiteral(":/tunnel-diode.png"), tr("SSH 隧道"),
             tr("SSH 隧道管理"), &MainWindow::showTunnelManager);
@@ -3713,32 +3718,36 @@ void MainWindow::ensureDockerManager()
     m_dockerManager->setRemoteUser(session->device().username);
 }
 
+// docker exec / kubectl exec 共用的转发：命令字符串送进当前活动标签页的终端
+// （命令已带 \n 结尾；Windows ConPTY 需要 \r 才能执行）。
+// 对应Python: cube-shell.py:3767-3785 terminal.sendText
+void MainWindow::sendCommandToActiveTerminal(const QString &command)
+{
+    QWidget *w = activeTabWidget()->currentWidget();
+    QTermWidget *term = qobject_cast<QTermWidget *>(w);
+    if (!term && w)
+        term = w->findChild<QTermWidget *>();
+    if (!term)
+        return;
+#ifdef Q_OS_WIN
+    QString cmd = command;
+    if (cmd.endsWith(QLatin1Char('\n')))
+        cmd.chop(1);
+    term->sendText(cmd + QStringLiteral("\r"));
+#else
+    term->sendText(command);
+#endif
+}
+
 // 对应Python: cube-shell.py:1039-1045 showDockerManagerDialog
 void MainWindow::showDockerManager()
 {
     ensureDockerManager();
     if (!m_dockerManagerDialog) {
         m_dockerManagerDialog = new DockerManagerDialog(m_dockerManager, this);
-        // docker exec / docker logs 命令转发到当前标签页的终端执行
-        // （命令字符串已带 \n 结尾；Windows ConPTY 需要 \r 才能执行）。
-        // 对应Python: cube-shell.py:3767-3785 terminal.sendText
+        // docker exec / docker logs 命令转发到当前标签页的终端执行。
         connect(m_dockerManagerDialog, &DockerManagerDialog::terminalCommandRequested,
-                this, [this](const QString &command) {
-                    QWidget *w = activeTabWidget()->currentWidget();
-                    QTermWidget *term = qobject_cast<QTermWidget *>(w);
-                    if (!term && w)
-                        term = w->findChild<QTermWidget *>();
-                    if (!term)
-                        return;
-#ifdef Q_OS_WIN
-                    QString cmd = command;
-                    if (cmd.endsWith(QLatin1Char('\n')))
-                        cmd.chop(1);
-                    term->sendText(cmd + QStringLiteral("\r"));
-#else
-                    term->sendText(command);
-#endif
-                });
+                this, &MainWindow::sendCommandToActiveTerminal);
     }
     // Python 仅在 isConnected 时刷新（cube-shell.py:1041-1042）；这里无论
     // 是否连接都刷新——未设 executor 时后端直接回空列表，对话框显示
@@ -3761,6 +3770,163 @@ void MainWindow::showDockerSoft()
     m_dockerSoftDialog->show();
     m_dockerSoftDialog->raise();
     m_dockerSoftDialog->activateWindow();
+}
+
+// ---------------------------------------------------------------------------
+// Kubernetes 管理（对应 docs/Kubernetes功能实现方案.md §5.5）
+// ---------------------------------------------------------------------------
+
+// kubeconfig 路径按后端分别持久化：本机是宿主机文件，远程是远端服务器上的
+// 绝对路径（两套配置互不覆盖）。切换后端时套用对应后端的记忆路径。
+static QString kubeConfigPathKey(bool remote)
+{
+    return remote ? QStringLiteral("kube/remote/kubeconfigPath")
+                  : QStringLiteral("kube/local/kubeconfigPath");
+}
+
+// 显示 K8s 对话框前刷新后端上下文：懒建 KubeManager 并恢复持久化配置；
+// 仅在用户选择「SSH 会话」后端且有活动 SSH 会话时快照 executor
+// （objectName "kubeExecutor"，会话内复用），否则回「本机 kubectl」。
+void MainWindow::ensureKubeManager()
+{
+    if (!m_kubeManager) {
+        m_kubeManager = new KubeManager(this);
+        // 持久化恢复：上次上下文 / 每上下文命名空间 / 后端偏好。
+        // （kubeconfig 路径不再在此恢复——它按后端分别存，见函数尾部统一套用。）
+        QSettings settings;
+        // 旧版单一 kube/kubeconfigPath 迁移为本机后端的 key（一次性）。
+        const QString legacy = settings.value(QStringLiteral("kube/kubeconfigPath")).toString();
+        if (!legacy.isEmpty()
+            && !settings.contains(QStringLiteral("kube/local/kubeconfigPath"))) {
+            settings.setValue(QStringLiteral("kube/local/kubeconfigPath"), legacy);
+        }
+        if (!legacy.isEmpty())
+            settings.remove(QStringLiteral("kube/kubeconfigPath"));
+        m_kubeManager->setCurrentContext(
+            settings.value(QStringLiteral("kube/lastContext")).toString());
+        m_kubeUseRemoteBackend =
+            settings.value(QStringLiteral("kube/preferRemoteBackend"), false).toBool();
+        const QString ctx = m_kubeManager->currentContext();
+        if (!ctx.isEmpty()) {
+            const QString ns = settings.value(
+                QStringLiteral("kube/%1/namespace").arg(ctx)).toString();
+            if (!ns.isEmpty())
+                m_kubeManager->setNamespace(ns);
+        }
+        // 上下文切换即持久化，并恢复该上下文记忆的命名空间。
+        connect(m_kubeManager, &KubeManager::contextChanged, this,
+                [this](const QString &name) {
+                    QSettings settings;
+                    settings.setValue(QStringLiteral("kube/lastContext"), name);
+                    const QString ns = settings.value(
+                        QStringLiteral("kube/%1/namespace").arg(name)).toString();
+                    m_kubeManager->setNamespace(
+                        ns.isEmpty() ? QStringLiteral("default") : ns);
+                });
+        // 命名空间按上下文分别记忆。
+        connect(m_kubeManager, &KubeManager::namespaceChanged, this,
+                [this](const QString &ns) {
+                    const QString context = m_kubeManager->currentContext();
+                    if (!context.isEmpty()) {
+                        QSettings().setValue(
+                            QStringLiteral("kube/%1/namespace").arg(context), ns);
+                    }
+                });
+    }
+
+    // 远程后端上下文：活动标签页是已连接的 SSH 会话才可用。
+    auto *session = qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
+    std::shared_ptr<SshClient> client;
+    if (session && session->terminal())
+        client = session->terminal()->sshClient();
+
+    if (client && m_kubeUseRemoteBackend) {
+        // 每个会话复用同一个 executor（随 session tab 销毁，QPointer 自动失效）。
+        auto *executor = session->findChild<CommandExecutor *>(
+            QStringLiteral("kubeExecutor"));
+        if (!executor) {
+            executor = new CommandExecutor(client.get(), session);
+            executor->setObjectName(QStringLiteral("kubeExecutor"));
+        }
+        m_kubeExecutor = executor;
+        m_kubeManager->setRemoteExecutor(executor);
+        m_kubeManager->setRemoteUser(session->device().username);
+        // 独占流工厂：日志流 / port-forward 需要并行流时在同一 SshClient 上
+        // 新建 CommandExecutor（execStream 单流约束，见 KubeManager 头注释）。
+        QPointer<SshSessionTab> guard(session);
+        m_kubeManager->setExecutorFactory([guard]() -> CommandExecutor * {
+            if (!guard || !guard->terminal())
+                return nullptr;
+            std::shared_ptr<SshClient> c = guard->terminal()->sshClient();
+            return c ? new CommandExecutor(c.get()) : nullptr;
+        });
+    } else {
+        // 本机后端，或选了远程但会话已断开 → 强制回本机并落盘。
+        if (m_kubeUseRemoteBackend && !client) {
+            m_kubeUseRemoteBackend = false;
+            QSettings().setValue(QStringLiteral("kube/preferRemoteBackend"), false);
+        }
+        m_kubeExecutor = nullptr;
+        m_kubeManager->setRemoteExecutor(nullptr);
+        m_kubeManager->setExecutorFactory(nullptr);
+    }
+
+    // 套用当前生效后端记忆的 kubeconfig 路径（本机/远程各存一份，互不干扰）；
+    // 空 = 该后端的默认解析。切后端即自动换对应配置。
+    const bool remoteActive = (m_kubeExecutor != nullptr);
+    const QString cfgPath = QSettings().value(kubeConfigPathKey(remoteActive)).toString();
+    m_kubeManager->setKubeconfigPath(cfgPath);
+
+    // 同步对话框：远程后端项可用性 + 选中态 + kubeconfig 提示。
+    if (m_kubeManagerDialog) {
+        if (client) {
+            m_kubeManagerDialog->setRemoteBackendAvailable(
+                true, tr("SSH 会话 (%1@%2)")
+                          .arg(session->device().username, session->device().host));
+        } else {
+            m_kubeManagerDialog->setRemoteBackendAvailable(false, QString());
+        }
+        m_kubeManagerDialog->setBackendSelection(remoteActive);
+        m_kubeManagerDialog->setKubeconfigPathDisplay(cfgPath);
+    }
+}
+
+void MainWindow::onKubeBackendChanged(bool useRemote)
+{
+    m_kubeUseRemoteBackend = useRemote;
+    QSettings().setValue(QStringLiteral("kube/preferRemoteBackend"), useRemote);
+    ensureKubeManager(); // 换 executor + 同步对话框选中态
+    if (m_kubeManagerDialog)
+        m_kubeManagerDialog->refreshInfo();
+}
+
+void MainWindow::showKubeManager()
+{
+    if (!m_kubeManagerDialog) {
+        ensureKubeManager(); // manager 必须先建（持久化恢复在里面）
+        m_kubeManagerDialog = new KubeManagerDialog(m_kubeManager, this);
+        // kubectl exec 命令转发到当前标签页的终端执行（与 docker 共用助手）。
+        connect(m_kubeManagerDialog, &KubeManagerDialog::terminalCommandRequested,
+                this, &MainWindow::sendCommandToActiveTerminal);
+        connect(m_kubeManagerDialog, &KubeManagerDialog::backendChangeRequested,
+                this, &MainWindow::onKubeBackendChanged);
+        // kubeconfig 选择/清除：按当前生效后端分别持久化 + 立即生效。
+        // 空串 = 恢复该后端的默认解析。
+        connect(m_kubeManagerDialog, &KubeManagerDialog::kubeconfigSelected,
+                this, [this](const QString &path) {
+                    QSettings().setValue(kubeConfigPathKey(m_kubeManager->isRemote()), path);
+                    m_kubeManager->setKubeconfigPath(path);
+                    m_kubeManagerDialog->setKubeconfigPathDisplay(path);
+                    m_kubeManagerDialog->refreshInfo();
+                });
+        // 首显时 manager 路径已由上面的 ensureKubeManager 按后端套好，直接回显。
+        m_kubeManagerDialog->setKubeconfigPathDisplay(m_kubeManager->kubeconfigPath());
+    }
+    ensureKubeManager(); // 每次显示前刷新后端上下文（对齐 ensureDockerManager 语义）
+    m_kubeManagerDialog->refreshInfo();
+    m_kubeManagerDialog->show();
+    m_kubeManagerDialog->raise();
+    m_kubeManagerDialog->activateWindow();
 }
 
 // 对应Python: cube-shell.py::showNATDialog + _ensure_nat_dialog

@@ -337,6 +337,19 @@ target_link_libraries(compose_yaml_test PRIVATE
     cube_core
 )
 
+# KubeResourceParser 注册表 + kubectl -o json 解析测试（纯逻辑，无 kubectl/网络）。
+# 解析层无条件编译（纯数据层），测试也不带 LOCALPROC 门控。
+qt_add_executable(kube_resource_parser_test
+    kube_resource_parser_test.cpp
+)
+target_include_directories(kube_resource_parser_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(kube_resource_parser_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # DockerManager static parse helpers + compose path rule test (pure logic,
 # no docker CLI / network)。DockerManager 本体在 CUBESHELL_WITH_LOCALPROC=OFF
 #（鸿蒙）时不编译，测试同步摘除。
@@ -605,6 +618,22 @@ target_link_libraries(telnet_integration_test PRIVATE
     cube_ui
 )
 
+# KubeManager 远程后端集成测试（经 SSH 会话驱动 kubectl 全链路）。
+# 需要 tests/docker/kube 环境在跑；连不上堡垒机 exit(2) → SKIPPED。
+# KubeManager 在 CUBESHELL_WITH_LOCALPROC=OFF 时不编译，测试同步摘除。
+if(CUBESHELL_WITH_LOCALPROC)
+qt_add_executable(kube_integration_test
+    kube_integration_test.cpp
+)
+target_include_directories(kube_integration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(kube_integration_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+endif()
+
 # ---------------------------------------------------------------------------
 # CTest registration
 # ---------------------------------------------------------------------------
@@ -623,6 +652,7 @@ add_test(NAME sse_parser_test COMMAND sse_parser_test)
 add_test(NAME safety_checker_test COMMAND safety_checker_test)
 add_test(NAME sensitive_masker_test COMMAND sensitive_masker_test)
 add_test(NAME compose_yaml_test COMMAND compose_yaml_test)
+add_test(NAME kube_resource_parser_test COMMAND kube_resource_parser_test)
 add_test(NAME connection_tester_test COMMAND connection_tester_test)
 if(CUBESHELL_WITH_LOCALPROC)
     add_test(NAME docker_manager_test COMMAND docker_manager_test)
@@ -655,6 +685,10 @@ add_test(NAME transfer_pool_test COMMAND transfer_pool_test)
 add_test(NAME channel_multiplex_test COMMAND channel_multiplex_test)
 add_test(NAME telnet_integration_test COMMAND telnet_integration_test)
 add_test(NAME proxy_integration_test COMMAND proxy_integration_test)
+if(CUBESHELL_WITH_LOCALPROC)
+    add_test(NAME kube_integration_test COMMAND kube_integration_test)
+    set_tests_properties(kube_integration_test PROPERTIES SKIP_RETURN_CODE 2)
+endif()
 set_tests_properties(ssh_integration_test sftp_integration_test
     agent_forward_test
     command_executor_test uploader_test upload_teardown_test

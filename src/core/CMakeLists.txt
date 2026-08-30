@@ -37,6 +37,7 @@ set(CORE_SOURCES
     config/DeviceConfigStore.cpp # device config (read pickle / write JSON)
     config/GlobalState.cpp      # port of core/vars.py + function/theme.py state
     config/GroupManager.cpp     # port of core/group_manager.py
+    config/snippets_store.cpp   # 用户自定义参数化片段（Snippets）存储
     config/FrequentlyUsedCommands.cpp # port of core/frequently_used_commands.py
     config/ConfigUtil.cpp       # JSON/TOML config loading helpers
     config/Secrets.cpp          # port of keyring-backed secret storage
@@ -51,6 +52,7 @@ set(CORE_SOURCES
     # --- terminal (命令提示数据层) ---
     terminal/CommandIndex.cpp   # port of function/ssh_prompt_client.py::load_linux_commands + _compute_suggestions
     terminal/CommandHistory.cpp # port of cube-shell.py::_add_history_entry/_history_suggestions 等
+    terminal/session_recorder.cpp # 会话原始流录制（时间戳/轮转/自动命名，线程安全）
 
     # --- url dispatch ---
     url_dispatch/UrlHandler.cpp   # port of core/url_dispatch/url_handler.py

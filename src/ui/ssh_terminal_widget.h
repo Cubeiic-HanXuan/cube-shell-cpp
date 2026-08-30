@@ -36,6 +36,7 @@ class SshClient;
 class SshBridge;
 class TerminalCommandSuggest;
 class TerminalPrompt;
+class SessionRecorder;
 
 class SshTerminalWidget : public QWidget {
     Q_OBJECT
@@ -53,6 +54,17 @@ public:
     QTermWidget *terminal() const { return m_term; }
     // AI 交互式执行需要连接 bridge 的 rawDataForAi 信号（null 直到 connected()）。
     SshBridge *bridge() const { return m_bridge; }
+
+    // 终端里正在进行就地输入（问密码 / MFA，TerminalPrompt 收键中）时返回 true。
+    // 此时键盘喂给提示而非远端会话——多会话广播据此跳过本终端，既不把密码扇出
+    // 到别的会话，也不让别的会话的输入落进本终端的密码框。
+    bool isPromptActive() const;
+
+    // 会话日志录制（审计追溯）。on=开始（按设置自动命名/时间戳/轮转），off=停止。
+    // 返回 false 并填 errOut 表示打开日志文件失败。
+    bool setSessionLogging(bool on, QString *errOut = nullptr);
+    bool isSessionLogging() const;
+    QString sessionLogPath() const;
 
 public slots:
     // 显示断线重连覆盖层（心跳检测、网络异常等路径调用）。
@@ -110,6 +122,10 @@ private:
     SshBridge *m_bridge = nullptr;         // child QObject
 
     bool m_started = false;
+
+    // 会话日志录制器（shared_ptr 以便安全挂到读线程跑的 SshBridge 上）。
+    // 为 nullptr 或 !isActive() 表示未在录制。
+    std::shared_ptr<SessionRecorder> m_recorder;
 
     // 断线重连覆盖层
     QFrame *m_reconnectOverlay = nullptr;

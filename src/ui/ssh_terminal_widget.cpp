@@ -1,6 +1,7 @@
 #include "ssh_terminal_widget.h"
 
 #include <QDebug>
+#include <QFileDialog>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QInputDialog>
@@ -24,6 +25,7 @@
 #include "terminal_command_suggest.h"
 #include "terminal_prompt.h"
 #include "terminal_theme_util.h"
+#include "terminal/session_recorder.h"
 
 namespace cubeshell {
 
@@ -119,6 +121,71 @@ SshTerminalWidget::~SshTerminalWidget()
             qWarning() << "SshTerminalWidget: connect worker did not finish within"
                        << kConnectWorkerJoinTimeoutMs << "ms";
     }
+}
+
+bool SshTerminalWidget::isPromptActive() const
+{
+    return m_prompt && m_prompt->active();
+}
+
+bool SshTerminalWidget::setSessionLogging(bool on, QString *errOut)
+{
+    if (on) {
+        if (m_recorder && m_recorder->isActive())
+            return true;   // 已在录制
+
+        GlobalState &gs = GlobalState::instance();
+        SessionRecorder::Options opt;
+        opt.addTimestamps = gs.sessionLogTimestamps();
+        opt.maxBytes = qint64(gs.sessionLogMaxMB()) * 1024 * 1024;   // 0=不轮转
+        opt.backupCount = gs.sessionLogBackupCount();
+
+        // 目标路径：自动命名（设备名+时间，落到默认目录）或另存为。
+        QString path;
+        if (gs.sessionLogAutoName()) {
+            QString dir = gs.sessionLogDir();
+            if (dir.isEmpty())
+                dir = GlobalState::dataDir() + QStringLiteral("/session-logs");
+            const QString tag = m_device.name.isEmpty()
+                                    ? m_device.hostPort().host
+                                    : m_device.name;
+            path = SessionRecorder::autoFileName(tag, dir);
+        } else {
+            const QString suggested = QStringLiteral("ssh-%1.log")
+                .arg(SessionRecorder::sanitizeTag(m_device.hostPort().host));
+            path = QFileDialog::getSaveFileName(
+                this, tr("录制会话日志"), suggested,
+                tr("日志文件 (*.log);;所有文件 (*)"));
+            if (path.isEmpty())
+                return false;   // 用户取消，不算错误
+        }
+
+        auto rec = std::make_shared<SessionRecorder>();
+        if (!rec->start(path, opt, errOut))
+            return false;
+        m_recorder = rec;
+        if (m_bridge)
+            m_bridge->setRecorder(m_recorder);
+        return true;
+    }
+
+    // 停止：先从 bridge 摘掉（读线程不再拿到新引用），再停本地这份。
+    if (m_bridge)
+        m_bridge->setRecorder(nullptr);
+    if (m_recorder)
+        m_recorder->stop();
+    m_recorder.reset();
+    return true;
+}
+
+bool SshTerminalWidget::isSessionLogging() const
+{
+    return m_recorder && m_recorder->isActive();
+}
+
+QString SshTerminalWidget::sessionLogPath() const
+{
+    return isSessionLogging() ? m_recorder->filePath() : QString();
 }
 
 void SshTerminalWidget::connectToHost()
@@ -334,6 +401,9 @@ void SshTerminalWidget::startConnect(const QString &password)
             self->m_pendingClient.reset();
             self->m_client = client;   // take ownership (unique_ptr from shared copy)
             self->m_bridge = new SshBridge(self->m_term->session(), self->m_client.get(), self);
+            // 重连后 bridge 是新建的：若此前已开录制，把同一个 recorder 挂回去。
+            if (self->m_recorder)
+                self->m_bridge->setRecorder(self->m_recorder);
             connect(self->m_bridge, &SshBridge::channelClosed, self, &SshTerminalWidget::onDisconnected);
             connect(self->m_bridge, &SshBridge::shellMfaPromptDetected, self, &SshTerminalWidget::onMfaPrompt);
             // cwdChanged 从读线程发射 → 显式 QueuedConnection 切回 UI 线程。

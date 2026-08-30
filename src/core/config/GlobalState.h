@@ -172,6 +172,23 @@ public:
     int sshKeepaliveGraceSeconds() const;
     void setSshKeepaliveGraceSeconds(int seconds);
 
+    // --- 会话日志录制（theme.json 的 session_log_*）---
+    // 录制目录；空 = 默认 dataDir()/session-logs。
+    QString sessionLogDir() const;
+    void setSessionLogDir(const QString &dir);
+    // 自动按 设备名+时间 命名（默认开）；关闭则录制时弹另存为。
+    bool sessionLogAutoName() const;
+    void setSessionLogAutoName(bool enabled);
+    // 行首时间戳（默认关）。
+    bool sessionLogTimestamps() const;
+    void setSessionLogTimestamps(bool enabled);
+    // 单文件上限 MB；0=不按大小轮转（默认 0）。
+    int sessionLogMaxMB() const;
+    void setSessionLogMaxMB(int mb);
+    // 轮转保留的历史卷数（默认 5）。
+    int sessionLogBackupCount() const;
+    void setSessionLogBackupCount(int count);
+
     // 全局代理 (theme.json 里平铺的 proxyType/proxyHost/... 一组键)。
     // 设备的代理类型选「全局代理」时取的就是这一份，见
     // ProxyConfig::resolveGlobalProxy 与 SshClient::connectToHost

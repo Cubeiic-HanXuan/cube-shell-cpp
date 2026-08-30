@@ -4,11 +4,15 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QFileDialog>
 #include <QFontComboBox>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QSettings>
 #include <QSizePolicy>
 #include <QSpinBox>
@@ -234,6 +238,46 @@ QWidget *SettingsDialog::createGeneralTab()
     m_keepaliveGrace->setToolTip(tr("连续多久未收到 keepalive 应答后判定连接已断开。"));
     unifyFieldWidth(m_keepaliveGrace);
     form->addRow(tr("无响应判定断开："), m_keepaliveGrace);
+
+    // --- 会话日志录制（SSH/Telnet/串口 共用；C++ 独有，只写 GlobalState）---
+    auto *logDirRow = new QWidget(page);
+    auto *logDirLayout = new QHBoxLayout(logDirRow);
+    logDirLayout->setContentsMargins(0, 0, 0, 0);
+    m_logDir = new QLineEdit(logDirRow);
+    m_logDir->setPlaceholderText(tr("留空使用默认目录（数据目录/session-logs）"));
+    m_logDir->setToolTip(tr("会话日志的保存目录。"));
+    auto *browseBtn = new QPushButton(tr("浏览…"), logDirRow);
+    connect(browseBtn, &QPushButton::clicked, this, [this]() {
+        const QString d = QFileDialog::getExistingDirectory(
+            this, tr("选择会话日志目录"), m_logDir->text());
+        if (!d.isEmpty())
+            m_logDir->setText(d);
+    });
+    logDirLayout->addWidget(m_logDir, 1);
+    logDirLayout->addWidget(browseBtn);
+    form->addRow(tr("日志录制目录："), logDirRow);
+
+    m_logAutoName = new QCheckBox(tr("自动按“设备名 + 时间”命名"), page);
+    m_logAutoName->setToolTip(tr("开启后录制直接落到上面目录，无需每次另存为。"));
+    form->addRow(tr("日志命名："), m_logAutoName);
+
+    m_logTimestamps = new QCheckBox(tr("行首加时间戳"), page);
+    m_logTimestamps->setToolTip(tr("审计定位用：在每行输出前加 [HH:MM:SS.zzz]。"));
+    form->addRow(tr("日志时间戳："), m_logTimestamps);
+
+    m_logMaxMB = new QSpinBox(page);
+    m_logMaxMB->setRange(0, 10240);
+    m_logMaxMB->setSuffix(tr(" MB"));
+    m_logMaxMB->setSpecialValueText(tr("不轮转"));
+    m_logMaxMB->setToolTip(tr("单个日志文件超过该大小就切到新卷；0 表示不轮转。"));
+    unifyFieldWidth(m_logMaxMB);
+    form->addRow(tr("单文件上限："), m_logMaxMB);
+
+    m_logBackupCount = new QSpinBox(page);
+    m_logBackupCount->setRange(1, 100);
+    m_logBackupCount->setToolTip(tr("轮转时保留的历史卷数，最老的超出即删除。"));
+    unifyFieldWidth(m_logBackupCount);
+    form->addRow(tr("保留卷数："), m_logBackupCount);
     return page;
 }
 
@@ -340,6 +384,14 @@ void SettingsDialog::loadCurrentSettings()
     //（SshClient 建连时取），再存一份 QSettings 副本就是造出第二个真相源——
     // 两边一旦不一致，连接期用的是哪一份完全看不出来。
     m_proxy->setConfig(state.sshProxyConfig());
+
+    // 会话日志录制：同为 C++ 独有，读它的只有录制路径（SshTerminalWidget），
+    // 与代理同理只走 GlobalState 单一真相源。
+    m_logDir->setText(state.sessionLogDir());
+    m_logAutoName->setChecked(state.sessionLogAutoName());
+    m_logTimestamps->setChecked(state.sessionLogTimestamps());
+    m_logMaxMB->setValue(state.sessionLogMaxMB());
+    m_logBackupCount->setValue(state.sessionLogBackupCount());
 }
 
 int SettingsDialog::sshTimeoutSeconds() const
@@ -395,6 +447,13 @@ void SettingsDialog::accept()
     // 口令不在这里——writeJson 不写它，落钥匙串由 MainWindow 在本对话框
     // 返回之后办（见 proxyPasswordEdited()）。
     state.setSshProxyConfig(m_proxy->config());
+
+    // 会话日志录制：同样只写 GlobalState（单一真相源）。
+    state.setSessionLogDir(m_logDir->text().trimmed());
+    state.setSessionLogAutoName(m_logAutoName->isChecked());
+    state.setSessionLogTimestamps(m_logTimestamps->isChecked());
+    state.setSessionLogMaxMB(m_logMaxMB->value());
+    state.setSessionLogBackupCount(m_logBackupCount->value());
 
     const int scrollback = m_scrollback->value();
     const bool scrollbackDirty = scrollback != state.scrollbackLines();

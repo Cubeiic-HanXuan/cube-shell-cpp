@@ -63,6 +63,30 @@ target_link_libraries(credential_kind_test PRIVATE
     cube_core
 )
 
+# SessionRecorder 会话日志录制（时间戳/轮转/自动命名）test.
+qt_add_executable(session_recorder_test
+    session_recorder_test.cpp
+)
+target_include_directories(session_recorder_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(session_recorder_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
+# SnippetsStore 参数化片段（占位符提取/展开/CRUD）test.
+qt_add_executable(snippets_store_test
+    snippets_store_test.cpp
+)
+target_include_directories(snippets_store_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(snippets_store_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # GroupManager / FrequentlyUsedCommands / ConfigUtil / GlobalState / Secrets test.
 qt_add_executable(config_group_test
     config_group_test.cpp
@@ -589,6 +613,8 @@ add_test(NAME pickle_test COMMAND pickle_test)
 add_test(NAME config_store_test COMMAND config_store_test)
 add_test(NAME known_hosts_test COMMAND known_hosts_test)
 add_test(NAME credential_kind_test COMMAND credential_kind_test)
+add_test(NAME session_recorder_test COMMAND session_recorder_test)
+add_test(NAME snippets_store_test COMMAND snippets_store_test)
 add_test(NAME config_group_test COMMAND config_group_test)
 add_test(NAME util_test COMMAND util_test)
 add_test(NAME url_dispatch_test COMMAND url_dispatch_test)

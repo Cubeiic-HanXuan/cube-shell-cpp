@@ -15,6 +15,7 @@
 
 #include "SshClient.h"
 #include "ShellMfaWatcher.h"
+#include "terminal/session_recorder.h"
 
 #include "Session.h"
 #include "Emulation.h"
@@ -231,6 +232,18 @@ SshBridge::~SshBridge()
     delete m_mfaWatcher;
 }
 
+void SshBridge::setRecorder(std::shared_ptr<SessionRecorder> rec)
+{
+    QMutexLocker locker(&m_recorderMutex);
+    m_recorder = std::move(rec);
+}
+
+std::shared_ptr<SessionRecorder> SshBridge::recorder() const
+{
+    QMutexLocker locker(&m_recorderMutex);
+    return m_recorder;
+}
+
 void SshBridge::start()
 {
     using Konsole::Emulation;
@@ -376,6 +389,12 @@ void SshBridge::readLoop()
         m_idlePolls = 0;
         if (data.isEmpty())
             break; // EOF / closed
+
+        // 会话日志录制：在任何 UTF-8 拼接 / 内容过滤之前落盘，录到的才是与
+        // Telnet/串口同语义的原始字节流。读线程在此持锁拷贝 shared_ptr，
+        // recorder 内部再自带一把锁，UI 侧停止/销毁都不会造成悬垂。
+        if (std::shared_ptr<SessionRecorder> rec = recorder())
+            rec->writeRaw(data);
 
         // 先拼上一块留下的不完整 UTF-8 尾巴，再把本块新的不完整尾巴留下。
         // 顺序很重要：必须在任何 fromUtf8 / 内容过滤之前完成。

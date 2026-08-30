@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSet>
+#include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -98,7 +99,12 @@
 #endif
 
 #include "qtermwidget.h"
+#include "Session.h"
+#include "Emulation.h"
 #include "terminal_theme_util.h"
+
+#include "config/snippets_store.h"
+#include "dialogs/SnippetsDialog.h"
 
 namespace cubeshell {
 
@@ -355,6 +361,8 @@ TerminalTabWidget *MainWindow::createPane()
         setActivePane(tabs);
         bindMonitorToTab(tabs->currentWidget());
         updateTerminalInfo();
+        // 同 pane 内切标签也换了当前终端，广播源要跟着换。
+        rewireBroadcast();
         // 左侧文件浏览器跟随当前标签。对应Python: shell_tab_current_changed → refreshDirs
         updateLeftPanel(tabs);
         // AI 面板跟随当前 SSH 标签切换 Agent。对应Python: _connect_ai_to_current_tab
@@ -446,6 +454,11 @@ void MainWindow::setTabConnected(QWidget *page, bool connected)
 // 菜单栏。对应Python: cube-shell.py::menuBarController
 void MainWindow::setupMenus()
 {
+    // 视图菜单的"片段按钮栏"勾选态要用到持久化值，须在建菜单前加载
+    //（setupShortcuts 里的正式加载比这晚，先在这里读一遍）。
+    m_snippetBarVisible =
+        QSettings().value(QStringLiteral("settings/snippet_bar_visible"), false).toBool();
+
     // --- 文件 ---
     QMenu *fileMenu = menuBar()->addMenu(tr("文件"));
     QAction *addDev = fileMenu->addAction(tr("&新增配置"), this, &MainWindow::addDevice);
@@ -562,6 +575,11 @@ void MainWindow::setupMenus()
     toggleDevices->setCheckable(true);
     toggleDevices->setChecked(true);
     connect(toggleDevices, &QAction::toggled, m_deviceList, &QWidget::setVisible);
+    // 片段快捷按钮栏（顶部，一键下发常用片段到当前会话）。
+    QAction *toggleSnippetBar = viewMenu->addAction(tr("片段按钮栏"));
+    toggleSnippetBar->setCheckable(true);
+    toggleSnippetBar->setChecked(m_snippetBarVisible);
+    connect(toggleSnippetBar, &QAction::toggled, this, &MainWindow::toggleSnippetBar);
     viewMenu->addSeparator();
     // 分屏：每次调用都新建一个 pane，可无限次分下去（水平/垂直可混排）。
     QAction *splitH = viewMenu->addAction(tr("水平分屏"), this, [this]() {
@@ -664,6 +682,18 @@ void MainWindow::setupMenus()
     QMenu *toolsMenu = menuBar()->addMenu(tr("工具"));
     QAction *tunnels = toolsMenu->addAction(tr("SSH 隧道管理"), this, &MainWindow::showTunnelManager);
     Q_UNUSED(tunnels);
+    // 参数化片段管理器（用户自建命令片段，可带占位参数/快捷键，一键下发当前会话）。
+    QAction *snippets = toolsMenu->addAction(tr("片段（Snippets）"), this, &MainWindow::showSnippets);
+    snippets->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+J")));
+    // --- 多会话广播输入（作用于全部/选中会话） ---
+    // 默认关且不持久化：开启后当前终端的键入逐键镜像到其他会话，是集群运维的
+    // 高危操作，必须显式打开。对标 Xshell「发送键输入到所有会话」。
+    m_broadcastAction = toolsMenu->addAction(tr("广播输入到多个会话"));
+    m_broadcastAction->setCheckable(true);
+    m_broadcastAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+M")));
+    m_broadcastAction->setStatusTip(
+        tr("开启后，当前终端的键入同步发送到其他会话（默认全部；在标签右键可勾选子集）"));
+    connect(m_broadcastAction, &QAction::toggled, this, &MainWindow::toggleBroadcast);
     toolsMenu->addSeparator();
     // 对应Python: setupLeftToolbar 里的 hermes / Claude Code 入口（菜单侧）
     toolsMenu->addAction(QStringLiteral("Hermes Agent"), this, &MainWindow::showHermesPanel);
@@ -779,9 +809,15 @@ void MainWindow::setupToolbar()
     addTool(QStringLiteral(":/icons8-deepseek-48.png"), QStringLiteral("DeepSeek Harness"),
             QStringLiteral("DeepSeek Harness"), &MainWindow::showDshPanel);
 #endif
-}
 
-// 状态栏：连接状态 + 终端大小/编码 + 8 项监控指标小方块。
+    // 片段快捷按钮栏：顶部横向、默认隐藏（视图菜单可开）。一键下发片段到当前会话。
+    m_snippetBar = new QToolBar(tr("片段按钮栏"), this);
+    m_snippetBar->setObjectName(QStringLiteral("snippetBar"));
+    m_snippetBar->setMovable(false);
+    addToolBar(Qt::TopToolBarArea, m_snippetBar);
+    m_snippetBar->setVisible(false);
+    rebuildSnippetBar();
+}
 // 对应Python: cube-shell.py::setupStatusBar L871-896
 void MainWindow::setupStatusBar()
 {
@@ -832,6 +868,12 @@ static QString formatSpeed(double speed)
 void MainWindow::setupShortcuts()
 {
     // Ctrl+T/W/Tab 等已绑定在菜单 QAction 上（见 setupMenus），此处无需重复。
+
+    // 片段按钮栏显隐持久化（QSettings）；setupToolbar 已建栏，这里补可见性与快捷键。
+    m_snippetBarVisible =
+        QSettings().value(QStringLiteral("settings/snippet_bar_visible"), false).toBool();
+    rebuildSnippetBar();
+    rebuildSnippetShortcuts();
 }
 
 // AI 助手停靠面板：右侧停靠、默认隐藏，Ctrl+Shift+K 切换显示/隐藏。
@@ -2125,6 +2167,42 @@ void MainWindow::showTabContextMenu(QTabWidget *tabs, const QPoint &pos)
     menu.addAction(tr("垂直分屏"), this, [this, tabs, index]() {
         splitTab(tabs, index, Qt::Vertical);
     });
+    // 多会话广播：把本标签加入/移出广播集合（集合非空时广播只发给集合内标签）。
+    QWidget *menuPage = tabs->widget(index);
+    // 只有含终端的会话标签才能参与广播（首页/RDP 无 QTermWidget）。
+    QTermWidget *menuTerm = qobject_cast<QTermWidget *>(menuPage);
+    if (!menuTerm && menuPage)
+        menuTerm = menuPage->findChild<QTermWidget *>();
+    if (menuTerm) {
+        menu.addSeparator();
+        const bool member = m_broadcastTargets.contains(QPointer<QWidget>(menuPage));
+        menu.addAction(member ? tr("移出广播") : tr("加入广播"), this,
+                       [this, menuPage]() { toggleBroadcastTarget(menuPage); });
+    }
+
+    // SSH 会话日志录制（审计追溯）。Telnet/串口面板里有自己的录制复选框，
+    // SSH 终端没有面板工具栏，录制开关放在标签右键菜单里。
+    if (auto *session = qobject_cast<SshSessionTab *>(menuPage)) {
+        SshTerminalWidget *term = session->terminal();
+        if (term) {
+            const bool logging = term->isSessionLogging();
+            menu.addAction(logging ? tr("停止录制日志") : tr("录制会话日志…"), this,
+                           [this, term, menuPage]() {
+                if (term->isSessionLogging()) {
+                    const QString path = term->sessionLogPath();
+                    term->setSessionLogging(false);
+                    setStatus(tr("已停止录制：%1").arg(path));
+                } else {
+                    QString err;
+                    if (term->setSessionLogging(true, &err))
+                        setStatus(tr("录制中：%1").arg(term->sessionLogPath()));
+                    else if (!err.isEmpty())
+                        QMessageBox::warning(this, tr("录制失败"), err);
+                }
+                (void)menuPage;
+            });
+        }
+    }
     // 已有多个分屏时，允许把标签直接搬到指定的另一个分屏（不新建 pane）。
     if (m_panes.count() > 1) {
         QMenu *moveMenu = menu.addMenu(tr("移动到分屏"));
@@ -2304,7 +2382,238 @@ void MainWindow::setActivePane(TerminalTabWidget *pane)
         return;
     m_activePane = pane;
     updatePaneHighlight();
+    // 活动 pane 变了，广播转发源也要跟着换到新的当前终端。
+    rewireBroadcast();
 }
+
+// ---------------------------------------------------------------------------
+// 多会话广播输入
+// ---------------------------------------------------------------------------
+
+// term 所属会话是否正在就地问密码/MFA。沿父链找 SshTerminalWidget；
+// 串口/TCP/本机终端没有 TerminalPrompt，自然返回 false。
+bool MainWindow::terminalPromptActive(QTermWidget *term) const
+{
+    for (QWidget *p = term ? term->parentWidget() : nullptr; p; p = p->parentWidget()) {
+        if (auto *stw = qobject_cast<SshTerminalWidget *>(p))
+            return stw->isPromptActive();
+    }
+    return false;
+}
+
+QList<QTermWidget *> MainWindow::broadcastTargetTerminals(QTermWidget *source) const
+{
+    QList<QTermWidget *> out;
+    // 集合非空 = 仅选中标签；为空 = 全部终端会话。
+    const bool useSelected = !m_broadcastTargets.isEmpty();
+    for (QTabWidget *pane : allPanes()) {
+        for (int i = 0; i < pane->count(); ++i) {
+            QWidget *page = pane->widget(i);
+            if (!page || page == m_homePage)
+                continue;
+            if (useSelected && !m_broadcastTargets.contains(QPointer<QWidget>(page)))
+                continue;
+            QTermWidget *t = qobject_cast<QTermWidget *>(page);
+            if (!t)
+                t = page->findChild<QTermWidget *>();
+            if (!t || t == source || out.contains(t))
+                continue;
+            // 目标正在就地问密码/MFA：它的键盘此刻喂给提示而非远端会话，
+            // 把广播字节灌进去等于替别人输密码，必须跳过。
+            if (terminalPromptActive(t))
+                continue;
+            out.append(t);
+        }
+    }
+    return out;
+}
+
+// 转发源 emulation 已编码好的最终字节流到各目标终端。用 sendString 而不是
+// sendText：sendText 会把字节当文本再走一遍目标 emulation 的键映射（方向键、
+// 控制序列会被二次解释），sendString 原样 emit 目标自己的 sendData，由各目标
+// 的 Bridge 按各自链路写出 —— 与真人在该终端敲键完全同路径，换行/回显语义正确。
+void MainWindow::rewireBroadcast()
+{
+    if (m_broadcastConn)
+        QObject::disconnect(m_broadcastConn);
+    m_broadcastConn = QMetaObject::Connection();
+    m_broadcastSource = nullptr;
+    if (!m_broadcastEnabled)
+        return;
+    QTermWidget *src = currentTerminal();
+    Konsole::Session *session = src ? src->session() : nullptr;
+    Konsole::Emulation *emu = session ? session->emulation() : nullptr;
+    if (!emu)
+        return;
+    m_broadcastSource = src;
+    m_broadcastConn = connect(emu, &Konsole::Emulation::sendData, this,
+                              [this, src](const char *data, int len) {
+        if (!m_broadcastEnabled || !src || len <= 0)
+            return;
+        // 源正在就地问密码：这些字节是给密码框的，绝不能扇出到其他主机。
+        if (terminalPromptActive(src))
+            return;
+        const QList<QTermWidget *> targets = broadcastTargetTerminals(src);
+        for (QTermWidget *t : targets) {
+            Konsole::Session *s = t->session();
+            Konsole::Emulation *e = s ? s->emulation() : nullptr;
+            if (e)
+                e->sendString(data, len);
+        }
+    });
+}
+
+void MainWindow::toggleBroadcast(bool on)
+{
+    m_broadcastEnabled = on;
+    if (m_broadcastAction && m_broadcastAction->isChecked() != on)
+        m_broadcastAction->setChecked(on);
+    if (on)
+        rewireBroadcast();
+    else if (m_broadcastConn) {
+        QObject::disconnect(m_broadcastConn);
+        m_broadcastConn = QMetaObject::Connection();
+        m_broadcastSource = nullptr;
+    }
+    updateBroadcastMarkers();
+    if (on)
+        setStatus(m_broadcastTargets.isEmpty()
+                      ? tr("广播输入已开启：键入将同步到全部会话")
+                      : tr("广播输入已开启：键入将同步到 %1 个选中会话")
+                            .arg(m_broadcastTargets.count()));
+    else
+        setStatus(tr("广播输入已关闭"));
+}
+
+void MainWindow::toggleBroadcastTarget(QWidget *page)
+{
+    if (!page)
+        return;
+    const QPointer<QWidget> key(page);
+    if (m_broadcastTargets.contains(key))
+        m_broadcastTargets.removeAll(key);
+    else
+        m_broadcastTargets.append(key);
+    // 清掉已销毁页的空指针，保持集合干净。
+    m_broadcastTargets.removeAll(QPointer<QWidget>(nullptr));
+    updateBroadcastMarkers();
+}
+
+void MainWindow::updateBroadcastMarkers()
+{
+    const QString marker = QStringLiteral("◉ ");
+    for (QTabWidget *pane : allPanes()) {
+        for (int i = 0; i < pane->count(); ++i) {
+            QWidget *page = pane->widget(i);
+            QString text = pane->tabText(i);
+            if (text.startsWith(marker))
+                text = text.mid(marker.length());
+            if (m_broadcastTargets.contains(QPointer<QWidget>(page)))
+                text = marker + text;
+            pane->setTabText(i, text);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 参数化片段（Snippets）
+// ---------------------------------------------------------------------------
+
+void MainWindow::showSnippets()
+{
+    if (!m_snippetsDialog) {
+        auto *dlg = new SnippetsDialog(this);
+        connect(dlg, &SnippetsDialog::runSnippetRequested,
+                this, [this](const Snippet &s) { runSnippet(s.id); });
+        // 片段增删改后：快捷键与按钮栏跟着重建。
+        connect(dlg, &SnippetsDialog::snippetsChanged, this, [this]() {
+            rebuildSnippetShortcuts();
+            rebuildSnippetBar();
+        });
+        m_snippetsDialog = dlg;
+    }
+    m_snippetsDialog->show();
+    m_snippetsDialog->raise();
+    m_snippetsDialog->activateWindow();
+}
+
+// 下发片段到当前活动终端：先按 {占位参数} 弹窗填参，再经 sendText 走与真人敲键
+// 完全相同的链路。若广播输入已开启，sendText 会随之扇出到整个广播集合——
+// 这就是"一条片段下发整个集群"。
+void MainWindow::runSnippet(const QString &snippetId)
+{
+    SnippetsStore store;
+    Snippet snippet;
+    bool found = false;
+    for (const Snippet &s : store.load()) {
+        if (s.id == snippetId) {
+            snippet = s;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        return;
+
+    QTermWidget *term = currentTerminal();
+    if (!term) {
+        setStatus(tr("没有活动会话可下发片段"));
+        return;
+    }
+    QHash<QString, QString> values;
+    if (!SnippetsDialog::promptParams(this, snippet, &values))
+        return;   // 用户取消
+
+    QString text = SnippetsStore::expand(snippet.body, values);
+    if (snippet.appendNewline) {
+#ifdef Q_OS_WIN
+        text += QLatin1Char('\r');   // ConPTY
+#else
+        text += QLatin1Char('\n');
+#endif
+    }
+    term->sendText(text);
+}
+
+void MainWindow::rebuildSnippetShortcuts()
+{
+    qDeleteAll(m_snippetShortcuts);
+    m_snippetShortcuts.clear();
+    SnippetsStore store;
+    for (const Snippet &s : store.load()) {
+        const QKeySequence ks = QKeySequence::fromString(s.shortcut);
+        if (ks.isEmpty())
+            continue;
+        auto *sc = new QShortcut(ks, this);
+        connect(sc, &QShortcut::activated, this,
+                [this, id = s.id]() { runSnippet(id); });
+        m_snippetShortcuts.append(sc);
+    }
+}
+
+void MainWindow::rebuildSnippetBar()
+{
+    if (!m_snippetBar)
+        return;
+    m_snippetBar->clear();
+    SnippetsStore store;
+    for (const Snippet &s : store.load()) {
+        QAction *a = m_snippetBar->addAction(s.name);
+        a->setToolTip(s.body);
+        connect(a, &QAction::triggered, this,
+                [this, id = s.id]() { runSnippet(id); });
+    }
+    // 空片段集时收起按钮栏，免得占一条空工具栏。
+    m_snippetBar->setVisible(m_snippetBarVisible && !m_snippetBar->actions().isEmpty());
+}
+
+void MainWindow::toggleSnippetBar(bool on)
+{
+    m_snippetBarVisible = on;
+    QSettings().setValue(QStringLiteral("settings/snippet_bar_visible"), on);
+    rebuildSnippetBar();
+}
+
 
 // 给活动分屏加高亮左边框，非活动分屏保持原样。只有一个分屏时不加任何标记
 // （无需区分），避免单分屏用户看到多余的装饰。

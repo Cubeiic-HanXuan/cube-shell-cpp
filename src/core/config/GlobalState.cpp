@@ -368,6 +368,69 @@ void GlobalState::setSshKeepaliveGraceSeconds(int seconds)
     m_theme.insert(QStringLiteral("ssh_keepalive_grace_sec"), seconds);
 }
 
+// --- 会话日志录制 ---
+
+QString GlobalState::sessionLogDir() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    const QString d = m_theme.value(QStringLiteral("session_log_dir")).toString();
+    return d.isEmpty() ? QString() : d;   // 空 = 用默认 dataDir()/session-logs
+}
+
+void GlobalState::setSessionLogDir(const QString &dir)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("session_log_dir"), dir);
+}
+
+bool GlobalState::sessionLogAutoName() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("session_log_auto_name")).toBool(true);
+}
+
+void GlobalState::setSessionLogAutoName(bool enabled)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("session_log_auto_name"), enabled);
+}
+
+bool GlobalState::sessionLogTimestamps() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("session_log_timestamps")).toBool(false);
+}
+
+void GlobalState::setSessionLogTimestamps(bool enabled)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("session_log_timestamps"), enabled);
+}
+
+int GlobalState::sessionLogMaxMB() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("session_log_max_mb")).toInt(0); // 0=不轮转
+}
+
+void GlobalState::setSessionLogMaxMB(int mb)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("session_log_max_mb"), mb);
+}
+
+int GlobalState::sessionLogBackupCount() const
+{
+    QMutexLocker lock(&m_themeMutex);
+    return m_theme.value(QStringLiteral("session_log_backup_count")).toInt(5);
+}
+
+void GlobalState::setSessionLogBackupCount(int count)
+{
+    QMutexLocker lock(&m_themeMutex);
+    m_theme.insert(QStringLiteral("session_log_backup_count"), count);
+}
+
 // 全局代理。ProxyConfig 自带 JSON 读写，键名平铺（proxyType/proxyHost/...），
 // 与 devices.json 里设备自己那份代理配置**用同一组键名**——两处存的是同一种
 // 东西，键名一致才能让"把全局代理复制到某台设备"这类操作是纯搬运。

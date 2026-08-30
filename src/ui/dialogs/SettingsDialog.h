@@ -13,6 +13,7 @@
 class QCheckBox;
 class QComboBox;
 class QFontComboBox;
+class QLineEdit;
 class QListWidget;
 class QSpinBox;
 class QTabWidget;
@@ -83,6 +84,12 @@ private:
     QCheckBox *m_keepaliveEnabled = nullptr;    // SSH 保活开关
     QSpinBox *m_keepaliveInterval = nullptr;    // SSH 保活间隔（秒）
     QSpinBox *m_keepaliveGrace = nullptr;       // keepalive 无应答判定断开（秒）
+    // 会话日志录制（SSH/Telnet/串口 共用；C++ 独有，只写 GlobalState）
+    QLineEdit *m_logDir = nullptr;              // 录制目录（空=默认 dataDir()/session-logs）
+    QCheckBox *m_logAutoName = nullptr;         // 自动按 设备名+时间 命名
+    QCheckBox *m_logTimestamps = nullptr;       // 行首时间戳
+    QSpinBox *m_logMaxMB = nullptr;             // 单文件上限 MB（0=不轮转）
+    QSpinBox *m_logBackupCount = nullptr;       // 轮转保留卷数
     ProxySettingsWidget *m_proxy = nullptr;   // 「代理」页：那份全局代理
     QString m_originalAppearance;         // Cancel 时还原实时预览
 };

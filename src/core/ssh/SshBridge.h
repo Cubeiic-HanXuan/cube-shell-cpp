@@ -7,10 +7,12 @@
 // Session::onReceiveBlock (via a queued signal, so screen updates happen on
 // the UI thread); keystrokes from the emulation are forwarded to the channel.
 
+#include <QMutex>
 #include <QObject>
 #include <QThread>
 
 #include <atomic>
+#include <memory>
 
 class QThread;
 
@@ -20,6 +22,7 @@ namespace cubeshell {
 
 class SshClient;
 class ShellMfaWatcher;
+class SessionRecorder;
 
 // 对应C++: class ParamikoBridge(QObject)
 class SshBridge : public QObject {
@@ -47,6 +50,13 @@ public:
 
     // 每行回显的固定结尾（不含 \n），readLoop 用它判断 hook 回显已到齐。
     static const char *hookEchoTail() { return "esac;fi"; }
+
+    // 挂接会话日志录制器（shared_ptr，线程安全）。录制在读线程发生：
+    // readLoop 在发任何过滤之前把 readChannel 的原始字节写进 recorder。
+    // 用 shared_ptr 是因为 UI 侧可能在读线程仍持副本写盘时销毁自己那份——
+    // 读线程的局部副本会把 recorder 续命到 writeRaw 返回，杜绝悬垂。
+    void setRecorder(std::shared_ptr<SessionRecorder> rec);
+    std::shared_ptr<SessionRecorder> recorder() const;
 
 signals:
     void channelClosed();
@@ -79,6 +89,11 @@ private:
 
     Konsole::Session *m_session;
     SshClient *m_client;
+
+    // 会话日志录制器（可为空）。读线程经 m_recorderMutex 拷贝出 shared_ptr 再写，
+    // UI 侧 setRecorder 也走同一把锁——shared_ptr 拷贝期间不会被销毁。
+    std::shared_ptr<SessionRecorder> m_recorder;
+    mutable QMutex m_recorderMutex;
 
     QThread *m_readerThread = nullptr;
     std::atomic<bool> m_running{false};

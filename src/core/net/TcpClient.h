@@ -17,9 +17,10 @@
 #include <QObject>
 #include <QString>
 
+#include "terminal/session_recorder.h"
+
 class QTcpSocket;
 class QTimer;
-class QFile;
 
 namespace cubeshell {
 
@@ -102,8 +103,9 @@ public:
     // --- 会话日志 ---
     // 把收到的原始字节 append 写入文件（发送的字节不记，避免与对端回显重复）。
     // path 为空 = 停止录制并关闭文件。返回是否成功打开。
+    // 时间戳/轮转选项取自全局设置（GlobalState session_log_*）。
     bool setLogFile(const QString &path);
-    bool isLogging() const { return m_logFile != nullptr; }
+    bool isLogging() const { return m_recorder.isActive(); }
     QString logFilePath() const;
 
 signals:
@@ -134,7 +136,8 @@ private:
     // stateChanged/errorOccurred，不去重的话状态栏会闪两条消息。
     bool m_errorReported = false;
 
-    QFile *m_logFile = nullptr;
+    // 会话日志录制器（值成员）：原始字节先落盘再发信号。
+    SessionRecorder m_recorder;
 };
 
 } // namespace cubeshell

@@ -183,6 +183,14 @@ private:
     QStringList m_downloadFailures;
     void dispatchNextDownload();    // 队列非空则取出首个任务点火
     void refreshDownloadProgress(); // 重算聚合进度并刷新进度条/状态栏
+    // 含目录的下载：worker 线程把每个远端目录递归展开成文件任务后并入队列。
+    void expandDirsAndDownload(const QStringList &dirs, const QString &localRoot);
+    // 递归展开 remoteDir：文件追加为 (remote, local) 任务，子目录递归；
+    // 本地目录随之 mkpath。不跟随符号链接（防环）。出错把原因写进 err。
+    // 在 worker 线程跑（listdirAttr 持会话锁阻塞）。
+    static void collectDownloadRecursive(SftpClient *sftp, const QString &remoteDir,
+                                         const QString &localDir,
+                                         QList<DownloadTask> &out, QString &err);
     // 拖放上传的处理（eventFilter 的 Drop 分支）。
     void handleDropEvent(QDropEvent *event);
     // 单个上传任务入队（进度记账 + 分发到线程池），uploadFiles/拖拽共用。

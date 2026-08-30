@@ -3,11 +3,10 @@
 #include "net/TcpClient.h"
 
 #include <QDebug>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
 #include <QTcpSocket>
 #include <QTimer>
+
+#include "config/GlobalState.h"
 
 namespace cubeshell {
 
@@ -139,10 +138,8 @@ void TcpClient::onReadyRead()
 
     // 日志先落盘再发信号：保证录制的是未经任何处理的原始字节流
     //（含 IAC 协商序列，排查协商问题时这份原始记录才有价值）。
-    if (m_logFile) {
-        m_logFile->write(data);
-        m_logFile->flush();   // 崩溃时也要留下已收到的数据
-    }
+    if (m_recorder.isActive())
+        m_recorder.writeRaw(data);
 
     emit dataReceived(data);
 }
@@ -201,42 +198,34 @@ void TcpClient::setState(State state)
 
 bool TcpClient::setLogFile(const QString &path)
 {
-    closeLogFile();
-
-    if (path.isEmpty())
+    if (path.isEmpty()) {
+        closeLogFile();
         return true;   // 空路径 = 停止录制，不算失败
-
-    // 目标目录不存在时先建出来，否则 QFile::open 会失败在一个用户看不懂的点上。
-    const QFileInfo info(path);
-    const QDir dir = info.absoluteDir();
-    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
-        emit errorOccurred(tr("无法创建日志目录：%1").arg(dir.absolutePath()));
-        return false;
     }
 
-    auto *file = new QFile(path);
-    // Append：同一目标多次连接的记录累积在一个文件里，不互相覆盖。
-    if (!file->open(QIODevice::WriteOnly | QIODevice::Append)) {
-        emit errorOccurred(tr("无法打开日志文件 %1：%2").arg(path, file->errorString()));
-        delete file;
+    // 时间戳/轮转选项取自全局设置（C++ 独有，单一真相源在 theme.json）。
+    GlobalState &gs = GlobalState::instance();
+    SessionRecorder::Options opt;
+    opt.addTimestamps = gs.sessionLogTimestamps();
+    opt.maxBytes = qint64(gs.sessionLogMaxMB()) * 1024 * 1024;
+    opt.backupCount = gs.sessionLogBackupCount();
+
+    QString err;
+    if (!m_recorder.start(path, opt, &err)) {
+        emit errorOccurred(tr("无法打开日志文件 %1：%2").arg(path, err));
         return false;
     }
-    m_logFile = file;
     return true;
 }
 
 QString TcpClient::logFilePath() const
 {
-    return m_logFile ? m_logFile->fileName() : QString();
+    return m_recorder.filePath();
 }
 
 void TcpClient::closeLogFile()
 {
-    if (!m_logFile)
-        return;
-    m_logFile->close();
-    delete m_logFile;
-    m_logFile = nullptr;
+    m_recorder.stop();
 }
 
 } // namespace cubeshell

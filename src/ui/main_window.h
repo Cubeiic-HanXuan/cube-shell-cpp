@@ -19,6 +19,10 @@ class QStackedWidget;
 class QLabel;
 class QDockWidget;
 class QTermWidget;
+class QAction;
+class QToolBar;
+class QShortcut;
+class QDialog;
 
 namespace cubeshell {
 
@@ -177,6 +181,20 @@ private:
     TerminalTabWidget *targetPane() const;
     void updateTerminalInfo();
 
+    // --- 多会话广播输入 ---
+    // 开启后当前活动终端的键盘输入逐键镜像到目标会话：已勾选"加入广播"的标签
+    // （集合非空时），否则全部终端会话。对标 Xshell「发送键输入到所有会话」。
+    void toggleBroadcast(bool on);
+    // 把广播转发源重挂到当前活动终端（活动 pane / 当前标签变化时调用）。
+    void rewireBroadcast();
+    // 刷新各标签的"◉"广播成员标记。
+    void updateBroadcastMarkers();
+    // 广播目标终端集合（排除 source 自身、首页、无终端的 RDP 页、正问密码的会话）。
+    QList<QTermWidget *> broadcastTargetTerminals(QTermWidget *source) const;
+    // term 所属会话是否正在就地问密码/MFA（源、目标两侧都据此跳过）。
+    bool terminalPromptActive(QTermWidget *term) const;
+    void toggleBroadcastTarget(QWidget *page);
+
     // --- 左侧文件浏览器（设备列表下方,随当前标签切换） ---
     // 对应Python: 连接后左侧 treeWidget 展示 SFTP/本地文件目录
     void updateLeftPanel(QTabWidget *pane = nullptr);
@@ -289,6 +307,13 @@ private:
 #endif
     void showProcessManager();
 
+    // --- 参数化片段（Snippets） ---
+    void showSnippets();                       // 打开片段管理对话框（懒建）
+    void runSnippet(const QString &snippetId); // 下发到当前活动终端（填参后）
+    void rebuildSnippetShortcuts();            // 按片段配置重建全局快捷键
+    void rebuildSnippetBar();                  // 重建快捷按钮栏内容
+    void toggleSnippetBar(bool on);            // 显示/隐藏快捷按钮栏
+
 #ifdef CUBESHELL_WITH_LOCALPROC
     // 显示 Docker 对话框前刷新后端上下文：懒建 DockerManager，并把当前
     // 活动 SSH 会话的 CommandExecutor 喂给它（无活动连接则置空回本地态）。
@@ -371,6 +396,21 @@ private:
     DeviceConfigStore m_store;
     QString m_configPath;   // where the pickle was loaded from (informational)
     QString m_jsonPath;     // where devices are saved (JSON, forward format)
+
+    // --- 多会话广播输入状态 ---
+    // 开关不持久化（安全）：每次启动默认关，避免误把输入扇出到多台主机。
+    bool m_broadcastEnabled = false;
+    // 参与广播的会话 page（QPointer 自动失效）。非空=仅这些标签；为空=全部会话。
+    QList<QPointer<QWidget>> m_broadcastTargets;
+    QAction *m_broadcastAction = nullptr;        // 工具栏/菜单的开关项
+    QMetaObject::Connection m_broadcastConn;     // 源 emulation→转发 的连接
+    QPointer<QTermWidget> m_broadcastSource;     // 当前转发源终端
+
+    // --- 参数化片段（Snippets）状态 ---
+    QPointer<QDialog> m_snippetsDialog;          // 懒建的片段管理对话框
+    QToolBar *m_snippetBar = nullptr;            // 快捷按钮栏（默认隐藏）
+    QList<QShortcut *> m_snippetShortcuts;       // 片段快捷键（重建前逐个清）
+    bool m_snippetBarVisible = false;            // 按钮栏显隐（QSettings 持久化）
 };
 
 } // namespace cubeshell

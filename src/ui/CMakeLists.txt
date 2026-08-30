@@ -36,6 +36,7 @@ set(UI_SOURCES
     dialogs/TunnelConfigWidget.cpp
     dialogs/ProcessManagerDialog.cpp
     dialogs/LinuxCommandsDialog.cpp
+    dialogs/SnippetsDialog.cpp     # 用户自定义参数化片段（Snippets）管理 + 参数填写
     dialogs/AiSettingsDialog.cpp
 
     # --- editors (对应Python: ui/code_editor.py / ui/text_editor.py) ---

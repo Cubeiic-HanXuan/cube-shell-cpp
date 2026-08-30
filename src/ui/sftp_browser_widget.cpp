@@ -994,14 +994,8 @@ void SftpBrowserWidget::downloadSelected()
     }
     QStringList files, dirs;
     partitionDownloadSelection(selected, files, dirs);
-    if (files.isEmpty()) {
-        if (!dirs.isEmpty())
-            QMessageBox::information(this, tr("下载文件"), tr("暂不支持下载文件夹。"));
+    if (files.isEmpty() && dirs.isEmpty())
         return;
-    }
-    if (!dirs.isEmpty())
-        QMessageBox::information(this, tr("下载文件"),
-                                 tr("暂不支持下载文件夹，已跳过 %1 个文件夹。").arg(dirs.size()));
 
     if (files.size() == 1 && dirs.isEmpty()) {
         // 单文件：维持原有"另存为"交互。
@@ -1017,7 +1011,7 @@ void SftpBrowserWidget::downloadSelected()
         return;
     }
 
-    // 多文件：选保存文件夹（与本地侧 LocalFileBrowserWidget::downloadSelected 同款对话框）。
+    // 多文件/含目录：选保存文件夹（与本地侧 LocalFileBrowserWidget::downloadSelected 同款对话框）。
     const QString dir = QFileDialog::getExistingDirectory(
         this, tr("选择保存文件夹"), QString(),
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
@@ -1026,10 +1020,89 @@ void SftpBrowserWidget::downloadSelected()
     m_downloadQueue.clear();
     m_downloadFailures.clear();
     m_downloadBatchDone = 0;
+    // 散文件直接入队。
     for (const QString &remote : files)
         m_downloadQueue.enqueue(DownloadTask{remote, downloadTargetPath(dir, remote)});
-    m_progress->setVisible(true);
-    dispatchNextDownload();
+
+    if (dirs.isEmpty()) {
+        m_progress->setVisible(true);
+        dispatchNextDownload();
+        return;
+    }
+    // 含目录：worker 线程递归展开成文件任务，并入队列后点火。
+    expandDirsAndDownload(dirs, dir);
+}
+
+// 含目录下载的入口：递归展开每个远端目录为平铺文件任务，保持目录结构落到
+// localRoot/<目录名>/ 下。展开是阻塞 listdir 链，放 worker 线程避免卡 UI。
+void SftpBrowserWidget::expandDirsAndDownload(const QStringList &dirs,
+                                              const QString &localRoot)
+{
+    if (!m_sftp)
+        return;
+    setStatusText(tr("正在扫描文件夹…"));
+    SftpClient *sftp = m_sftp;
+    QThread *worker = QThread::create([this, sftp, dirs, localRoot]() {
+        QList<DownloadTask> tasks;
+        QStringList failed;
+        for (const QString &d : dirs) {
+            QString err;
+            // 本地落点：所选目录名作为 localRoot 下的一级子目录。
+            collectDownloadRecursive(sftp, d, downloadTargetPath(localRoot, d),
+                                     tasks, err);
+            if (!err.isEmpty())
+                failed.append(QStringLiteral("%1（%2）").arg(d, err));
+        }
+        QMetaObject::invokeMethod(this, [this, tasks, failed]() {
+            for (const DownloadTask &t : tasks)
+                m_downloadQueue.enqueue(t);
+            m_downloadFailures.append(failed);
+            if (tasks.isEmpty()) {
+                // 没扫到任何文件（全空目录或全部失败）：不进队列，直接汇报。
+                m_progress->setVisible(false);
+                if (!failed.isEmpty())
+                    setStatusText(tr("文件夹扫描失败：%1").arg(failed.join(tr("；"))));
+                else
+                    setStatusText(tr("所选文件夹为空"));
+                updateCancelButton();
+                return;
+            }
+            m_progress->setVisible(true);
+            dispatchNextDownload();
+        }, Qt::QueuedConnection);
+    });
+    startWorker(worker);
+}
+
+// 递归把 remoteDir 展开成 (remote, local) 文件任务。子目录递归、本地目录随之
+// mkpath（空目录也因此被保留）；符号链接不跟随，避免成环。出错写 err 后返回，
+// 已收集的任务保留（尽力而为）。
+void SftpBrowserWidget::collectDownloadRecursive(SftpClient *sftp,
+                                                 const QString &remoteDir,
+                                                 const QString &localDir,
+                                                 QList<DownloadTask> &out,
+                                                 QString &err)
+{
+    if (!QDir().mkpath(localDir)) {
+        err = tr("无法创建本地目录 %1").arg(localDir);
+        return;
+    }
+    SshError e;
+    const SftpFileInfoList entries = sftp->listdirAttr(remoteDir, e);
+    if (entries.isEmpty() && !e.message.isEmpty()) {
+        err = e.message;
+        return;
+    }
+    for (const SftpFileInfo &info : entries) {
+        const QString childRemote = joinPath(remoteDir, info.filename);
+        const QString childLocal = localDir + QLatin1Char('/') + info.filename;
+        if (info.isSymlink())
+            continue;   // 不跟随符号链接，防环
+        if (info.isDirectory())
+            collectDownloadRecursive(sftp, childRemote, childLocal, out, err);
+        else
+            out.append(DownloadTask{childRemote, childLocal});
+    }
 }
 
 // 串行点火下一个下载任务。记账 total 先填 0，首个 transferProgress 会带回真实大小。

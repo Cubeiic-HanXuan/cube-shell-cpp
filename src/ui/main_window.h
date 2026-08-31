@@ -272,6 +272,8 @@ private:
     // 对应Python: cube-shell.py::show_ai_settings（L2445）
     void showAiSettings();
     void showTunnelManager();
+    // SSH 密钥管理（生成/指纹/复制公钥/ssh-copy-id 部署）。
+    void showSshKeyManager();
     void showAbout();
     void addTunnel();
     // 对应Python: cube-shell.py::linux（帮助菜单 "Linux常用命令"）
@@ -430,6 +432,7 @@ private:
 
     // --- 参数化片段（Snippets）状态 ---
     QPointer<QDialog> m_snippetsDialog;          // 懒建的片段管理对话框
+    QPointer<QDialog> m_sshKeyManagerDialog;     // 懒建的 SSH 密钥管理对话框
     QToolBar *m_snippetBar = nullptr;            // 快捷按钮栏（默认隐藏）
     QList<QShortcut *> m_snippetShortcuts;       // 片段快捷键（重建前逐个清）
     bool m_snippetBarVisible = false;            // 按钮栏显隐（QSettings 持久化）

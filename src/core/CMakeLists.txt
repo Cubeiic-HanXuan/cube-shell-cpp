@@ -18,6 +18,9 @@ set(CORE_SOURCES
     ssh/TunnelPool.cpp          # port of tunnel pool management
     ssh/SftpUploaderCore.cpp    # port of core/uploader (chunked/resumable upload)
     ssh/SshJumpChain.cpp        # 「跳转服务器」代理：逐跳建链 + direct-tcpip 中继
+    ssh/SshKeyGenerator.cpp     # OpenSSH 兼容密钥对生成（OpenSSL EVP，无 ssh-keygen 子进程）
+    ssh/SshKeyStore.cpp         # 密钥索引 ssh_keys.json + keys/ 目录 0600 私钥
+    ssh/SshCopyIdWorker.cpp     # 一键 ssh-copy-id：幂等追加对端 authorized_keys
 
     # --- net (TCP / Telnet / 代理)：无条件编译。Qt6::Network 是顶层必需组件，
     #     且这是唯一在鸿蒙上也能跑的新协议（那里 Serial/RDP 被强制关闭）。 ---

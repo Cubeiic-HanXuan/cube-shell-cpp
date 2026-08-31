@@ -37,6 +37,7 @@ set(UI_SOURCES
     dialogs/ProcessManagerDialog.cpp
     dialogs/LinuxCommandsDialog.cpp
     dialogs/SnippetsDialog.cpp     # 用户自定义参数化片段（Snippets）管理 + 参数填写
+    dialogs/SshKeyManagerDialog.cpp # SSH 密钥管理（生成/指纹/复制公钥/ssh-copy-id 部署）
     dialogs/AiSettingsDialog.cpp
 
     # --- editors (对应Python: ui/code_editor.py / ui/text_editor.py) ---

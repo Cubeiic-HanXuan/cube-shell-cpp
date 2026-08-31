@@ -87,6 +87,18 @@ target_link_libraries(snippets_store_test PRIVATE
     cube_core
 )
 
+# SshKeyGenerator + SshKeyStore 单元测试（密钥生成/公钥 blob/指纹/索引 CRUD/0600）。
+qt_add_executable(ssh_key_store_test
+    ssh_key_store_test.cpp
+)
+target_include_directories(ssh_key_store_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(ssh_key_store_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # GroupManager / FrequentlyUsedCommands / ConfigUtil / GlobalState / Secrets test.
 qt_add_executable(config_group_test
     config_group_test.cpp
@@ -146,6 +158,19 @@ target_include_directories(agent_forward_test PRIVATE
 target_link_libraries(agent_forward_test PRIVATE
     Qt6::Core
     Qt6::Network
+    cube_core
+)
+
+# SSH 密钥管理端到端测试（生成 → copy-id 部署 → 私钥回连；需 tests/docker/ssh-enhance
+# 环境，见文件头）。依赖真实 sshd，不随 ctest 默认跑。
+qt_add_executable(ssh_key_copyid_test
+    ssh_key_copyid_test.cpp
+)
+target_include_directories(ssh_key_copyid_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(ssh_key_copyid_test PRIVATE
+    Qt6::Core
     cube_core
 )
 
@@ -644,6 +669,7 @@ add_test(NAME known_hosts_test COMMAND known_hosts_test)
 add_test(NAME credential_kind_test COMMAND credential_kind_test)
 add_test(NAME session_recorder_test COMMAND session_recorder_test)
 add_test(NAME snippets_store_test COMMAND snippets_store_test)
+add_test(NAME ssh_key_store_test COMMAND ssh_key_store_test)
 add_test(NAME config_group_test COMMAND config_group_test)
 add_test(NAME util_test COMMAND util_test)
 add_test(NAME url_dispatch_test COMMAND url_dispatch_test)

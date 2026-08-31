@@ -107,6 +107,7 @@
 
 #include "config/snippets_store.h"
 #include "dialogs/SnippetsDialog.h"
+#include "dialogs/SshKeyManagerDialog.h"
 
 namespace cubeshell {
 
@@ -687,6 +688,8 @@ void MainWindow::setupMenus()
     // 参数化片段管理器（用户自建命令片段，可带占位参数/快捷键，一键下发当前会话）。
     QAction *snippets = toolsMenu->addAction(tr("片段（Snippets）"), this, &MainWindow::showSnippets);
     snippets->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+J")));
+    // SSH 密钥管理：生成密钥对 / 看指纹 / 复制公钥 / 一键 ssh-copy-id 到设备。
+    toolsMenu->addAction(tr("SSH 密钥管理"), this, &MainWindow::showSshKeyManager);
     // --- 多会话广播输入（作用于全部/选中会话） ---
     // 默认关且不持久化：开启后当前终端的键入逐键镜像到其他会话，是集群运维的
     // 高危操作，必须显式打开。对标 Xshell「发送键输入到所有会话」。
@@ -2540,6 +2543,17 @@ void MainWindow::showSnippets()
     m_snippetsDialog->show();
     m_snippetsDialog->raise();
     m_snippetsDialog->activateWindow();
+}
+
+void MainWindow::showSshKeyManager()
+{
+    if (!m_sshKeyManagerDialog) {
+        // 传入 m_store：部署到设备要用同一份设备目录与 resolved() 凭据查询。
+        m_sshKeyManagerDialog = new SshKeyManagerDialog(&m_store, this);
+    }
+    m_sshKeyManagerDialog->show();
+    m_sshKeyManagerDialog->raise();
+    m_sshKeyManagerDialog->activateWindow();
 }
 
 // 下发片段到当前活动终端：先按 {占位参数} 弹窗填参，再经 sendText 走与真人敲键

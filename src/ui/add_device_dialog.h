@@ -139,7 +139,7 @@ private:
     // password page
     QLineEdit *m_password = nullptr;
     // key page
-    QComboBox *m_keyType = nullptr;         // Ed25519Key / RSAKey / ECDSAKey / DSSKey
+    QComboBox *m_keyType = nullptr;         // Ed25519Key / RSAKey / ECDSAKey（DSS 已淘汰不再提供）
     QLineEdit *m_keyFile = nullptr;
     QPushButton *m_browseKey = nullptr;
     // agent page

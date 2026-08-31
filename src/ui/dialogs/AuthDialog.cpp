@@ -45,9 +45,10 @@ AuthDialog::AuthDialog(QWidget *parent)
     {
         auto *form = new QFormLayout(keyPage);
         m_keyType = new QComboBox(keyPage);
-        // 对应Python: paramiko key 类名（DeviceEntry.keyType 同名）
+        // 对应Python: paramiko key 类名（DeviceEntry.keyType 同名）。
+        // DSS(ssh-dss)已淘汰且有安全风险,不再提供。
         m_keyType->addItems({QStringLiteral("Ed25519Key"), QStringLiteral("RSAKey"),
-                             QStringLiteral("ECDSAKey"), QStringLiteral("DSSKey")});
+                             QStringLiteral("ECDSAKey")});
         m_keyFile = new QLineEdit(keyPage);
         m_browse = new QPushButton(tr("浏览…"), keyPage);
         auto *fileRow = new QHBoxLayout;

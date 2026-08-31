@@ -96,8 +96,10 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     auto *keyForm = new QFormLayout(keyPage);
     keyForm->setContentsMargins(0, 0, 0, 0);
     m_keyType = new QComboBox(this);
+    // DSS(ssh-dss)已淘汰且有安全风险,不再提供;老配置里的 DSSKey 会在认证时被
+    // 明确拒绝并提示改用更强算法(见 SshClient::authPublicKey)。
     m_keyType->addItems({QStringLiteral("Ed25519Key"), QStringLiteral("RSAKey"),
-                         QStringLiteral("ECDSAKey"), QStringLiteral("DSSKey")});
+                         QStringLiteral("ECDSAKey")});
     m_keyFile = new QLineEdit(this);
     m_keyFile->setPlaceholderText(tr("私钥文件路径"));
     m_browseKey = new QPushButton(tr("浏览…"), this);

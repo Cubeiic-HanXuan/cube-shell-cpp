@@ -3,7 +3,8 @@
 // SshClient.h — libssh2-backed SSH client.
 //
 // C++ replacement for the subset of paramiko used by cube-shell
-// (function/ssh_func.py): password + public-key auth (Ed25519/RSA/ECDSA/DSS),
+// (function/ssh_func.py): password + public-key auth (Ed25519/RSA/ECDSA;
+// DSS/ssh-dss 已淘汰且有安全风险，不再支持，见 SshClient::authPublicKey),
 // keyboard-interactive MFA, opening a shell channel with a pty, and SFTP.
 //
 // This class is thread-hostile by design (like paramiko's SSHClient): one
@@ -74,7 +75,8 @@ public:
     void setUsername(const QString &username);
     void setPassword(const QString &password);
     // keyType mirrors paramiko key class names: "Ed25519Key", "RSAKey",
-    // "ECDSAKey", "DSSKey". keyFile is the private-key path; passphrase optional.
+    // "ECDSAKey"（"DSSKey" 已淘汰不再支持，authPublicKey 会拒绝）.
+    // keyFile is the private-key path; passphrase optional.
     void setPrivateKey(const QString &keyType, const QString &keyFile, const QString &passphrase = QString());
 
     // 认证方式（DeviceEntry::credentialKind 的镜像；Password/PrivateKeyFile 时

@@ -38,7 +38,8 @@ struct TunnelSpec {
     quint16 sshPort = 22;
     QString sshUser;
     QString sshPassword;
-    QString keyType;   // "Ed25519Key"/"RSAKey"/"ECDSAKey"/"DSSKey" (empty = password/agent)
+    QString keyType;   // "Ed25519Key"/"RSAKey"/"ECDSAKey" (empty = password/agent;
+                       // "DSSKey" 已淘汰不再支持)
     QString keyFile;
     QString keyPassphrase;
 

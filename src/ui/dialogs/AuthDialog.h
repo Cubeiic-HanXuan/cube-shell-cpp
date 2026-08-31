@@ -32,7 +32,7 @@ public:
 
     Method method() const;
     QString password() const;      // Password 分支
-    QString keyType() const;       // PrivateKey 分支: Ed25519Key/RSAKey/ECDSAKey/DSSKey
+    QString keyType() const;       // PrivateKey 分支: Ed25519Key/RSAKey/ECDSAKey（DSS 已淘汰不再提供）
     QString keyFile() const;
     QString passphrase() const;
     QString interactiveAnswer() const; // KeyboardInteractive 分支（验证码等）

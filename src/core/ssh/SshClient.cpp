@@ -588,6 +588,15 @@ bool SshClient::authPassword(SshError &error)
 
 bool SshClient::authPublicKey(SshError &error)
 {
+    // DSS(ssh-dss)已淘汰且有安全风险,cube-shell 不再支持。在这里明确拦截,
+    // 让配置成 DSSKey 的老条目得到一句可读提示,而不是一个晦涩的 libssh2 报错。
+    if (m_keyType == QLatin1String("DSSKey")) {
+        error.authFailed = true;
+        error.message = QStringLiteral(
+            "DSS(ssh-dss)密钥已被淘汰且不再受支持,请改用 Ed25519 / RSA / ECDSA 密钥");
+        return false;
+    }
+
     const QByteArray user = m_username.toUtf8();
     const QByteArray keyFile = m_keyFile.toUtf8();
     const QByteArray passphrase = m_passphrase.toUtf8();

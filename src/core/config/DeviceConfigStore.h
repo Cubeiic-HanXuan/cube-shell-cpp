@@ -71,7 +71,8 @@ struct DeviceEntry {
     QString password;
     QString host;      // stored as "host:port" (pickle compat) — see hostPort()
     quint16  port = 22;
-    QString keyType;   // "Ed25519Key" | "RSAKey" | "ECDSAKey" | "DSSKey" | ""
+    QString keyType;   // "Ed25519Key" | "RSAKey" | "ECDSAKey" | ""
+                       // （"DSSKey" 已淘汰不再支持，认证时会被拒绝）
     QString keyFile;
     SshCredentialKind credentialKind = SshCredentialKind::Password;
     bool agentForwarding = true;   // 是否请求 auth-agent-req@openssh.com

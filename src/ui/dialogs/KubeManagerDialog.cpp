@@ -5,7 +5,10 @@
 
 #include "KubeLogViewer.h"
 #include "editors/KubeYamlEditor.h"
+#include "config/GlobalState.h"
 
+#include <QBrush>
+#include <QColor>
 #include <QComboBox>
 #include <QCursor>
 #include <QDir>
@@ -13,11 +16,15 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPalette>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTreeWidget>
@@ -41,6 +48,9 @@ enum Column {
 constexpr int kPlaceholderRole = Qt::UserRole + 1;
 // 对象行的 KubeObjectRef（QVariant 承载）。
 constexpr int kRefRole = Qt::UserRole + 2;
+// 展开态记忆键：分组存组名、kind 存 apiPlural。与显示文本解耦，
+// 计数变化导致文本变化时展开态仍能对上。
+constexpr int kExpandKeyRole = Qt::UserRole + 3;
 
 // 对应 Docker 对话框的 operationDisplayName。
 QString operationDisplayName(const QString &op)
@@ -52,6 +62,128 @@ QString operationDisplayName(const QString &op)
     if (op == QLatin1String("restart"))
         return QStringLiteral("滚动重启");
     return op;
+}
+
+// ---------------------------------------------------------------------------
+// 状态语义着色（Lens/k9s 式：状态列文字 + 圆点按健康度着色）
+// ---------------------------------------------------------------------------
+
+enum class StatusSeverity { Neutral, Ok, Warn, Error };
+
+// 状态文本 → 严重度。pod/副本类是 "M/N phase"，其余是单词短语；统一小写后
+// 按 Error → Warn → Ok → Neutral 顺序匹配。
+StatusSeverity statusSeverity(const QString &apiPlural, const QString &status)
+{
+    const QString s = status.toLower();
+    // events 的状态列是 type（"Warning" / "Normal"）。
+    if (apiPlural == QLatin1String("events"))
+        return s == QLatin1String("warning") ? StatusSeverity::Error
+                                             : StatusSeverity::Neutral;
+
+    static const char *const kErrorKeys[] = {
+        "crashloopbackoff", "imagepullbackoff", "errimagepull", "error",
+        "failed",           "notready",         "oomkilled",    "evicted",
+        "unknown",
+    };
+    for (const char *key : kErrorKeys) {
+        if (s.contains(QLatin1String(key)))
+            return StatusSeverity::Error;
+    }
+
+    static const char *const kWarnKeys[] = {
+        "pending",     "containercreating", "terminating",
+        "suspended",   "podinitializing",
+    };
+    for (const char *key : kWarnKeys) {
+        if (s.contains(QLatin1String(key)))
+            return StatusSeverity::Warn;
+    }
+
+    // 终态词优先于就绪比：完成的 Job Pod 是 "0/1 Succeeded"（ready=0），
+    // 不能按 0/N 误判为 Error。
+    static const char *const kTerminalOkKeys[] = {
+        "succeeded", "complete",
+    };
+    for (const char *key : kTerminalOkKeys) {
+        if (s.contains(QLatin1String(key)))
+            return StatusSeverity::Ok;
+    }
+
+    // "M/N ..." 就绪比：全就绪 Ok；0/N Error；中间态 Warn。
+    const int slash = s.indexOf(QLatin1Char('/'));
+    if (slash > 0) {
+        bool okReady = false;
+        bool okTotal = false;
+        const int ready = s.left(slash).trimmed().toInt(&okReady);
+        // total 后可能跟相位词（"1/1 Running"），取空白前缀。
+        const int total =
+            s.mid(slash + 1).section(QLatin1Char(' '), 0, 0).toInt(&okTotal);
+        if (okReady && okTotal && total > 0) {
+            if (ready >= total)
+                return StatusSeverity::Ok;
+            return ready == 0 ? StatusSeverity::Error : StatusSeverity::Warn;
+        }
+    }
+
+    static const char *const kOkKeys[] = {
+        "running", "ready",   "bound",   "active", "available",
+    };
+    for (const char *key : kOkKeys) {
+        if (s.contains(QLatin1String(key)))
+            return StatusSeverity::Ok;
+    }
+    return StatusSeverity::Neutral;
+}
+
+// 深色用亮色、浅色用深色，保证两种主题下都可读不刺眼。
+QColor severityColor(StatusSeverity severity, bool darkTheme)
+{
+    switch (severity) {
+    case StatusSeverity::Ok:
+        return darkTheme ? QColor(0x4C, 0xAF, 0x50) : QColor(0x2E, 0x7D, 0x32);
+    case StatusSeverity::Warn:
+        return darkTheme ? QColor(0xFF, 0xA7, 0x26) : QColor(0xE6, 0x51, 0x00);
+    case StatusSeverity::Error:
+        return darkTheme ? QColor(0xEF, 0x53, 0x50) : QColor(0xC6, 0x28, 0x28);
+    default:
+        return QColor();
+    }
+}
+
+bool isDarkTheme()
+{
+    return GlobalState::instance().appearance().trimmed().compare(
+               QLatin1String("light"), Qt::CaseInsensitive) != 0;
+}
+
+// 状态列前缀的实心圆点。运行时 QPixmap 自绘（不新增图标文件，规避鸿蒙运行
+// 资源必须走 qrc 的约束）；按 (severity, 主题) 缓存，避免每行重建。
+QIcon statusDotIcon(StatusSeverity severity, bool darkTheme)
+{
+    static QHash<int, QIcon> cache;
+    const int key = (int(severity) << 1) | (darkTheme ? 1 : 0);
+    const auto it = cache.constFind(key);
+    if (it != cache.constEnd())
+        return it.value();
+
+    // 超采样抗锯齿：按 kScale 倍分辨率画，再把 devicePixelRatio 设回 kScale。
+    // 否则 10×10 物理像素在高分屏（DPR=2）被当逻辑像素放大 2 倍，边缘发虚。
+    constexpr int logical = 10;
+    constexpr qreal kScale = 4.0;
+    const int px = int(logical * kScale);
+    QPixmap pm(px, px);
+    pm.setDevicePixelRatio(kScale);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(severityColor(severity, darkTheme));
+    // 逻辑坐标系（QPainter 已按 DPR 缩放），圆点居中、留 2px 边距。
+    p.drawEllipse(QRectF(2, 2, logical - 4, logical - 4));
+    p.end();
+    const QIcon icon(pm);
+    cache.insert(key, icon);
+    return icon;
 }
 
 } // namespace
@@ -174,6 +306,10 @@ KubeManagerDialog::KubeManagerDialog(KubeManager *manager, QWidget *parent)
     auto *topBar = new QHBoxLayout();
     m_backendCombo = new QComboBox(this);
     m_backendCombo->addItem(tr("本机 kubectl"));
+    // 远程项文本较长（"当前 SSH 会话 (user@host)"）：按内容自适应 + 最小宽度
+    // 兜底，否则被同排下拉挤压、当前值显示成省略号。
+    m_backendCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    m_backendCombo->setMinimumWidth(200);
     m_contextCombo = new QComboBox(this);
     m_contextCombo->setMinimumWidth(180);
     m_namespaceCombo = new QComboBox(this);
@@ -203,6 +339,8 @@ KubeManagerDialog::KubeManagerDialog(KubeManager *manager, QWidget *parent)
     header->setSectionResizeMode(ColDetails, QHeaderView::Stretch);
     m_tree->setColumnWidth(ColName, 320);
     m_tree->setColumnWidth(ColStatus, 160);
+    // 轻微留白提升可读性（局部 QSS 只作用本树，不影响全局 qdarktheme）。
+    m_tree->setStyleSheet(QStringLiteral("QTreeWidget::item { padding: 2px 2px; }"));
     connect(m_tree, &QTreeWidget::customContextMenuRequested,
             this, &KubeManagerDialog::onTreeContextMenu);
     layout->addWidget(m_tree);
@@ -514,17 +652,19 @@ QString KubeManagerDialog::detailsText(const QString &apiPlural,
 
 void KubeManagerDialog::rebuildTree()
 {
-    // 保留用户展开态：重建前记录展开的分组/类型节点文本。
+    // 保留用户展开态：重建前记录展开的分组/类型节点。键取自 kExpandKeyRole
+    //（组名 / apiPlural），与显示文本解耦——计数变化不改键。
     QSet<QString> expanded;
     for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
         QTreeWidgetItem *groupItem = m_tree->topLevelItem(i);
+        const QString groupKey = groupItem->data(ColName, kExpandKeyRole).toString();
         if (groupItem->isExpanded())
-            expanded.insert(groupItem->text(ColName));
+            expanded.insert(groupKey);
         for (int j = 0; j < groupItem->childCount(); ++j) {
             QTreeWidgetItem *kindItem = groupItem->child(j);
             if (kindItem->isExpanded())
-                expanded.insert(groupItem->text(ColName) + QLatin1Char('/')
-                                + kindItem->text(ColName).section(QLatin1Char(' '), 0, 0));
+                expanded.insert(groupKey + QLatin1Char('/')
+                                + kindItem->data(ColName, kExpandKeyRole).toString());
         }
     }
 
@@ -534,39 +674,63 @@ void KubeManagerDialog::rebuildTree()
         f.setBold(true);
         return f;
     }();
+    // 空类型置灰：用主题 Disabled 文本色，深浅主题自动适配。
+    const QBrush disabledBrush(
+        m_tree->palette().color(QPalette::Disabled, QPalette::Text));
 
     const QStringList groups = KubeResourceParser::groupOrder();
     for (const QString &group : groups) {
+        const QList<KubeResourceKind> kinds = KubeResourceParser::kindsInGroup(group);
+        int groupTotal = 0;
+        for (const KubeResourceKind &kind : kinds)
+            groupTotal += m_rowsByKind.value(kind.apiPlural).size();
+
         auto *groupItem = new QTreeWidgetItem();
-        groupItem->setText(ColName, group);
+        groupItem->setText(ColName, QStringLiteral("%1 (%2)").arg(group).arg(groupTotal));
         groupItem->setFont(ColName, boldFont);
+        groupItem->setData(ColName, kExpandKeyRole, group);
         m_tree->addTopLevelItem(groupItem);
 
-        const QList<KubeResourceKind> kinds = KubeResourceParser::kindsInGroup(group);
         for (const KubeResourceKind &kind : kinds) {
             const QList<KubeResourceRow> rows = m_rowsByKind.value(kind.apiPlural);
             auto *kindItem = new QTreeWidgetItem();
             kindItem->setText(ColName, QStringLiteral("%1 (%2)")
                                            .arg(kind.displayName)
                                            .arg(rows.size()));
+            kindItem->setData(ColName, kExpandKeyRole, kind.apiPlural);
+            // 空类型置灰（保留结构可见性，但视觉降权）。
+            if (rows.isEmpty())
+                kindItem->setForeground(ColName, disabledBrush);
             groupItem->addChild(kindItem);
             for (const KubeResourceRow &row : rows)
                 addRowItem(row, kind.apiPlural, kindItem);
         }
     }
 
-    // 展开策略：首轮全部展开（对齐 Docker 对话框），之后恢复用户展开态。
     if (!m_firstBuildDone) {
-        m_tree->expandAll();
-        m_firstBuildDone = true;
-    } else {
+        // 首轮：只展开有数据的类型（及其分组）；空类型折叠，避免满屏铺开。
         for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
             QTreeWidgetItem *groupItem = m_tree->topLevelItem(i);
-            groupItem->setExpanded(expanded.contains(groupItem->text(ColName)));
+            bool groupHasRows = false;
             for (int j = 0; j < groupItem->childCount(); ++j) {
                 QTreeWidgetItem *kindItem = groupItem->child(j);
-                const QString key = groupItem->text(ColName) + QLatin1Char('/')
-                                    + kindItem->text(ColName).section(QLatin1Char(' '), 0, 0);
+                const bool hasRows = kindItem->childCount() > 0;
+                kindItem->setExpanded(hasRows);
+                groupHasRows = groupHasRows || hasRows;
+            }
+            groupItem->setExpanded(groupHasRows);
+        }
+        m_firstBuildDone = true;
+    } else {
+        // 之后恢复用户展开态。
+        for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *groupItem = m_tree->topLevelItem(i);
+            const QString groupKey = groupItem->data(ColName, kExpandKeyRole).toString();
+            groupItem->setExpanded(expanded.contains(groupKey));
+            for (int j = 0; j < groupItem->childCount(); ++j) {
+                QTreeWidgetItem *kindItem = groupItem->child(j);
+                const QString key = groupKey + QLatin1Char('/')
+                                    + kindItem->data(ColName, kExpandKeyRole).toString();
                 kindItem->setExpanded(expanded.contains(key));
             }
         }
@@ -582,6 +746,14 @@ void KubeManagerDialog::addRowItem(const cubeshell::KubeResourceRow &row,
     item->setText(ColAge, row.age);
     item->setText(ColDetails, detailsText(apiPlural, row));
     item->setToolTip(ColDetails, detailsText(apiPlural, row));
+
+    // 状态列语义着色 + 圆点；Neutral（如 Service 的 ClusterIP）保持主题默认。
+    const StatusSeverity severity = statusSeverity(apiPlural, row.status);
+    if (severity != StatusSeverity::Neutral) {
+        const bool dark = isDarkTheme();
+        item->setForeground(ColStatus, QBrush(severityColor(severity, dark)));
+        item->setIcon(ColStatus, statusDotIcon(severity, dark));
+    }
 
     KubeObjectRef ref;
     ref.apiPlural = apiPlural;

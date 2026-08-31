@@ -1,14 +1,15 @@
 // ssh_key_copyid_test.cpp — SSH 密钥管理功能的端到端集成测试（headless，需真实 sshd）。
 //
-// 对默认 127.0.0.1:2401 的 docker sshd（tests/docker/ssh-enhance，testuser/testpass123）
+// 对默认 127.0.0.1:2404 的 docker sshd（tests/docker/ssh-keys，testuser/testpass123）
 // 跑完整闭环：
-//   1) SshKeyStore 生成一把 Ed25519 + 一把 RSA 密钥（落临时目录）
+//   1) SshKeyStore 生成一把 Ed25519 + 一把 RSA + 一把 ECDSA 密钥（落临时目录）
 //   2) SshCopyIdWorker 用**密码**连接并部署公钥（幂等：连发两次，第二次应报已存在）
 //   3) 用**生成的私钥**经 SshClient(libssh2) 连回去跑 whoami —— 同时证明
 //      libssh2 能读我们写出的私钥格式、且 copy-id 把公钥装对了
 //
 // 环境变量覆盖：CUBESSH_HOST / CUBESSH_PORT / CUBESSH_USER / CUBESSH_PASS。
 // 不是单元测试——没有可达 sshd 时会整体失败，故默认不随 ctest 跑（见 CMakeLists 注释）。
+// 环境搭建与手工验收步骤见 docs/SSH密钥管理测试验证说明书.md。
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -32,7 +33,7 @@ static DeviceEntry makePasswordDevice()
     DeviceEntry dev;
     dev.name = QStringLiteral("copyid-target");
     dev.host = qEnvironmentVariable("CUBESSH_HOST", "127.0.0.1");
-    dev.port = quint16(qEnvironmentVariable("CUBESSH_PORT", "2401").toUShort());
+    dev.port = quint16(qEnvironmentVariable("CUBESSH_PORT", "2404").toUShort());
     dev.username = qEnvironmentVariable("CUBESSH_USER", "testuser");
     dev.password = qEnvironmentVariable("CUBESSH_PASS", "testpass123");
     dev.credentialKind = SshCredentialKind::Password;
@@ -112,10 +113,11 @@ int main(int argc, char *argv[])
     CHECK(dir.isValid());
     SshKeyStore store(dir.filePath(QStringLiteral("ssh_keys.json")));
 
-    // 生成两种格式各一把：Ed25519 走 OpenSSH 格式，RSA 走 PKCS#8 PEM。
+    // 生成三种格式各一把：Ed25519 走 OpenSSH 格式，RSA/ECDSA 走 PKCS#8 PEM。
     struct { const char *name; const char *type; int bits; const char *keyType; } specs[] = {
         { "e2e-ed25519", "ssh-ed25519", 0, "Ed25519Key" },
         { "e2e-rsa", "ssh-rsa", 2048, "RSAKey" },
+        { "e2e-ecdsa", "ecdsa-sha2-nistp256", 256, "ECDSAKey" },
     };
 
     for (const auto &s : specs) {

@@ -29,7 +29,10 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
 
-    const quint16 port = quint16(qEnvironmentVariableIntValue("CUBESSH_AGENT_PORT") ?: 2401);
+    // qEnvironmentVariableIntValue 未设置/非法时返回 0，0 落回默认端口。
+    // 不用 GNU 扩展的 `?:`（Elvis），MSVC 编不过（C2059）。
+    const int envPort = qEnvironmentVariableIntValue("CUBESSH_AGENT_PORT");
+    const quint16 port = quint16(envPort > 0 ? envPort : 2401);
     const QString user = qEnvironmentVariable("CUBESSH_USER", QStringLiteral("testuser"));
     const QString pass = qEnvironmentVariable("CUBESSH_PASS", QStringLiteral("testpass123"));
 

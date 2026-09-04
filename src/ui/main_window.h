@@ -56,6 +56,16 @@ struct SerialSettings;
 // TCP/Telnet 无条件可用（Qt6::Network 是顶层必需组件）。
 struct TcpSettings;
 class NetTerminalWidget;
+class LockTabDialog;
+class UnlockTabDialog;
+
+// 标签页锁定信息。
+struct TabLockInfo {
+    bool locked = false;
+    QString password;          // 会话内内存存储
+    bool hideOutput = false;
+    bool unlockedOverride = false;  // 单独解锁覆盖全局锁
+};
 
 // Main application window.
 //
@@ -90,6 +100,9 @@ public:
     // host 为空时创建空白面板等待用户在工具栏填写；非空则立即建连。
     // 无 #ifdef：TCP/Telnet 不依赖任何可选组件。
     void openNetTab(const TcpSettings &settings);
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void setupUi();
@@ -152,6 +165,14 @@ private:
     void nextTab();
     void prevTab();
     void showTabContextMenu(QTabWidget *tabs, const QPoint &pos);
+    void renameTab(QTabWidget *tabs, int index);
+    void duplicateTab(QTabWidget *tabs, int index);
+    void lockTab(QTabWidget *tabs, int index);
+    void unlockTab(QTabWidget *tabs, int index);
+    bool isTabLocked(QWidget *page) const;
+    void applyTabLock(QWidget *page, const TabLockInfo &info);
+    void removeTabLock(QWidget *page);
+    void updateTabLockState(QWidget *page, bool locked);
     // 把 tabs 里 index 处的标签拆到一个新建的相邻分屏（orientation 决定水平/垂直）。
     // 多分屏：每次调用都新建一个 pane，而非在固定的第二个 pane 之间来回搬。
     void splitTab(QTabWidget *source, int index, Qt::Orientation orientation);
@@ -182,6 +203,9 @@ private:
     // 新标签页的落点：当前活动 pane（无则首个 pane）。
     TerminalTabWidget *targetPane() const;
     void updateTerminalInfo();
+
+    // 查找标签页中的终端控件。
+    QTermWidget *findTerminalWidget(QWidget *page) const;
 
     // --- 多会话广播输入 ---
     // 开启后当前活动终端的键盘输入逐键镜像到目标会话：已勾选"加入广播"的标签
@@ -436,6 +460,12 @@ private:
     QToolBar *m_snippetBar = nullptr;            // 快捷按钮栏（默认隐藏）
     QList<QShortcut *> m_snippetShortcuts;       // 片段快捷键（重建前逐个清）
     bool m_snippetBarVisible = false;            // 按钮栏显隐（QSettings 持久化）
+
+    // --- 标签页锁定状态 ---
+    QHash<QWidget *, TabLockInfo> m_tabLockState;  // 每个标签页的锁定信息
+    bool m_globalLockAllTabs = false;              // 全局"锁定所有标签页"标志
+    QString m_lockPassword;                        // 全局锁定密码（锁定所有标签页时使用）
+    QHash<QWidget *, QWidget *> m_tabOverlays;     // 标签页遮罩控件（隐藏输出时）
 };
 
 } // namespace cubeshell

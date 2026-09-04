@@ -32,6 +32,8 @@
 #include <QToolBar>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QInputDialog>
+#include <QRegularExpression>
 
 #include <functional>
 #include <utility>
@@ -103,11 +105,14 @@
 #include "qtermwidget.h"
 #include "Session.h"
 #include "Emulation.h"
+#include "TerminalDisplay.h"
 #include "terminal_theme_util.h"
 
 #include "config/snippets_store.h"
 #include "dialogs/SnippetsDialog.h"
 #include "dialogs/SshKeyManagerDialog.h"
+#include "dialogs/LockTabDialog.h"
+#include "dialogs/UnlockTabDialog.h"
 
 namespace cubeshell {
 
@@ -2117,6 +2122,14 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
     // 放在 #ifdef 之外——这两个协议无条件编译。
     if (auto *net = qobject_cast<NetTerminalWidget *>(w))
         net->client()->disconnectFromHost();
+
+    // 清理标签锁定状态和遮罩（防止悬空指针）
+    m_tabLockState.remove(w);
+    if (m_tabOverlays.contains(w)) {
+        m_tabOverlays.value(w)->deleteLater();
+        m_tabOverlays.remove(w);
+    }
+
     tabs->removeTab(index);
     if (w)
         w->deleteLater();
@@ -2168,6 +2181,30 @@ void MainWindow::showTabContextMenu(QTabWidget *tabs, const QPoint &pos)
         for (int i = tabs->count() - 1; i > index; --i)
             closeTabIn(tabs, i);
     });
+    menu.addSeparator();
+    // 重命名标签页
+    menu.addAction(tr("重命名标签页"), this, [this, tabs, index]() {
+        renameTab(tabs, index);
+    });
+    // 复制标签页（锁定时隐藏）
+    QWidget *menuPageForDup = tabs->widget(index);
+    if (!isTabLocked(menuPageForDup)) {
+        menu.addAction(tr("复制标签页"), this, [this, tabs, index]() {
+            duplicateTab(tabs, index);
+        });
+    }
+    // 锁定/解锁标签页
+    {
+        QWidget *menuPageForLock = tabs->widget(index);
+        const bool locked = isTabLocked(menuPageForLock);
+        menu.addAction(locked ? tr("解锁标签页") : tr("锁定标签页"), this,
+                       [this, tabs, index, locked]() {
+            if (locked)
+                unlockTab(tabs, index);
+            else
+                lockTab(tabs, index);
+        });
+    }
     menu.addSeparator();
     menu.addAction(tr("水平分屏"), this, [this, tabs, index]() {
         splitTab(tabs, index, Qt::Horizontal);
@@ -2236,6 +2273,465 @@ void MainWindow::showTabContextMenu(QTabWidget *tabs, const QPoint &pos)
         }
     }
     menu.exec(tabs->tabBar()->mapToGlobal(pos));
+}
+
+// --- 标签页锁定/重命名/复制功能 ---
+
+void MainWindow::renameTab(QTabWidget *tabs, int index)
+{
+    if (index < 0 || index >= tabs->count())
+        return;
+    const QString oldName = tabs->tabText(index);
+    // 去除可能存在的锁定图标前缀（零宽空格避免与用户命名冲突）
+    QString cleanName = oldName;
+    if (cleanName.startsWith(QStringLiteral("\u200B🔒 ")))
+        cleanName = cleanName.mid(3);
+
+    bool ok = false;
+    const QString newName = QInputDialog::getText(this, tr("重命名标签页"),
+                                                   tr("标签页名称："),
+                                                   QLineEdit::Normal,
+                                                   cleanName, &ok);
+    if (ok && !newName.trimmed().isEmpty()) {
+        tabs->setTabText(index, newName.trimmed());
+    }
+}
+
+void MainWindow::duplicateTab(QTabWidget *tabs, int index)
+{
+    if (index < 0 || index >= tabs->count())
+        return;
+    QWidget *page = tabs->widget(index);
+    if (page == m_homePage)
+        return;
+
+    const QString oldName = tabs->tabText(index);
+    // 去除可能存在的锁定图标前缀（零宽空格避免与用户命名冲突）
+    QString cleanName = oldName;
+    if (cleanName.startsWith(QStringLiteral("\u200B🔒 ")))
+        cleanName = cleanName.mid(3);
+
+    // 解析标签名，提取基础名和序号： "127.0.0.1(2)" → base="127.0.0.1", num=2
+    const QRegularExpression re(QStringLiteral(R"(^(.+?)(?:\((\d+)\))?$)"));
+    const QRegularExpressionMatch match = re.match(cleanName);
+    const QString base = match.hasMatch() ? match.captured(1) : cleanName;
+    const int currentNum = match.hasMatch() ? match.captured(2).toInt() : 0;
+
+    // 计算下一个序号（遍历所有分屏的所有标签找到最大序号）
+    int maxNum = currentNum;
+    for (QTabWidget *pane : allPanes()) {
+        for (int i = 0; i < pane->count(); ++i) {
+            const QString tabName = pane->tabText(i);
+            QString cleanTabName = tabName;
+            if (cleanTabName.startsWith(QStringLiteral("\u200B🔒 ")))
+                cleanTabName = cleanTabName.mid(3);
+            const QRegularExpressionMatch m = re.match(cleanTabName);
+            if (m.hasMatch() && m.captured(1) == base) {
+                const int num = m.captured(2).toInt();
+                if (num > maxNum)
+                    maxNum = num;
+            }
+        }
+    }
+    const int nextNum = maxNum + 1;
+    const QString newName = QStringLiteral("%1(%2)").arg(base).arg(nextNum);
+
+    // 根据标签页类型创建新实例
+    QWidget *newPage = nullptr;
+
+    if (auto *sshTab = qobject_cast<SshSessionTab *>(page)) {
+        // SSH 会话：用相同设备信息新建连接
+        const DeviceEntry device = sshTab->device();
+        auto *newSshTab = new SshSessionTab(device, this);
+        if (newSshTab->terminal() && newSshTab->terminal()->terminal())
+            connect(newSshTab->terminal()->terminal(), &QTermWidget::aiRequested,
+                    this, &MainWindow::toggleAiPanel);
+        // 连接信号以更新连接状态圆点
+        connect(newSshTab, &SshSessionTab::connected, this, [this, newSshTab]() {
+            setTabConnected(newSshTab, true);
+        });
+        connect(newSshTab, &SshSessionTab::disconnected, this, [this, newSshTab]() {
+            setTabConnected(newSshTab, false);
+        });
+        newPage = newSshTab;
+    } else if (auto *term = qobject_cast<QTermWidget *>(page)) {
+        // 本机终端：新建本地终端（完全复用 openLocalTerminalAt 逻辑）
+        const QString workDir = term->workingDirectory();
+        const bool hasDir = !workDir.isEmpty() && QFileInfo(workDir).isDir();
+        auto *newTerm = new QTermWidget(hasDir ? 0 : 1, this);
+        if (hasDir) {
+            newTerm->setWorkingDirectory(workDir);
+            newTerm->startShellProgram();
+        }
+        QFont font(GlobalState::instance().fontFamily(), GlobalState::instance().fontSize());
+        if (font.family().isEmpty())
+            font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        newTerm->setTerminalFont(font);
+        newTerm->setColorScheme(GlobalState::instance().terminalTheme());
+        connect(newTerm, &QTermWidget::colorSchemeChanged, this,
+                [this](const QString &name) { applyTerminalThemeEverywhere(name, this); });
+        newTerm->setHistorySize(GlobalState::instance().scrollbackLines());
+        connect(newTerm, &QTermWidget::fontSizeChanged, this,
+                [](int size) { GlobalState::instance().setFontSize(size); });
+        // 本机终端：shell 运行中为"已连接"(绿)，shell 退出为"未连接"(红)
+        setTabConnected(newTerm, true);
+        connect(newTerm, &QTermWidget::finished, this, [this, newTerm]() {
+            setTabConnected(newTerm, false);
+            for (QTabWidget *t : allPanes()) {
+                const int i = t->indexOf(newTerm);
+                if (i >= 0) {
+                    closeTabIn(t, i);
+                    return;
+                }
+            }
+            newTerm->deleteLater();
+        });
+        newPage = newTerm;
+    } else if (auto *serial = qobject_cast<SerialTerminalWidget *>(page)) {
+        Q_UNUSED(serial);
+        setStatus(tr("串口标签页暂不支持复制"));
+        return;
+    } else if (auto *net = qobject_cast<NetTerminalWidget *>(page)) {
+        Q_UNUSED(net);
+        setStatus(tr("TCP/Telnet 标签页暂不支持复制"));
+        return;
+    }
+#ifdef CUBESHELL_WITH_RDP
+    else if (auto *rdp = qobject_cast<RdpPanel *>(page)) {
+        Q_UNUSED(rdp);
+        setStatus(tr("RDP 标签页暂不支持复制"));
+        return;
+    }
+#endif
+
+    if (!newPage)
+        return;
+
+    const int newIdx = tabs->addTab(newPage, newName);
+    decorateSessionTab(tabs, newIdx);
+    tabs->setCurrentIndex(newIdx);
+    updateTerminalInfo();
+
+    // SSH 会话需要主动发起连接
+    if (auto *newSshTab = qobject_cast<SshSessionTab *>(newPage)) {
+        setTabConnected(newSshTab, false);  // 连上之前先亮红点
+        newSshTab->connectToHost();
+    }
+}
+
+void MainWindow::lockTab(QTabWidget *tabs, int index)
+{
+    if (index < 0 || index >= tabs->count())
+        return;
+    QWidget *page = tabs->widget(index);
+    if (page == m_homePage)
+        return;
+
+    LockTabDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const QString password = dlg.password();
+    const bool lockAll = dlg.lockAllTabs();
+    const bool hideOutput = dlg.hideOutput();
+
+    if (lockAll) {
+        // 锁定所有标签页
+        m_globalLockAllTabs = true;
+        m_lockPassword = password;
+        for (QTabWidget *pane : allPanes()) {
+            for (int i = 0; i < pane->count(); ++i) {
+                QWidget *p = pane->widget(i);
+                if (p == m_homePage)
+                    continue;
+                TabLockInfo info;
+                info.locked = true;
+                info.password = password;
+                info.hideOutput = hideOutput;
+                applyTabLock(p, info);
+            }
+        }
+    } else {
+        // 只锁定当前标签页
+        TabLockInfo info;
+        info.locked = true;
+        info.password = password;
+        info.hideOutput = hideOutput;
+        applyTabLock(page, info);
+    }
+
+    setStatus(tr("标签页已锁定"));
+}
+
+void MainWindow::unlockTab(QTabWidget *tabs, int index)
+{
+    if (index < 0 || index >= tabs->count())
+        return;
+    QWidget *page = tabs->widget(index);
+    if (page == m_homePage)
+        return;
+
+    UnlockTabDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const QString password = dlg.password();
+    const bool unlockAll = dlg.unlockAllTabs();
+
+    // 验证密码
+    if (m_globalLockAllTabs) {
+        // 全局锁定模式：使用全局密码
+        if (password != m_lockPassword) {
+            QMessageBox::warning(this, tr("解锁标签页"), tr("密码错误。"));
+            return;
+        }
+    } else {
+        // 单标签锁定模式：使用标签自己的密码
+        const TabLockInfo info = m_tabLockState.value(page);
+        if (password != info.password) {
+            QMessageBox::warning(this, tr("解锁标签页"), tr("密码错误。"));
+            return;
+        }
+    }
+
+    if (unlockAll) {
+        // 解锁所有标签页
+        m_globalLockAllTabs = false;
+        m_lockPassword.clear();
+        for (QTabWidget *pane : allPanes()) {
+            for (int i = 0; i < pane->count(); ++i) {
+                QWidget *p = pane->widget(i);
+                if (p == m_homePage)
+                    continue;
+                removeTabLock(p);
+            }
+        }
+    } else {
+        // 只解锁当前标签页
+        if (m_globalLockAllTabs) {
+            // 全局锁定模式下单独解锁：设置覆盖标志
+            TabLockInfo info = m_tabLockState.value(page);
+            info.unlockedOverride = true;
+            m_tabLockState[page] = info;
+            // 更新视觉状态（去除锁图标、移除遮罩、恢复输入）
+            if (auto *term = findTerminalWidget(page)) {
+                term->removeEventFilter(this);
+                if (auto *td = term->terminalDisplay())
+                    td->removeEventFilter(this);
+            }
+            if (m_tabOverlays.contains(page)) {
+                m_tabOverlays.value(page)->deleteLater();
+                m_tabOverlays.remove(page);
+            }
+            // 恢复标签标题
+            for (QTabWidget *pane : allPanes()) {
+                const int idx = pane->indexOf(page);
+                if (idx >= 0) {
+                    QString title = pane->tabText(idx);
+                    if (title.startsWith(QStringLiteral("\u200B🔒 ")))
+                        pane->setTabText(idx, title.mid(3));
+                    break;
+                }
+            }
+        } else {
+            removeTabLock(page);
+        }
+    }
+
+    setStatus(tr("标签页已解锁"));
+}
+
+bool MainWindow::isTabLocked(QWidget *page) const
+{
+    if (!page)
+        return false;
+    const TabLockInfo info = m_tabLockState.value(page);
+    if (info.unlockedOverride)
+        return false;  // 单独解锁覆盖全局锁
+    if (m_globalLockAllTabs)
+        return true;
+    return info.locked;
+}
+
+void MainWindow::applyTabLock(QWidget *page, const TabLockInfo &info)
+{
+    if (!page)
+        return;
+
+    m_tabLockState[page] = info;
+
+    // 找到标签页中的终端控件
+    QTermWidget *term = qobject_cast<QTermWidget *>(page);
+    if (!term && page)
+        term = page->findChild<QTermWidget *>();
+
+    if (term) {
+        // 安装事件过滤器到 TerminalDisplay（实际接收键盘输入的控件）
+        if (Konsole::TerminalDisplay *td = term->terminalDisplay()) {
+            td->installEventFilter(this);
+        }
+        // 同时安装到 QTermWidget 本身（拦截鼠标事件等）
+        term->installEventFilter(this);
+    }
+
+    // 如果需要隐藏输出，添加完全不透明遮罩
+    if (info.hideOutput) {
+        if (m_tabOverlays.contains(page)) {
+            // 已有遮罩，更新位置
+            QWidget *overlay = m_tabOverlays.value(page);
+            if (term && term->terminalDisplay())
+                overlay->setGeometry(term->terminalDisplay()->rect());
+            else if (term)
+                overlay->setGeometry(term->rect());
+        } else {
+            // 创建新遮罩，完全不透明黑色背景
+            Konsole::TerminalDisplay *td = term ? term->terminalDisplay() : nullptr;
+            QWidget *overlayParent = td ? static_cast<QWidget *>(td) : (term ? static_cast<QWidget *>(term) : page);
+            auto *overlay = new QWidget(overlayParent);
+            overlay->setStyleSheet(QStringLiteral(
+                "background-color: black;"));
+            if (td)
+                overlay->setGeometry(td->rect());
+            else if (term)
+                overlay->setGeometry(term->rect());
+            else
+                overlay->setGeometry(overlayParent->rect());
+            overlay->raise();
+
+            auto *label = new QLabel(tr("🔒 标签页已锁定"), overlay);
+            label->setAlignment(Qt::AlignCenter);
+            label->setStyleSheet(QStringLiteral(
+                "color: white; font-size: 16px; font-weight: bold; background-color: transparent;"));
+
+            auto *labelLayout = new QVBoxLayout(overlay);
+            labelLayout->addWidget(label);
+
+            overlay->show();
+            overlay->raise();
+            m_tabOverlays[page] = overlay;
+        }
+    }
+
+    // 更新标签标题显示锁定状态
+    for (QTabWidget *pane : allPanes()) {
+        const int idx = pane->indexOf(page);
+        if (idx >= 0) {
+            QString title = pane->tabText(idx);
+            // 去除可能已有的锁定前缀
+            if (title.startsWith(QStringLiteral("\u200B🔒 ")))
+                title = title.mid(3);
+            pane->setTabText(idx, QStringLiteral("\u200B🔒 ") + title);
+            break;
+        }
+    }
+}
+
+void MainWindow::removeTabLock(QWidget *page)
+{
+    if (!page)
+        return;
+
+    m_tabLockState.remove(page);
+
+    // 找到标签页中的终端控件并移除事件过滤器
+    QTermWidget *term = qobject_cast<QTermWidget *>(page);
+    if (!term && page)
+        term = page->findChild<QTermWidget *>();
+
+    if (term) {
+        // 从 TerminalDisplay 移除事件过滤器
+        if (Konsole::TerminalDisplay *td = term->terminalDisplay()) {
+            td->removeEventFilter(this);
+        }
+        term->removeEventFilter(this);
+    }
+
+    // 移除遮罩
+    if (m_tabOverlays.contains(page)) {
+        QWidget *overlay = m_tabOverlays.take(page);
+        overlay->deleteLater();
+    }
+
+    // 恢复标签标题（去除锁定前缀）
+    for (QTabWidget *pane : allPanes()) {
+        const int idx = pane->indexOf(page);
+        if (idx >= 0) {
+            QString title = pane->tabText(idx);
+            if (title.startsWith(QStringLiteral("\u200B🔒 ")))
+                title = title.mid(3);
+            pane->setTabText(idx, title);
+            break;
+        }
+    }
+}
+
+void MainWindow::updateTabLockState(QWidget *page, bool locked)
+{
+    if (locked) {
+        TabLockInfo info;
+        info.locked = true;
+        info.hideOutput = false;
+        applyTabLock(page, info);
+    } else {
+        removeTabLock(page);
+    }
+}
+
+// 事件过滤器：拦截锁定标签页的键盘/输入法/鼠标事件
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    // 拦截锁定标签页的所有输入事件
+    if (event->type() == QEvent::KeyPress ||
+        event->type() == QEvent::KeyRelease ||
+        event->type() == QEvent::InputMethod ||
+        event->type() == QEvent::MouseButtonPress ||
+        event->type() == QEvent::MouseButtonRelease ||
+        event->type() == QEvent::MouseButtonDblClick ||
+        event->type() == QEvent::MouseMove ||
+        event->type() == QEvent::Wheel ||
+        event->type() == QEvent::TouchBegin ||
+        event->type() == QEvent::ContextMenu ||
+        event->type() == QEvent::FocusIn ||
+        event->type() == QEvent::DragEnter ||
+        event->type() == QEvent::Drop) {
+        QWidget *widget = qobject_cast<QWidget *>(watched);
+        if (widget) {
+            // 向上遍历父控件链，找到顶层页面并检查锁定状态
+            QWidget *current = widget;
+            while (current) {
+                if (isTabLocked(current)) {
+                    return true;  // 拦截所有输入事件
+                }
+                // 如果到达 pane 级别就停止（避免误检 MainWindow）
+                if (qobject_cast<QTabWidget *>(current))
+                    break;
+                current = current->parentWidget();
+            }
+        }
+    }
+
+    // 当 TerminalDisplay 或 QTermWidget 调整大小时，更新遮罩几何
+    if (event->type() == QEvent::Resize) {
+        QWidget *widget = qobject_cast<QWidget *>(watched);
+        if (widget) {
+            // 查找该 widget 对应的锁定标签页
+            QWidget *current = widget;
+            while (current) {
+                if (m_tabOverlays.contains(current)) {
+                    QWidget *overlay = m_tabOverlays.value(current);
+                    if (Konsole::TerminalDisplay *td = qobject_cast<Konsole::TerminalDisplay *>(widget)) {
+                        overlay->setGeometry(td->rect());
+                    }
+                    break;
+                }
+                if (qobject_cast<QTabWidget *>(current))
+                    break;
+                current = current->parentWidget();
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }
 
 // 把标签拆到一个新建的相邻分屏。对应Python: ui/ 拖拽分屏逻辑（简化为菜单驱动）
@@ -2704,6 +3200,16 @@ QTabWidget *MainWindow::paneOf(QWidget *page) const
             return pane;
     }
     return nullptr;
+}
+
+QTermWidget *MainWindow::findTerminalWidget(QWidget *page) const
+{
+    if (!page)
+        return nullptr;
+    QTermWidget *term = qobject_cast<QTermWidget *>(page);
+    if (!term)
+        term = page->findChild<QTermWidget *>();
+    return term;
 }
 
 // 新标签页的落点：当前活动 pane（无则首个 pane）。

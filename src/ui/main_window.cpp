@@ -3126,10 +3126,13 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
         setTabConnected(tab, true);
         // 连接成功 → 把会话的 SFTP 浏览器挂到左侧面板（reparent 到 stack）。
         // 对应Python: on_ssh_connected 后左侧 treeWidget 展示远程文件树
-        if (SftpBrowserWidget *browser = tab->sftpBrowser()) {
-            if (m_browserStack->indexOf(browser) < 0) {
-                m_browserStack->addWidget(browser);
-                m_tabBrowsers.insert(tab, browser);
+        // enableSftp 关闭（老设备无 SFTP 子系统）时不挂左栏，避免出现卡住的空面板。
+        if (device.enableSftp) {
+            if (SftpBrowserWidget *browser = tab->sftpBrowser()) {
+                if (m_browserStack->indexOf(browser) < 0) {
+                    m_browserStack->addWidget(browser);
+                    m_tabBrowsers.insert(tab, browser);
+                }
             }
         }
         updateLeftPanel();

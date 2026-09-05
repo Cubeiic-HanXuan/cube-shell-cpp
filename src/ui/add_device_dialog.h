@@ -147,6 +147,11 @@ private:
     // 只有用户已经在用 agent 时才有意义。
     QCheckBox *m_agentForward = nullptr;
 
+    // SSH 增强开关（仅 SSH 可见）。目录追踪 = 连接后注入 OSC7 目录追踪 hook；
+    // SFTP 开关 = 连接后是否挂接左栏 SFTP 面板。受限/无 SFTP 的老设备关闭它。
+    QCheckBox *m_dirTracking = nullptr;
+    QCheckBox *m_sftpToggle = nullptr;
+
     // 端口框里当前放的是哪个协议的默认值。切协议时据此判断"用户没改过端口"，
     // 从而可以安全地换成新协议的默认端口（用户手填过的端口不动）。
     QString m_portDefaultFor;

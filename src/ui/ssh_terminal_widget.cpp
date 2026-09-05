@@ -393,7 +393,10 @@ void SshTerminalWidget::startConnect(const QString &password)
         // 含 __cs_osc7 的那一行，readline 重绘（\r + 提示符 + 历史 + \e[K，
         // 不带换行）显示层无法在不破坏重绘的前提下过滤——这正是上/下键显示
         // 异常的根因，必须让它根本不进历史。
-        client->writeChannel(SshBridge::shellHookCommand());
+        // 目录追踪开关：受限的/不兼容的远端 shell（如 rbash、缺 awk/hostname
+        // 的网络设备）执行该 hook 会刷一屏 "command not found"，关闭则跳过注入。
+        if (self->m_device.directoryTracking)
+            client->writeChannel(SshBridge::shellHookCommand());
 
         QMetaObject::invokeMethod(self, [self, client]() {
             if (!self)

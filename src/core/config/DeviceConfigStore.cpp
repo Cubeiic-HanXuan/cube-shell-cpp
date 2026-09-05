@@ -468,6 +468,10 @@ QJsonArray DeviceConfigStore::toJsonArray(bool withSecrets, bool withIds) const
         o[QStringLiteral("telnetNegotiate")] = e.telnetNegotiate;
         o[QStringLiteral("termType")]        = e.termType;
         o[QStringLiteral("autoLogin")]       = e.autoLogin;
+        // SSH 增强开关（新增 per-device 布尔；非 SSH 条目也一并写出，保持 IDE
+        // 与 JSON 结构一致的既有风格）。
+        o[QStringLiteral("directoryTracking")] = e.directoryTracking;
+        o[QStringLiteral("enableSftp")]        = e.enableSftp;
         // 代理字段（平铺成 proxyType/proxyHost/…，见 ProxyConfig::writeJson）。
         //
         // 代理口令**任何情况下都不写进 JSON**，包括 withSecrets 为真的迁移窗口期：
@@ -574,6 +578,10 @@ bool DeviceConfigStore::loadJson(const QString &jsonPath, QString *errorOut)
         e.termType = termType.isEmpty() ? QStringLiteral("xterm-256color") : termType;
         // autoLogin 缺键回落 false：自动送密码是需要用户显式开启的行为。
         e.autoLogin = o[QStringLiteral("autoLogin")].toBool(false);
+        // SSH 增强开关。缺键回落 true：目录追踪与 SFTP 都是默认开启的行为，
+        // 缺键回落成 false 会让已保存设备表现得和新建的不一样，故默认开启。
+        e.directoryTracking = o[QStringLiteral("directoryTracking")].toBool(true);
+        e.enableSftp        = o[QStringLiteral("enableSftp")].toBool(true);
         // 代理字段。旧 devices.json 里这些键全都不存在 → fromJson 给出
         // type == None，即直连，行为与加代理功能之前逐字节一致。
         // proxyPassword 键不存在也不会被读（口令只在钥匙串里）。

@@ -169,6 +169,20 @@ AddDeviceDialog::AddDeviceDialog(QWidget *parent)
     // 类型切换会改变行数，跟着重算对话框高度。
     connect(m_proxy, &ProxySettingsWidget::typeChanged, this,
             &AddDeviceDialog::refitHeight);
+
+    // SSH 增强开关（仅 SSH 可见，见 onProtocolChanged）。老设备两个都建议关闭：
+    // 受限 shell（rbash）跑目录追踪 hook 会刷 "command not found"；没有 SFTP
+    // 子系统的设备挂左栏 SFTP 会卡住。
+    m_dirTracking = new QCheckBox(tr("目录追踪（OSC7，终端同步当前路径）"), this);
+    m_dirTracking->setChecked(true);
+    m_sftpToggle = new QCheckBox(tr("启用 SFTP（连接后在左侧显示远程文件）"), this);
+    m_sftpToggle->setChecked(true);
+    m_dirTracking->setToolTip(
+        tr("关闭后不注入 OSC7 目录追踪 hook，适合受限 shell / 老设备的连接。"));
+    m_sftpToggle->setToolTip(
+        tr("关闭后不挂接左侧 SFTP 面板，适合不支持 SFTP 子系统的设备。"));
+    form->addRow(QString(), m_dirTracking);
+    form->addRow(QString(), m_sftpToggle);
 #ifdef CUBESHELL_WITH_RDP
     // RDP 认证方式 + 域（仅 RDP 时可见）。
     // 对应Python: _inject_protocol_fields（cube-shell.py:6024-6033）
@@ -376,6 +390,10 @@ void AddDeviceDialog::setDevice(const DeviceEntry &e)
     netcombo::selectData(m_netNewline, int(ns.newlineMode));
     m_netLocalEcho->setChecked(ns.localEcho);
     m_netRxImplicitCr->setChecked(ns.rxImplicitCr);
+
+    // SSH 增强开关。
+    m_dirTracking->setChecked(e.directoryTracking);
+    m_sftpToggle->setChecked(e.enableSftp);
 
     m_name->setText(e.name);
     m_username->setText(e.username);
@@ -617,6 +635,8 @@ DeviceEntry AddDeviceDialog::device() const
         e.keyFile.clear();
     }
     e.agentForwarding = m_agentForward->isChecked();
+    e.directoryTracking = m_dirTracking->isChecked();
+    e.enableSftp        = m_sftpToggle->isChecked();
     // 代理只对 SSH 取值：上面 4 个提前 return（串口 / telnet+tcp / RDP）都不
     // 经过这里，于是那些协议的条目 proxy.type 恒为 None——与本轮"只接线 SSH"
     // 的范围一致（见 SshClient::setProxyConfig），也不会在 devices.json 里
@@ -711,6 +731,8 @@ void AddDeviceDialog::onProtocolChanged(int /*index*/)
     // 代理只有 SSH 需要：本轮只给 SSH 接线（Telnet/TCP 走 TcpClient，是另一条
     // 建连路径）。给 RDP/串口显示一个连接期不会被读的代理配置，比不显示更糟。
     m_form->setRowVisible(m_proxy, isSsh);
+    m_form->setRowVisible(m_dirTracking, isSsh);
+    m_form->setRowVisible(m_sftpToggle, isSsh);
     if (!isSsh)
         m_authMethod->setCurrentIndex(0);
     m_authStack->setCurrentIndex(isSsh ? m_authMethod->currentIndex() : 0);

@@ -123,6 +123,16 @@ struct DeviceEntry {
     // 准确说明而不是抛 libssh2 原始错误（见 SftpBrowserWidget::setBastionProxied）。
     bool viaBastion = false;
 
+    // SSH 增强开关（仅 protocol == ssh 时生效；serial/telnet/tcp/rdp 不读）。
+    //
+    // directoryTracking：连接后是否注入 OSC7 目录追踪 shell hook。受限的
+    // 老设备（如 rbash、缺 awk/hostname 的网络设备）执行该 hook 会刷出一串
+    // "command not found"，关了它即可静默。
+    bool directoryTracking = true;
+    // enableSftp：连接后是否挂接左栏 SFTP 面板。不提供 SFTP 子系统的老设备
+    // 一挂就卡住/报错，关了则完全不起 SFTP 会话。
+    bool enableSftp = true;
+
     bool isRdp() const { return protocol == QLatin1String("rdp"); }
     bool isSerial() const { return protocol == QLatin1String("serial"); }
     bool isTcp() const { return protocol == QLatin1String("tcp"); }

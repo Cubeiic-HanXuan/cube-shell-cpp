@@ -45,6 +45,14 @@ set(UI_SOURCES
     editors/TextEditor.cpp
 )
 
+# macOS ⌃+Tab 原生捕获（NSEvent 本地监视器），Objective-C++。
+# 为什么必须原生：macOS 菜单栏键盘导航会在系统层截走 ⌃+Tab 并剥掉 ⌃ 修饰符，
+# Qt 侧（QShortcut/QAction/事件过滤）永远拿不到带 ⌃ 的按键。
+if(APPLE)
+    enable_language(OBJCXX)
+    list(APPEND UI_SOURCES platform/TabShortcutMonitor_mac.mm)
+endif()
+
 # Docker/内网穿透相关对话框与编辑器：后端 DockerManager/FrpManager 在
 # CUBESHELL_WITH_LOCALPROC=OFF（鸿蒙沙箱禁止 exec）时不编译，UI 同步摘除。
 # （TunnelConfigWidget 保留：主体走 TunnelPool/SSH 端口转发，frp 仅作可选

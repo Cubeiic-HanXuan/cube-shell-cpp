@@ -37,6 +37,9 @@
 #include <utility>
 
 #include "add_device_dialog.h"
+#ifdef Q_OS_MACOS
+#include "platform/TabShortcutMonitor.h"
+#endif
 #include "device_list_widget.h"
 #include "local_file_browser_widget.h"
 #include "sftp_browser_widget.h"
@@ -227,6 +230,10 @@ MainWindow::~MainWindow()
     // 置位析构标志：~QWidget 删子对象时各 tab 的 destroyed lambda 会检查它，
     // 避免在 hash 销毁中状态下访问 m_aiAgents（退出时 hash 随本对象整体销毁）。
     m_destroying = true;
+#ifdef Q_OS_MACOS
+    // 移除 ⌃+Tab 本地事件监视器，避免回调悬空。
+    removeMacTabShortcutMonitor();
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -677,9 +684,18 @@ void MainWindow::setupMenus()
     closeTab->setShortcut(QKeySequence(QStringLiteral("Ctrl+W")));
     termMenu->addSeparator();
     QAction *next = termMenu->addAction(tr("下一个标签页"), this, &MainWindow::nextTab);
-    next->setShortcut(QKeySequence(QStringLiteral("Ctrl+Tab")));
     QAction *prev = termMenu->addAction(tr("上一个标签页"), this, &MainWindow::prevTab);
+#ifndef Q_OS_MACOS
+    // Windows/Linux：菜单 QAction 快捷键即可正常触发。
+    next->setShortcut(QKeySequence(QStringLiteral("Ctrl+Tab")));
     prev->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+Tab")));
+#else
+    // macOS：若把 ⌃+Tab 设成菜单 action 快捷键，会被原生菜单栏键盘导航抢先接走
+    // 并闪一下不切换。因此这里不设 action 快捷键，改用原生 NSEvent 监视器捕获
+    // （见 setupShortcuts 里的 installMacTabShortcutMonitor），且菜单项不显示按键提示。
+    next->setShortcut(QKeySequence());
+    prev->setShortcut(QKeySequence());
+#endif
 
     // --- 工具 ---
     QMenu *toolsMenu = menuBar()->addMenu(tr("工具"));
@@ -876,6 +892,33 @@ static QString formatSpeed(double speed)
 void MainWindow::setupShortcuts()
 {
     // Ctrl+T/W/Tab 等已绑定在菜单 QAction 上（见 setupMenus），此处无需重复。
+
+    // Ctrl+1..Ctrl+9 / Ctrl+0：跳到第 1~10 个标签页。
+    // Qt 的 "Ctrl" 字符串在 macOS 上自动映射成 ⌘（Command）键、其余平台映射成
+    // Ctrl，因此同一条即满足"macOS 用 Command+数字、其他系统按惯例用 Ctrl+数字"。
+    // Ctrl+1 → 标签1(下标0)……Ctrl+9 → 标签9(下标8)，Ctrl+0 → 标签10(下标9)。
+    // index 超出当前标签数时静默忽略。
+    for (int n = 0; n <= 9; ++n) {
+        const int tabIndex = (n == 0) ? 9 : n - 1;
+        auto *sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+%1").arg(n)), this);
+        connect(sc, &QShortcut::activated, this, [this, tabIndex]() {
+            QTabWidget *tabs = activeTabWidget();
+            if (tabs && tabIndex < tabs->count())
+                tabs->setCurrentIndex(tabIndex);
+        });
+    }
+
+#ifdef Q_OS_MACOS
+    // ⌃+Tab / ⌃⇧+Tab：macOS 菜单栏键盘导航会在系统层截走 ⌃+Tab 并剥掉 ⌃ 修饰符，
+    // Qt 的 QShortcut/QAction 永远拿不到带 ⌃ 的按键（日志已实证：到达应用的是
+    // mods=0x0 的裸 Tab）。故用原生 NSEvent 本地监视器在系统导航之前捕获。
+    installMacTabShortcutMonitor([this](bool backward) {
+        if (backward)
+            prevTab();
+        else
+            nextTab();
+    });
+#endif
 
     // 片段按钮栏显隐持久化（QSettings）；setupToolbar 已建栏，这里补可见性与快捷键。
     m_snippetBarVisible =

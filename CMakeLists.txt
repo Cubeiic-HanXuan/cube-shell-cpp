@@ -196,7 +196,14 @@ if(CUBESHELL_WITH_SSH)
         set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
         find_package(OpenSSL REQUIRED)
+        # 老旧设备(OpenSSH < 7 / 老交换机·路由器等网络设备)只提供 DSA 主机密钥
+        # (ssh-dss)。libssh2 1.11.1 默认把 DSA 关掉了,导致这些设备 KEX 协商不出
+        # 共同主机密钥算法,握手直接报 "SSH handshake failed:
+        # Unable to exchange encryption keys"。这里显式开启 DSA 支持。
+        # 用 target_compile_definitions 只影响 libssh2_static 这一个库,不改全局
+        # CMAKE_C_FLAGS,不会污染本项目其余目标。
         FetchContent_MakeAvailable(libssh2)
+        target_compile_definitions(libssh2_static PRIVATE LIBSSH2_DSA_ENABLE)
         set(LIBSSH2_FOUND TRUE)
         set(LIBSSH2_INCLUDE_DIRS ${libssh2_SOURCE_DIR}/include)
         set(LIBSSH2_LIBRARIES libssh2_static OpenSSL::SSL OpenSSL::Crypto)

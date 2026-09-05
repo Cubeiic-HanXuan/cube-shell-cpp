@@ -893,6 +893,21 @@ void MainWindow::setupShortcuts()
 {
     // Ctrl+T/W/Tab 等已绑定在菜单 QAction 上（见 setupMenus），此处无需重复。
 
+    // Ctrl+1..Ctrl+9 / Ctrl+0：跳到第 1~10 个标签页。
+    // Qt 的 "Ctrl" 字符串在 macOS 上自动映射成 ⌘（Command）键、其余平台映射成
+    // Ctrl，因此同一条即满足"macOS 用 Command+数字、其他系统按惯例用 Ctrl+数字"。
+    // Ctrl+1 → 标签1(下标0)……Ctrl+9 → 标签9(下标8)，Ctrl+0 → 标签10(下标9)。
+    // index 超出当前标签数时静默忽略。
+    for (int n = 0; n <= 9; ++n) {
+        const int tabIndex = (n == 0) ? 9 : n - 1;
+        auto *sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+%1").arg(n)), this);
+        connect(sc, &QShortcut::activated, this, [this, tabIndex]() {
+            QTabWidget *tabs = activeTabWidget();
+            if (tabs && tabIndex < tabs->count())
+                tabs->setCurrentIndex(tabIndex);
+        });
+    }
+
 #ifdef Q_OS_MACOS
     // ⌃+Tab / ⌃⇧+Tab：macOS 菜单栏键盘导航会在系统层截走 ⌃+Tab 并剥掉 ⌃ 修饰符，
     // Qt 的 QShortcut/QAction 永远拿不到带 ⌃ 的按键（日志已实证：到达应用的是

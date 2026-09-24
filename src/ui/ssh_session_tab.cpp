@@ -4,6 +4,7 @@
 
 #include "sftp_browser_widget.h"
 #include "ssh_terminal_widget.h"
+#include "qtermwidget.h"
 #include "ssh/RemoteMonitor.h"
 #include "ssh/SshClient.h"
 #include "ssh/SshKeepaliveTimer.h"
@@ -24,6 +25,17 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
     // 就 setClient() → 触发首次 loadPath，而首次加载正是要靠这个标记判断
     // "代理端不提供文件浏览"的那一次。晚一步设置就赶不上。
     m_sftp->setBastionProxied(device.viaBastion);
+    // SFTP 面板「执行脚本」：命令送进本 tab 自己的终端。
+    // 刻意不走 MainWindow::sendCommandToActiveTerminal 的"当前活动终端"语义——
+    // 面板与终端同属一个会话，脚本必须跑在它所属的那台主机上；分屏/多标签下
+    // 用户可能正看着别的会话。
+    // 换行符沿用 AI 命令下发到 SSH 终端的做法（main_window.cpp 无条件 "\n"）：
+    // 那里的 Q_OS_WIN + "\r" 分支是给本地 ConPTY 终端的，远端 pty 收 "\n" 即回车。
+    connect(m_sftp, &SftpBrowserWidget::terminalCommandRequested, this,
+            [this](const QString &command) {
+                if (m_term && m_term->terminal())
+                    m_term->terminal()->sendText(command + QStringLiteral("\n"));
+            });
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);

@@ -191,6 +191,82 @@ static void testCollectUploadTasks()
     CHECK(tasks.size() == 3);
 }
 
+// 「执行脚本」菜单项的显示判定：只认扩展名白名单。
+// 这条真值表就是那一项的安全边界——放宽成"有可执行位就算脚本"，用户右键
+// /usr/bin 下任何二进制都会看到"执行脚本"，误点即在远端把它跑起来。
+static void testScriptDetection()
+{
+    using W = SftpBrowserWidget;
+
+    // 白名单命中（扩展名大小写不敏感）
+    CHECK(W::looksLikeScript(QStringLiteral("deploy.sh"), false));
+    CHECK(W::looksLikeScript(QStringLiteral("backup.py"), false));
+    CHECK(W::looksLikeScript(QStringLiteral("run.BASH"), false));
+    CHECK(W::looksLikeScript(QStringLiteral("x.ZSH"), false));
+    CHECK(W::looksLikeScript(QStringLiteral("hook.pl"), false));
+    CHECK(W::looksLikeScript(QStringLiteral("app.js"), false));
+    // 多点文件名取最后一段扩展名
+    CHECK(W::looksLikeScript(QStringLiteral("release.v2.sh"), false));
+
+    // 目录永不命中，哪怕名字带脚本后缀（scripts.sh/ 这种目录真实存在）
+    CHECK(!W::looksLikeScript(QStringLiteral("scripts.sh"), true));
+
+    // 无扩展名不命中：可执行位不参与判定，编译出来的二进制（deploy、ls）
+    // 不该冒出"执行脚本"。
+    CHECK(!W::looksLikeScript(QStringLiteral("deploy"), false));
+    CHECK(!W::looksLikeScript(QStringLiteral("ls"), false));
+
+    // 白名单外的扩展名
+    CHECK(!W::looksLikeScript(QStringLiteral("notes.txt"), false));
+    CHECK(!W::looksLikeScript(QStringLiteral("libfoo.so"), false));
+    CHECK(!W::looksLikeScript(QStringLiteral("app.exe"), false));
+    CHECK(!W::looksLikeScript(QStringLiteral("a.sh.bak"), false));
+
+    // 隐藏文件的前导点不是扩展名分隔符：".sh" 是个没有扩展名的文件
+    CHECK(!W::looksLikeScript(QStringLiteral(".sh"), false));
+    CHECK(!W::looksLikeScript(QStringLiteral(".bashrc"), false));
+    // 以点结尾 / 空名
+    CHECK(!W::looksLikeScript(QStringLiteral("run."), false));
+    CHECK(!W::looksLikeScript(QString(), false));
+}
+
+// 脚本 → 终端命令行：有可执行位直跑（走 shebang），否则按扩展名补解释器。
+static void testScriptRunCommand()
+{
+    using W = SftpBrowserWidget;
+
+    // 置了可执行位 → 只有路径，解释器交给脚本自己的 shebang
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/app/deploy.sh"), 0755, false)
+          == QStringLiteral("/opt/app/deploy.sh"));
+    // 只有 others 的 x 位也算（登录用户可能正是 other）
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/a.py"), 0001, false)
+          == QStringLiteral("/opt/a.py"));
+
+    // 没有可执行位 → 补解释器，避免 "Permission denied"
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/app/deploy.sh"), 0644, false)
+          == QStringLiteral("bash /opt/app/deploy.sh"));
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/app/backup.py"), 0644, false)
+          == QStringLiteral("python3 /opt/app/backup.py"));
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/x.rb"), 0400, false)
+          == QStringLiteral("ruby /opt/x.rb"));
+
+    // 符号链接不直跑：链接自身权限位恒为 rwxrwxrwx，说明不了目标能不能执行
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/link.sh"), 0777, true)
+          == QStringLiteral("bash /opt/link.sh"));
+
+    // 路径转义（FileUtil::shellQuote / shlex.quote 语义：安全字符原样，
+    // 含空格或单引号才整体包裹）
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/my app/a b.sh"), 0644, false)
+          == QStringLiteral("bash '/opt/my app/a b.sh'"));
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/my app/run.sh"), 0755, false)
+          == QStringLiteral("'/opt/my app/run.sh'"));
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/it's/a.sh"), 0644, false)
+          == QStringLiteral("bash '/opt/it'\"'\"'s/a.sh'"));
+    // 分号/反引号等注入字符也被包进单引号，不会被远端 shell 当成命令分隔
+    CHECK(W::scriptRunCommand(QStringLiteral("/opt/a;rm -rf x.sh"), 0644, false)
+          == QStringLiteral("bash '/opt/a;rm -rf x.sh'"));
+}
+
 int main(int argc, char *argv[])
 {
     // 判定函数是静态纯函数，不建任何 widget，因此用 QCoreApplication 就够
@@ -204,6 +280,8 @@ int main(int argc, char *argv[])
     testDownloadTargetPath();
     testDropTargetDir();
     testCollectUploadTasks();
+    testScriptDetection();
+    testScriptRunCommand();
     qInfo() << (failures == 0 ? "ALL PASS" : "FAILURES") << failures;
     return failures == 0 ? 0 : 1;
 }

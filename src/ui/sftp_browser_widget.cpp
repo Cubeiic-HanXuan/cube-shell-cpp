@@ -42,6 +42,7 @@
 #include "ssh/SshClient.h"
 #include "ssh/CommandExecutor.h"
 #include "ssh/SftpUploaderCore.h"
+#include "util/FileUtil.h"
 #include "dialogs/CompressDialog.h"
 #include "editors/TextEditor.h"
 #include "file_browser_common.h"
@@ -56,6 +57,58 @@ static constexpr int kWorkerJoinTimeoutMs = 5000;
 // 条目角色布局（kPathRole/kIsDirRole/kIsUpRole/kModeRole/kSymlinkTargetRole
 // 及排序用的 kSizeRole/kMtimeRole）统一由 file_browser_common.h 提供，
 // 与本地文件面板共用同一套，便于 sortFileTree/applyFileFilter 直接读。
+
+// 脚本扩展名 → 解释器（没有可执行位时补在命令前）。
+// 这张表同时就是右键菜单「执行脚本」的显示白名单：命中即为脚本文件，一处维护。
+// 只收 POSIX 侧脚本类型：远端 SFTP 路径按 '/' 拼接，Windows 远端的 .bat/.ps1
+// 连路径形态都不一样，硬塞进来只会拼出跑不了的命令。
+static const QHash<QString, QString> &scriptInterpreters()
+{
+    static const QHash<QString, QString> map = {
+        {QStringLiteral("sh"), QStringLiteral("bash")},
+        {QStringLiteral("bash"), QStringLiteral("bash")},
+        {QStringLiteral("zsh"), QStringLiteral("zsh")},
+        {QStringLiteral("ksh"), QStringLiteral("ksh")},
+        {QStringLiteral("fish"), QStringLiteral("fish")},
+        {QStringLiteral("py"), QStringLiteral("python3")},
+        {QStringLiteral("pl"), QStringLiteral("perl")},
+        {QStringLiteral("rb"), QStringLiteral("ruby")},
+        {QStringLiteral("lua"), QStringLiteral("lua")},
+        {QStringLiteral("php"), QStringLiteral("php")},
+        {QStringLiteral("js"), QStringLiteral("node")},
+    };
+    return map;
+}
+
+// 文件名 → 扩展名（小写，不含点）；无扩展名或以点结尾返回空串。
+// 隐藏文件的前导点不算扩展名分隔符（".sh" 是个没有扩展名的文件，不是脚本）。
+static QString scriptExtension(const QString &name)
+{
+    const int dot = name.lastIndexOf(QLatin1Char('.'));
+    if (dot <= 0 || dot == name.size() - 1)
+        return QString();
+    return name.mid(dot + 1).toLower();
+}
+
+bool SftpBrowserWidget::looksLikeScript(const QString &name, bool isDir)
+{
+    if (isDir || name.isEmpty())
+        return false;
+    return scriptInterpreters().contains(scriptExtension(name));
+}
+
+QString SftpBrowserWidget::scriptRunCommand(const QString &path, quint32 perm, bool isSymlink)
+{
+    const QString quoted = FileUtil::shellQuote(path);
+    // 符号链接不走"直跑"：链接自身的权限位恒为 rwxrwxrwx，说明不了目标能不能
+    // 执行，补上解释器才不会在目标没有 x 位时撞 "Permission denied"。
+    if (!isSymlink && (perm & 0111) != 0)
+        return quoted;
+    const QString interp =
+        scriptInterpreters().value(scriptExtension(path.section(QLatin1Char('/'), -1)));
+    // 白名单外理论到不了这里（菜单项不显示），兜底直跑而不是拼出半条命令。
+    return interp.isEmpty() ? quoted : (interp + QLatin1Char(' ') + quoted);
+}
 
 // 文件大小人类可读格式。对应Python: function/util.py::format_file_size
 static QString formatFileSize(qint64 bytes)
@@ -1204,11 +1257,12 @@ void SftpBrowserWidget::showContextMenu(const QPoint &pos)
     // ExtendedSelection 下等价于 ClearAndSelect，会把批量选中的文件全部取消。
     // 点在已选中项上时用 NoUpdate 只移动 current、保留整个选区（与系统文件
     // 管理器一致）；点在未选中项上才重设选择为该项。
-    if (QTreeWidgetItem *item = m_tree->itemAt(pos)) {
-        if (item->isSelected())
-            m_tree->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
+    QTreeWidgetItem *clicked = m_tree->itemAt(pos);
+    if (clicked) {
+        if (clicked->isSelected())
+            m_tree->setCurrentItem(clicked, 0, QItemSelectionModel::NoUpdate);
         else
-            m_tree->setCurrentItem(item);
+            m_tree->setCurrentItem(clicked);
     }
 
     QMenu menu(this);
@@ -1227,6 +1281,13 @@ void SftpBrowserWidget::showContextMenu(const QPoint &pos)
     addItem(QStringLiteral(":/Download.png"), tr("下载文件"), &SftpBrowserWidget::downloadSelected);
     addItem(QStringLiteral(":/Upload.png"), tr("上传文件"), &SftpBrowserWidget::uploadFiles);
     addItem(QStringLiteral(":/Edit.png"), tr("编辑文本"), &SftpBrowserWidget::editSelected);
+    // 「执行脚本」只在右键点到的那个条目是脚本文件时出现（目录、普通文件、
+    // ".." 行都不显示）。刻意不放在首项：首项是"下载文件"，用户对菜单第一项
+    // 有肌肉记忆，把"真的会在远端跑起来"的动作摆那儿容易误触。
+    if (clicked && !clicked->data(0, kIsUpRole).toBool()
+        && looksLikeScript(clicked->text(0), clicked->data(0, kIsDirRole).toBool()))
+        addItem(QStringLiteral(":/icons8-exec-48.png"), tr("执行脚本"),
+                &SftpBrowserWidget::runScriptSelected);
     addItem(QStringLiteral(":/createdirector.png"), tr("创建文件夹"), &SftpBrowserWidget::mkdir);
     addItem(QStringLiteral(":/createfile.png"), tr("创建文件"), &SftpBrowserWidget::createFileHere);
     addItem(QStringLiteral(":/refresh.png"), tr("刷新"), &SftpBrowserWidget::refresh);
@@ -1347,6 +1408,28 @@ void SftpBrowserWidget::decompressSelected()
         }, Qt::QueuedConnection);
     });
     startWorker(worker);
+}
+
+// 「执行脚本」：拼出命令行交给本会话的终端执行（接线见 SshSessionTab）。
+// 与解压/压缩走 CommandExecutor 不同——脚本可能跑很久、可能要交互、可能要
+// Ctrl-C，这些只有在真终端里才成立，所以这里只负责把命令递出去。
+void SftpBrowserWidget::runScriptSelected()
+{
+    QTreeWidgetItem *item = m_tree->currentItem();
+    const QString path = selectedRemotePath();
+    if (!item || path.isEmpty())
+        return;
+    // 菜单项本就只在脚本上显示，这里再校验一次：防守住后续可能新增的入口
+    // （快捷键、工具栏）把非脚本也送去执行。
+    if (!looksLikeScript(item->text(0), item->data(0, kIsDirRole).toBool()))
+        return;
+    // 符号链接判定取权限列首字符：kModeRole 只存了 mode & 07777，类型位没留下；
+    // 权限列由 permissionText() 生成（优先用远端 ls 的 longname 首列），
+    // 是本面板对条目类型的既有事实来源。
+    const bool isSymlink = item->text(3).startsWith(QLatin1Char('l'));
+    const QString cmd = scriptRunCommand(path, item->data(0, kModeRole).toUInt(), isSymlink);
+    emit terminalCommandRequested(cmd);
+    setStatusText(tr("已在终端执行：%1").arg(cmd));
 }
 
 // 对应Python: cube-shell.py::rename_file

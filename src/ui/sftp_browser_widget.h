@@ -84,10 +84,27 @@ public:
     static QList<QPair<QString, QString>> collectUploadTasks(const QString &targetDir,
                                                              const QStringList &localPaths);
 
+    // 远端条目是否为脚本文件：右键菜单据此决定是否显示「执行脚本」。
+    // 判定只看扩展名白名单（见 .cpp 的 scriptInterpreters 表）——这一项点下去
+    // 会真的在远端跑起来，不能让它在目录、普通文件、二进制上都冒出来。
+    // 抽成静态纯函数便于单测。
+    static bool looksLikeScript(const QString &name, bool isDir);
+    // 脚本 → 送进远端终端执行的命令行。
+    // 置了任一可执行位（且非符号链接）就直接跑绝对路径，由 shebang 决定解释器，
+    // 与用户自己敲 ./script 完全一致；否则按扩展名补 bash/python3 等解释器，
+    // 免得撞 "Permission denied"。路径经 FileUtil::shellQuote 转义。
+    // 抽成静态纯函数便于单测。
+    static QString scriptRunCommand(const QString &path, quint32 perm, bool isSymlink);
+
     // 在路径栏左侧显示/隐藏分屏序号徽章（多分屏时避免混淆 SFTP 目录归属）。
     // paneNumber: 当前分屏序号（1-based）；totalPanes: 总分屏数（≤1 时隐藏徽章）；
     // tabTitle: 用于 tooltip 的标签名，展示完整的“分屏 N · 标签名”。
     void setPaneIndicator(int paneNumber, int totalPanes, const QString &tabTitle);
+
+signals:
+    // 「执行脚本」：命令行交给本面板所属会话的终端执行（接线见 SshSessionTab）。
+    // 刻意不自己跑 CommandExecutor：命令与输出留在终端里才看得见、Ctrl-C 停得下。
+    void terminalCommandRequested(const QString &command);
 
 protected:
     // 宽度变化后按新宽度重新截断状态栏文本。
@@ -124,6 +141,8 @@ private slots:
     void showPermissions();
     // 对应Python: cube-shell.py::unzip（DecompressThread）
     void decompressSelected();
+    // 「执行脚本」：把 scriptRunCommand 拼出的命令行发到本会话终端执行。
+    void runScriptSelected();
 
 private:
     // 目录加载的触发来源，决定失败时怎么表现。

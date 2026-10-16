@@ -3173,9 +3173,31 @@ void TerminalDisplay::_doDrag()
 
 bool TerminalDisplay::focusNextPrevChild(bool next)
 {
-    if (next)
-        return false; // 禁用 Tab 焦点导航
-    return QWidget::focusNextPrevChild(next);
+    // Tab 和 Shift+Tab 都必须留给终端，两个方向都要拒绝。
+    //
+    // Qt 的 QWidget::event() 在进 keyPressEvent 之前会先问焦点链：
+    //
+    //     if (!(k->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
+    //         if (k->key() == Qt::Key_Backtab
+    //             || (k->key() == Qt::Key_Tab && (k->modifiers() & Qt::ShiftModifier)))
+    //             res = focusNextPrevChild(false);
+    //         else if (k->key() == Qt::Key_Tab)
+    //             res = focusNextPrevChild(true);
+    //         if (res)
+    //             break;              // keyPressEvent 被整个跳过
+    //     }
+    //
+    // 早先这里只对正向 Tab 返回 false，反向仍转发给 QWidget 基类。只要窗口里还有
+    // 别的可聚焦控件（cube-shell 有标签栏、工具条、文件浏览器、搜索框……），
+    // QWidget::focusNextPrevChild(false) 就会找到落点、移动焦点并返回 true，
+    // Shift+Tab 于是被吃掉，终端收不到任何字节 —— Claude Code 靠 Backtab 的
+    // "\x1b[Z" 轮换 accept-edits / plan / auto 模式，Shift+Tab 因此失效。
+    // 正向 Tab 因为直接 return false 反而正常，这个不对称正是问题所在。
+    //
+    // Ctrl+Tab / Ctrl+Shift+Tab 不受影响：上面的分支只对无 Ctrl/Alt 的按键生效，
+    // 而 main_window 的切换标签页快捷键走 QShortcut，根本不经过这里。
+    Q_UNUSED(next);
+    return false;
 }
 
 } // namespace Konsole

@@ -15,6 +15,22 @@ target_link_libraries(qterm_smoke PRIVATE
     qtermwidget
 )
 
+# Shift+Tab（Backtab）必须到达远端：验证焦点链没有把该键吞掉。
+qt_add_executable(shift_tab_test
+    shift_tab_test.cpp
+)
+
+target_include_directories(shift_tab_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/qtermwidget
+)
+
+target_link_libraries(shift_tab_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    qtermwidget
+)
+
 # Pickle reader + device config store test.
 qt_add_executable(pickle_test
     pickle_test.cpp
@@ -663,6 +679,7 @@ endif()
 # CTest registration
 # ---------------------------------------------------------------------------
 add_test(NAME qterm_smoke COMMAND qterm_smoke)
+add_test(NAME shift_tab_test COMMAND shift_tab_test)
 add_test(NAME pickle_test COMMAND pickle_test)
 add_test(NAME config_store_test COMMAND config_store_test)
 add_test(NAME known_hosts_test COMMAND known_hosts_test)

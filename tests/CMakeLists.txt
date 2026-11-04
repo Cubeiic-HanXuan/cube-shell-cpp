@@ -391,9 +391,37 @@ target_link_libraries(kube_resource_parser_test PRIVATE
     cube_core
 )
 
+# NginxConfigParser 解析 / 抽取 / 生成测试（纯逻辑，无 nginx / 网络）。
+# 解析层无条件编译（纯数据层），测试也不带 LOCALPROC 门控。
+qt_add_executable(nginx_config_parser_test
+    nginx_config_parser_test.cpp
+)
+target_include_directories(nginx_config_parser_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(nginx_config_parser_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+
 # DockerManager static parse helpers + compose path rule test (pure logic,
 # no docker CLI / network)。DockerManager 本体在 CUBESHELL_WITH_LOCALPROC=OFF
 #（鸿蒙）时不编译，测试同步摘除。
+# NginxManager 纯逻辑测试（列表解析 / 命令拼装）。NginxManager 本体在
+# CUBESHELL_WITH_LOCALPROC=OFF（鸿蒙）时不编译，测试同步摘除。
+if(CUBESHELL_WITH_LOCALPROC)
+qt_add_executable(nginx_manager_test
+    nginx_manager_test.cpp
+)
+target_include_directories(nginx_manager_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+)
+target_link_libraries(nginx_manager_test PRIVATE
+    Qt6::Core
+    cube_core
+)
+endif()
+
 if(CUBESHELL_WITH_LOCALPROC)
 qt_add_executable(docker_manager_test
     docker_manager_test.cpp
@@ -476,6 +504,20 @@ target_link_libraries(sftp_browser_test PRIVATE
     cube_ui
     cube_core
 )
+
+# SFTP 重连：离屏生命周期回归 + 可选真实 sshd 的目录/上传/下载恢复。
+qt_add_executable(sftp_reconnect_test sftp_reconnect_test.cpp)
+target_include_directories(sftp_reconnect_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+)
+target_link_libraries(sftp_reconnect_test PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets cube_ui cube_core
+)
+add_test(NAME sftp_reconnect_test COMMAND sftp_reconnect_test)
+add_test(NAME sftp_reconnect_integration_test COMMAND sftp_reconnect_test --integration)
+set_tests_properties(sftp_reconnect_test PROPERTIES TIMEOUT 60)
+set_tests_properties(sftp_reconnect_integration_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 120)
 
 # 文件树筛选/排序共用逻辑（file_browser_common）纯函数单测，无显示环境。
 qt_add_executable(file_browser_test
@@ -696,9 +738,11 @@ add_test(NAME safety_checker_test COMMAND safety_checker_test)
 add_test(NAME sensitive_masker_test COMMAND sensitive_masker_test)
 add_test(NAME compose_yaml_test COMMAND compose_yaml_test)
 add_test(NAME kube_resource_parser_test COMMAND kube_resource_parser_test)
+add_test(NAME nginx_config_parser_test COMMAND nginx_config_parser_test)
 add_test(NAME connection_tester_test COMMAND connection_tester_test)
 if(CUBESHELL_WITH_LOCALPROC)
     add_test(NAME docker_manager_test COMMAND docker_manager_test)
+    add_test(NAME nginx_manager_test COMMAND nginx_manager_test)
     add_test(NAME frp_installer_test COMMAND frp_installer_test)
     add_test(NAME proxy_command_test COMMAND proxy_command_test)
 endif()

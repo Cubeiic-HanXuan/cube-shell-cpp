@@ -52,6 +52,7 @@
 #include "dialogs/DockerManagerDialog.h"
 #include "dialogs/DockerSoftDialog.h"
 #include "dialogs/KubeManagerDialog.h"
+#include "dialogs/NginxManagerDialog.h"
 #endif
 #include "dialogs/LinuxCommandsDialog.h"
 #include "dialogs/ProcessManagerDialog.h"
@@ -74,6 +75,7 @@
 #ifdef CUBESHELL_WITH_LOCALPROC
 #include "docker/DockerManager.h"
 #include "kube/KubeManager.h"
+#include "nginx/NginxManager.h"
 #include "dsh/DshPanel.h"
 #endif
 #include "hermes/HermesPanel.h"
@@ -798,6 +800,9 @@ void MainWindow::setupToolbar()
     // Kubernetes 管理同样由 kubectl CLI 子进程驱动（KubeManager）；鸿蒙摘除。
     addTool(QStringLiteral(":/icons8-kubernetes-48.png"), tr("Kubernetes"),
             tr("Kubernetes 集群管理"), &MainWindow::showKubeManager);
+    // Nginx 站点管理由 nginx CLI 子进程驱动（NginxManager）；鸿蒙摘除。
+    addTool(QStringLiteral(":/nginx.png"), tr("Nginx 管理"),
+            tr("Nginx 站点管理"), &MainWindow::showNginxManager);
 #endif
     addTool(QStringLiteral(":/tunnel-diode.png"), tr("SSH 隧道"),
             tr("SSH 隧道管理"), &MainWindow::showTunnelManager);
@@ -2081,6 +2086,11 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
         m_dockerManager->setRemoteExecutor(nullptr);
         m_dockerExecutor = nullptr;
     }
+    // 同理撤下该会话的 nginx executor。
+    if (m_nginxManager && m_nginxExecutor && m_nginxExecutor->parent() == w) {
+        m_nginxManager->setRemoteExecutor(nullptr);
+        m_nginxExecutor = nullptr;
+    }
 #endif
     // 进程管理对话框同样只引用不持有 executor，一并撤下。
     if (m_processExecutor && m_processExecutor->parent() == w) {
@@ -3170,6 +3180,10 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
             m_dockerManager->setRemoteExecutor(nullptr);
             m_dockerExecutor = nullptr;
         }
+        if (m_nginxManager && m_nginxExecutor && m_nginxExecutor->parent() == tab) {
+            m_nginxManager->setRemoteExecutor(nullptr);
+            m_nginxExecutor = nullptr;
+        }
 #endif
         // 进程管理对话框同理：撤下该会话的 executor，避免刷新到已断连接。
         if (m_processExecutor && m_processExecutor->parent() == tab) {
@@ -3941,6 +3955,121 @@ void MainWindow::showKubeManager()
     m_kubeManagerDialog->show();
     m_kubeManagerDialog->raise();
     m_kubeManagerDialog->activateWindow();
+}
+
+// ---------------------------------------------------------------------------
+// Nginx 站点管理（对应 docs/Nginx可视化管理实现方案.md §5.4）
+// ---------------------------------------------------------------------------
+
+// 配置目录按后端分别持久化（本机目录 vs 远端服务器目录），切后端自动换。
+static QString nginxConfDirKey(bool remote)
+{
+    return remote ? QStringLiteral("nginx/remote/confDir")
+                  : QStringLiteral("nginx/local/confDir");
+}
+
+// nginx 可执行文件路径同样按后端分别记忆（空 = 自动探测）。
+static QString nginxBinPathKey(bool remote)
+{
+    return remote ? QStringLiteral("nginx/remote/binPath")
+                  : QStringLiteral("nginx/local/binPath");
+}
+
+// 显示 Nginx 对话框前刷新后端上下文：懒建 NginxManager 并恢复持久化配置；
+// 仅在用户选择「SSH 会话」后端且有活动 SSH 会话时快照 executor
+// （objectName "nginxExecutor"，会话内复用），否则回「本机 nginx」。
+void MainWindow::ensureNginxManager()
+{
+    if (!m_nginxManager) {
+        m_nginxManager = new NginxManager(this);
+        QSettings settings;
+        m_nginxUseRemoteBackend =
+            settings.value(QStringLiteral("nginx/preferRemoteBackend"), false).toBool();
+    }
+
+    auto *session = qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
+    std::shared_ptr<SshClient> client;
+    if (session && session->terminal())
+        client = session->terminal()->sshClient();
+
+    if (client && m_nginxUseRemoteBackend) {
+        auto *executor = session->findChild<CommandExecutor *>(
+            QStringLiteral("nginxExecutor"));
+        if (!executor) {
+            executor = new CommandExecutor(client.get(), session);
+            executor->setObjectName(QStringLiteral("nginxExecutor"));
+        }
+        m_nginxExecutor = executor;
+        m_nginxManager->setRemoteExecutor(executor);
+        m_nginxManager->setRemoteUser(session->device().username);
+    } else {
+        // 无活动会话或选了本机：本次回退本机（不改写用户偏好，避免无会话时
+        // 打开对话框就把偏好永久 flip 成 false）。
+        m_nginxExecutor = nullptr;
+        m_nginxManager->setRemoteExecutor(nullptr);
+    }
+
+    const bool remoteActive = (m_nginxExecutor != nullptr);
+    m_nginxManager->setConfDir(
+        QSettings().value(nginxConfDirKey(remoteActive)).toString());
+    m_nginxManager->setNginxBin(
+        QSettings().value(nginxBinPathKey(remoteActive)).toString());
+
+    if (m_nginxManagerDialog) {
+        if (client) {
+            m_nginxManagerDialog->setRemoteBackendAvailable(
+                true, tr("SSH 会话 (%1@%2)")
+                          .arg(session->device().username, session->device().host));
+        } else {
+            m_nginxManagerDialog->setRemoteBackendAvailable(false, QString());
+        }
+        m_nginxManagerDialog->setBackendSelection(remoteActive);
+        m_nginxManagerDialog->setConfDirDisplay(m_nginxManager->confDir());
+    }
+}
+
+void MainWindow::onNginxBackendChanged(bool useRemote)
+{
+    m_nginxUseRemoteBackend = useRemote;
+    QSettings().setValue(QStringLiteral("nginx/preferRemoteBackend"), useRemote);
+    ensureNginxManager();
+    if (m_nginxManagerDialog)
+        m_nginxManagerDialog->refreshInfo();
+}
+
+void MainWindow::showNginxManager()
+{
+    if (!m_nginxManagerDialog) {
+        ensureNginxManager(); // manager 必须先建（持久化恢复在里面）
+        m_nginxManagerDialog = new NginxManagerDialog(m_nginxManager, this);
+        // systemctl status nginx / tail -f 等命令转发到当前终端（同 Docker/Kube）。
+        connect(m_nginxManagerDialog, &NginxManagerDialog::terminalCommandRequested,
+                this, &MainWindow::sendCommandToActiveTerminal);
+        connect(m_nginxManagerDialog, &NginxManagerDialog::backendChangeRequested,
+                this, &MainWindow::onNginxBackendChanged);
+        // 配置目录按当前生效后端持久化 + 立即生效。
+        connect(m_nginxManagerDialog, &NginxManagerDialog::confDirSelected,
+                this, [this](const QString &dir) {
+                    QSettings().setValue(
+                        nginxConfDirKey(m_nginxManager->isRemote()), dir);
+                    m_nginxManager->setConfDir(dir);
+                    m_nginxManagerDialog->setConfDirDisplay(m_nginxManager->confDir());
+                    m_nginxManagerDialog->refreshInfo();
+                });
+        // nginx 可执行文件路径（空 = 自动探测），按后端持久化 + 立即重探。
+        connect(m_nginxManagerDialog, &NginxManagerDialog::nginxBinarySelected,
+                this, [this](const QString &path) {
+                    QSettings().setValue(
+                        nginxBinPathKey(m_nginxManager->isRemote()), path);
+                    m_nginxManager->setNginxBin(path);
+                    m_nginxManagerDialog->refreshInfo();
+                });
+    }
+    ensureNginxManager(); // 每次显示前刷新后端上下文
+    m_nginxManagerDialog->refreshInfo();
+    m_nginxManagerDialog->show();
+    m_nginxManagerDialog->raise();
+    m_nginxManagerDialog->activateWindow();
 }
 
 // 对应Python: cube-shell.py::showNATDialog + _ensure_nat_dialog

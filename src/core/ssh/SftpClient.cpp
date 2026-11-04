@@ -198,6 +198,10 @@ static auto sftpStreamCall(QRecursiveMutex *lock, SshClient *client, Fn &&fn,
 
 bool SftpClient::open(SshError &error)
 {
+    if (m_teardown.load()) {
+        error.message = QStringLiteral("SFTP: connection is closing");
+        return false;
+    }
     if (m_sftp)
         return true;
     if (!m_client || !m_client->rawSession()) {
@@ -207,7 +211,7 @@ bool SftpClient::open(SshError &error)
     QMutexLocker<QRecursiveMutex> lock(&m_client->sessionLock());
     _LIBSSH2_SFTP *sftp = sftpRetryPtr(m_client, [&] {
         return libssh2_sftp_init(m_client->rawSession());
-    });
+    }, &m_teardown);
     if (!sftp) {
         fillSftpError(nullptr, m_client, error, QStringLiteral("libssh2_sftp_init failed"));
         return false;
@@ -218,7 +222,7 @@ bool SftpClient::open(SshError &error)
 
 bool SftpClient::ensureOpen(SshError &error)
 {
-    return m_sftp ? true : open(error);
+    return open(error);
 }
 
 void SftpClient::close()

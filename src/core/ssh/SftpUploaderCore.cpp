@@ -293,22 +293,27 @@ SftpUploaderCore::SftpUploaderCore(SshClient *client, QObject *parent)
     m_pool->setMaxThreadCount(SftpTransferPool::kDefaultMaxConnections);
 }
 
-SftpUploaderCore::~SftpUploaderCore()
+bool SftpUploaderCore::shutdown(int timeoutMs, bool abandonPrimary)
 {
-    // 先与工作线程断开联系：置空 owner 之后它们不再向本对象投递任何东西，
-    // 也不再读本对象的任何成员（它们要的都在 ctx 里）。必须在等线程之前做，
-    // 因为下面可能等不到就走人。
+    // 先切断回投再等线程：重连/析构后旧上传不能再修改面板状态。
     {
         QMutexLocker locker(&m_ctx->lock);
         m_ctx->owner = nullptr;
         for (auto &flag : m_ctx->cancelFlags)
             flag->store(true);
     }
-    // 取消标志只在分片边界被检查；正卡在 libssh2_sftp_write 里的流（克隆连接
-    // 是阻塞模式 session）看不到它，会一直挂到 TCP 超时。先打断 socket，
-    // waitForDone 才能及时返回，否则析构会长时间卡住 UI 线程。
+    if (abandonPrimary)
+        m_transferPool->abandonPrimary();
     m_transferPool->shutdownTransferSockets();
-    if (!m_pool->waitForDone(kWorkerJoinTimeoutMs)) {
+    const bool uploadsDone = m_pool->waitForDone(timeoutMs);
+    // 预热线程也持有旧连接；不能让 ~SftpTransferPool 无限等待它。
+    const bool prewarmDone = m_transferPool->waitPrewarmDone(timeoutMs);
+    return uploadsDone && prewarmDone;
+}
+
+SftpUploaderCore::~SftpUploaderCore()
+{
+    if (!shutdown(kWorkerJoinTimeoutMs)) {
         // 兜底：宁可泄漏也不要冻住 UI 线程。析构跑在 UI 线程上（关闭标签页 /
         // 退出程序），此处若无限等，窗口就再也不响应了。
         //

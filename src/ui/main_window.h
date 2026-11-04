@@ -40,6 +40,8 @@ class DockerManagerDialog;
 class DockerSoftDialog;
 class KubeManager;
 class KubeManagerDialog;
+class NginxManager;
+class NginxManagerDialog;
 class ProcessManagerDialog;
 class NatDialog;
 class FrpManager;
@@ -309,6 +311,7 @@ private:
     void showDockerSoft();
     void showNatDialog();
     void showKubeManager();
+    void showNginxManager();
 #endif
     void showProcessManager();
 
@@ -332,6 +335,13 @@ private:
     void ensureKubeManager();
     // 对话框后端下拉的切换落点：换 executor + 持久化偏好 + 刷新。
     void onKubeBackendChanged(bool useRemote);
+
+    // Nginx 站点管理（懒加载），语义同 ensureKubeManager：懒建 NginxManager
+    // 并恢复持久化配置；仅在用户选择「SSH 会话」后端且当前有活动 SSH 会话时
+    // 快照 executor，否则回「本机 nginx」。
+    // 对应 docs/Nginx可视化管理实现方案.md §5.4
+    void ensureNginxManager();
+    void onNginxBackendChanged(bool useRemote);
     // docker exec / kubectl exec 共用的「命令送进当前活动终端」助手
     // （命令已带 \n 结尾；Windows ConPTY 需要 \r 才能执行）。
     // 对应Python: cube-shell.py:3767-3785 terminal.sendText
@@ -386,6 +396,13 @@ private:
     KubeManagerDialog *m_kubeManagerDialog = nullptr;
     QPointer<CommandExecutor> m_kubeExecutor;
     bool m_kubeUseRemoteBackend = false; // 后端偏好（QSettings 持久化）
+
+    // Nginx 站点管理（全部懒加载）。
+    // 对应 docs/Nginx可视化管理实现方案.md §5.4
+    NginxManager *m_nginxManager = nullptr;
+    NginxManagerDialog *m_nginxManagerDialog = nullptr;
+    QPointer<CommandExecutor> m_nginxExecutor;
+    bool m_nginxUseRemoteBackend = false; // 后端偏好（QSettings 持久化）
 #endif
 
     // 远程进程管理（懒加载）。

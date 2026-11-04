@@ -85,6 +85,9 @@ set(CORE_SOURCES
     # --- kube (kubectl -o json 纯解析层 + 资源类型注册表，不起子进程) ---
     kube/KubeResourceParser.cpp # 对应 docs/Kubernetes功能实现方案.md §3
 
+    # --- nginx (nginx.conf 词法/语法 + 站点抽取 + 生成；纯解析层，不起子进程) ---
+    nginx/NginxConfigParser.cpp # 对应 docs/Nginx可视化管理实现方案.md §3
+
     # --- update ---
     update/UpdateChecker.cpp    # port of core/update/ (version + github_api + platform_match)
     update/UpdateDownloader.cpp # port of core/update/installer.py (下载+安装器调起)
@@ -140,6 +143,9 @@ if(CUBESHELL_WITH_LOCALPROC)
 
         # --- kube (kubectl CLI 驱动部分；纯解析层 KubeResourceParser 在无条件段) ---
         kube/KubeManager.cpp        # 对应 docs/Kubernetes功能实现方案.md §4
+
+        # --- nginx (nginx CLI 驱动部分；纯解析层 NginxConfigParser 在无条件段) ---
+        nginx/NginxManager.cpp      # 对应 docs/Nginx可视化管理实现方案.md §4
 
         # --- DeepSeek Harness（dsh web 本机进程管理；Python 版无对应实现） ---
         dsh/DshManager.cpp          # QProcess 托管 `npx @deepseek-ai/dsh web` + 端口健康检查

@@ -130,6 +130,9 @@ public:
     bool isCancelRequested(const QString &fileId) const;
     // 阻塞等待所有上传任务结束（测试用）。msecs<0 表示无限等。
     bool waitForFinished(int msecs = -1);
+    // 永久停机：停止回投、取消上传并有限等待上传/预热线程。false 时调用方
+    // 必须保留本对象及旧 SSH 连接；abandonPrimary 用于主 socket 已断的重连路径。
+    bool shutdown(int timeoutMs, bool abandonPrimary = false);
 
     // --- 纯逻辑（静态，可单测，不依赖网络） ---
     // 分片切分：从 startOffset 起把 totalSize 切成 (offset, size) 序列。

@@ -60,6 +60,11 @@ if(CUBESHELL_WITH_LOCALPROC)
         dialogs/KubeLogViewer.cpp
         editors/KubeYamlEditor.cpp
 
+        # --- Nginx 站点管理（对应 docs/Nginx可视化管理实现方案.md §5） ---
+        dialogs/NginxManagerDialog.cpp
+        dialogs/NginxSiteEditor.cpp
+        dialogs/NginxLogViewer.cpp
+
         # --- Docker Compose 可视化编辑器 (对应Python: core/docker/docker_compose_editor.py) ---
         editors/DockerComposeEditor.cpp
         editors/ServiceConfigWidget.cpp

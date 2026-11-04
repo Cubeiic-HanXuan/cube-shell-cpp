@@ -41,7 +41,8 @@ public:
     explicit SftpBrowserWidget(QWidget *parent = nullptr);
     ~SftpBrowserWidget() override;
 
-    // Attach to a connected client and load the home/root directory.
+    // Attach to a connected client and load the current/home directory.
+    // SSH 重连换对象时，先停旧任务并销毁旧 SFTP/上传组件，再绑定新连接。
     // 以 shared_ptr 持有，保证应用关闭时 SshClient（及其底层 LIBSSH2_SESSION）
     // 比子对象 SftpClient 活得久——否则 terminal 先析构会 libssh2_session_free，
     // SftpClient::close() 再用悬空的 m_sftp 调 libssh2_sftp_shutdown → UAF 崩溃。
@@ -166,6 +167,8 @@ private:
     // 经此启动的线程析构时会被有限等待，超时将泄漏其引用对象，
     // 避免用于不可中断的超长任务。
     void startWorker(QThread *worker);
+    // 重连与析构共用：使旧回调失效、停线程，并在旧 SSH 仍存活时释放组件。
+    void releaseClient();
     void populate(const QString &path, const SftpFileInfoList &entries);
     // 写底部状态栏：按 label 当前宽度做省略号截断，完整文本放 tooltip，
     // 避免长错误信息把面板撑宽。所有状态输出统一走这里，不要直接 setText。
@@ -252,9 +255,9 @@ private:
     quint64 m_loadSeq = 0;
     // 仍可能在运行的自建 worker 线程登记表（元素被 deleteLater 后自动置空）。
     QVector<QPointer<QThread>> m_workers;
-    // 关停标志：析构最先置位，压缩/解压 worker 以共享指针捕获后传给
-    // CommandExecutor::runCommand 作取消标志（shared_ptr 保证 widget 析构后
-    // 泄漏的超时线程读到的标志仍有效）。
+    // 当前连接的关停标志：重连/析构时置位，新连接另建一份。worker 和排队
+    // 回调按值捕获，既能取消旧 I/O，也能阻止旧结果覆盖新连接的 UI。
+    // shared_ptr 保证超时逃逸的线程仍可安全读取。
     std::shared_ptr<std::atomic<bool>> m_shuttingDown =
         std::make_shared<std::atomic<bool>>(false);
 };

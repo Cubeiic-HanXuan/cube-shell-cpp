@@ -6,6 +6,7 @@
 #include "claude_code/ClaudeCodeBackend.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -16,6 +17,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace cubeshell {
@@ -56,7 +58,6 @@ void SettingsPanel::buildUi()
     m_modelCombo->setEditable(true);
     m_modelCombo->addItems({QStringLiteral("sonnet"), QStringLiteral("opus"),
                             QStringLiteral("haiku")});
-    m_modelCombo->setMinimumWidth(250);
     modelLayout->addRow(tr("模型选择:"), m_modelCombo);
 
     m_effortCombo = new QComboBox(modelGroup);
@@ -75,27 +76,23 @@ void SettingsPanel::buildUi()
     m_providerCombo = new QComboBox(providerGroup);
     for (const ProviderPreset &preset : m_presets)
         m_providerCombo->addItem(preset.name);
-    m_providerCombo->setMinimumWidth(250);
     connect(m_providerCombo, &QComboBox::currentIndexChanged,
             this, &SettingsPanel::onProviderChanged);
     providerLayout->addRow(tr("提供商预设:"), m_providerCombo);
 
     m_baseUrlEdit = new QLineEdit(providerGroup);
     m_baseUrlEdit->setPlaceholderText(tr("API 地址"));
-    m_baseUrlEdit->setMinimumWidth(400);
     m_baseUrlEdit->setEnabled(false);
     providerLayout->addRow(tr("API 地址:"), m_baseUrlEdit);
 
     m_apiKeyEdit = new QLineEdit(providerGroup);
     m_apiKeyEdit->setEchoMode(QLineEdit::Password);
     m_apiKeyEdit->setPlaceholderText(tr("输入 API Key"));
-    m_apiKeyEdit->setMinimumWidth(400);
     m_apiKeyEdit->setEnabled(false);
     providerLayout->addRow(tr("API 密钥:"), m_apiKeyEdit);
 
     m_providerModelCombo = new QComboBox(providerGroup);
     m_providerModelCombo->setEditable(true);
-    m_providerModelCombo->setMinimumWidth(250);
     m_providerModelCombo->setEnabled(false);
     providerLayout->addRow(tr("模型名称:"), m_providerModelCombo);
 
@@ -148,6 +145,43 @@ void SettingsPanel::buildUi()
 
     layout->addLayout(btnLayout);
     layout->addStretch();
+    alignFormFields();
+}
+
+void SettingsPanel::alignFormFields()
+{
+    QList<QWidget *> labels;
+    int labelWidth = 0;
+    for (auto *form : findChildren<QFormLayout *>()) {
+        // 下拉框与输入框统一占满字段列，各分组共享同一标签列宽。
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        form->setRowWrapPolicy(QFormLayout::DontWrapRows);
+        for (int row = 0; row < form->rowCount(); ++row) {
+            if (auto *item = form->itemAt(row, QFormLayout::LabelRole)) {
+                if (auto *label = item->widget()) {
+                    label->setMinimumWidth(0);
+                    label->ensurePolished();
+                    labelWidth = qMax(labelWidth, label->sizeHint().width());
+                    labels.append(label);
+                }
+            }
+            if (auto *item = form->itemAt(row, QFormLayout::FieldRole)) {
+                if (auto *field = item->widget())
+                    field->setSizePolicy(QSizePolicy::Expanding, field->sizePolicy().verticalPolicy());
+            }
+        }
+    }
+    for (auto *label : labels)
+        label->setMinimumWidth(labelWidth);
+}
+
+void SettingsPanel::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange) {
+        // 等子控件完成字体/样式更新，再按实际字体度量重新对齐。
+        QTimer::singleShot(0, this, &SettingsPanel::alignFormFields);
+    }
 }
 
 // 对应Python: refresh / _load_settings（行 178-193）

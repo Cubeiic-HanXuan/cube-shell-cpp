@@ -7,6 +7,7 @@
 #include "claude_code/McpPanel.h"
 #include "claude_code/SessionPanel.h"
 #include "claude_code/SettingsPanel.h"
+#include "claude_code/SkillsPanel.h"
 #include "claude_code/StatusPanel.h"
 // QPointer<CommandExecutor> 需要完整类型
 #include "ssh/CommandExecutor.h"
@@ -77,6 +78,9 @@ void ClaudeCodePanel::buildUi()
     m_mcpPanel = new McpPanel(m_backend, this);
     m_tabWidget->addTab(m_mcpPanel, tr("MCP"));
 
+    m_skillsPanel = new SkillsPanel(m_backend, this);
+    m_tabWidget->addTab(m_skillsPanel, tr("Skills"));
+
     // 连接 Tab 切换信号 — 切换时懒加载当前 Tab 数据
     connect(m_tabWidget, &QTabWidget::currentChanged,
             this, &ClaudeCodePanel::onTabChanged);
@@ -144,6 +148,7 @@ void ClaudeCodePanel::onModeChanged(int index)
             m_backend->setRemoteExecutor(nullptr);
         }
     }
+    m_skillsPanel->setConnectionLabel(m_modeCombo->currentText());
     // 只刷新当前可见的 Tab（子面板共享同一 backend 实例）
     refresh();
 }
@@ -162,6 +167,8 @@ void ClaudeCodePanel::onTabChanged(int index)
         m_settingsPanel->refresh();
     else if (widget == m_mcpPanel)
         m_mcpPanel->refresh();
+    else if (widget == m_skillsPanel)
+        m_skillsPanel->refresh();
 }
 
 // 刷新当前可见 Tab（对应Python: _on_mode_changed 尾部的 current refresh）

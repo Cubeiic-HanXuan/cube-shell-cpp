@@ -32,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include "claude_code/ClaudeSessionStore.h"
+#include "claude_code/ClaudeSkillStore.h"
 
 class QProcess;
 class QProcessEnvironment;
@@ -70,6 +71,16 @@ public:
     // 独立后台导出，不依赖详情页当前已加载的内容，结果通过 sessionExported 返回。
     void exportSession(const ClaudeSessionInfo &session, const QString &destination,
                        bool markdown, quint64 request);
+
+    // Skills 文件操作固定提交时的数据源；与会话共用来源代次，结果必须匹配 request。
+    void refreshSkills(const ClaudeSkillScope &scope, quint64 request);
+    void readSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, quint64 request);
+    void createSkill(const ClaudeSkillScope &scope, const QString &name, const QByteArray &content, quint64 request);
+    void saveSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, const QByteArray &content, quint64 request);
+    void importSkill(const ClaudeSkillScope &scope, const QString &name, const QString &path, quint64 request);
+    void exportSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, const QString &path, quint64 request);
+    void setSkillEnabled(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, bool enabled, quint64 request);
+    void removeSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, quint64 request);
 
     // --- 阻塞接口（耗时操作应由工作线程调用） ---
 
@@ -154,6 +165,11 @@ public:
     static QString buildInstallCommand();
 
 signals:
+    void skillsListed(quint64 source, quint64 request, const QList<cubeshell::ClaudeSkillInfo> &skills,
+                      const QString &root, const QString &error);
+    void skillLoaded(quint64 source, quint64 request, const cubeshell::ClaudeSkillInfo &skill,
+                     const QStringList &files, const QString &error);
+    void skillOperationFinished(quint64 source, quint64 request, const QString &error);
     // 以下异步结果可能从工作线程发出，界面连接使用 Qt::QueuedConnection。
     void statusLoaded(const QString &version, const QJsonObject &auth,
                       const QJsonObject &daemon, const QString &binPath);
@@ -181,6 +197,7 @@ signals:
 
 private:
     void schedule(std::function<void()> job);
+    void skillOperation(quint64 request, std::function<void(ClaudeSkillStore &, QString *)> operation);
     // 把 settings.json 的 env 字段注入本地子进程环境（ANTHROPIC_AUTH_TOKEN/
     // ANTHROPIC_API_KEY 及 ANTHROPIC_DEFAULT_*_MODEL 等约定见
     // settings_widget.py::_build_settings_dict 行 347-396）。
@@ -202,6 +219,7 @@ private:
     mutable QString m_cachedLoginPath;
     mutable bool m_loginPathProbed = false;
     quint64 m_sessionSource = 1; // 每次切换数据源递增，与异步结果一起回传
+    std::shared_ptr<ClaudeSkillStore> m_skillStore;
     std::shared_ptr<ClaudeSessionStore> m_sessionStore; // 任务捕获共享引用，切换模式不破坏在途存储
     std::shared_ptr<std::atomic<quint64>> m_sessionReadRevision = std::make_shared<std::atomic<quint64>>(0); // 新分页请求淘汰旧读取
     QVector<QFuture<void>> m_futures; // 析构前等待任务结束，保证捕获的 this 不悬挂

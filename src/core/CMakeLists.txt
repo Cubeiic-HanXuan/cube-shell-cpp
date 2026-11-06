@@ -116,6 +116,10 @@ set(CORE_SOURCES
     claude_code/SettingsPanel.cpp      # port of core/claude_code/settings_widget.py (设置 Tab)
     claude_code/McpPanel.cpp           # port of core/claude_code/mcp_widget.py (MCP Tab)
     claude_code/McpEditDialog.cpp      # port of core/claude_code/mcp_widget.py::McpEditDialog
+    claude_code/ClaudeSkillData.cpp    # Skill 元数据校验，保留 SKILL.md 原文
+    claude_code/ClaudeSkillStore.cpp   # 本地 / SSH Skills 目录安全读写
+    claude_code/SkillsPanel.cpp        # Skills 列表、详情与文件管理
+    claude_code/SkillEditDialog.cpp    # SKILL.md 原文编辑与校验
 )
 
 # 语音输入（QAudioSource 采集 + HTTP 识别）。HarmonyOS 上 QtMultimedia

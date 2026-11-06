@@ -28,6 +28,9 @@ public slots:
     // 对应Python: SettingsWidget.refresh（Tab 激活/模式切换时调用）
     void refresh();
 
+protected:
+    void changeEvent(QEvent *event) override;
+
 private slots:
     void onProviderChanged(int index);
     void onSave();
@@ -36,6 +39,7 @@ private slots:
 
 private:
     void buildUi();
+    void alignFormFields();
     void loadSettings();
     // 对应Python: _populate_ui（settings dict → UI 控件）
     void populateUi(const QJsonObject &settings);

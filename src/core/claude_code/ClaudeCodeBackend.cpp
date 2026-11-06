@@ -29,17 +29,21 @@ static const QLatin1String kExitSentinel("__EXIT_CODE__");
 
 ClaudeCodeBackend::ClaudeCodeBackend(QObject *parent)
     : QObject(parent)
+    , m_skillStore(std::make_shared<ClaudeSkillStore>(claudeHome()))
     , m_sessionStore(std::make_shared<ClaudeSessionStore>(claudeHome()))
 {
     // 跨线程排队信号需要注册会话摘要、分页结果及只读快照类型。
     qRegisterMetaType<QList<ClaudeSessionInfo>>();
     qRegisterMetaType<ClaudeSessionPage>();
     qRegisterMetaType<ClaudeSessionSnapshot>();
+    qRegisterMetaType<ClaudeSkillInfo>();
+    qRegisterMetaType<QList<ClaudeSkillInfo>>();
 }
 
 ClaudeCodeBackend::~ClaudeCodeBackend()
 {
     abortChat();
+    m_skillStore->cancel();
     m_sessionStore->cancel();
     for (QFuture<void> &f : m_futures)
         f.waitForFinished();
@@ -52,7 +56,10 @@ void ClaudeCodeBackend::setRemoteExecutor(CommandExecutor *executor, std::shared
     // 来源改变后取消旧存储，但不改写它的来源；已投递任务持有旧实例直到安全退出。
     // 新来源编号随结果回传，界面可据此丢弃旧连接的迟到数据。
     m_sessionStore->cancel();
+    m_skillStore->cancel();
     m_executor = executor;
+    m_skillStore = executor ? std::make_shared<ClaudeSkillStore>(client)
+                           : std::make_shared<ClaudeSkillStore>(claudeHome());
     m_sessionStore = executor ? std::make_shared<ClaudeSessionStore>(std::move(client))
                              : std::make_shared<ClaudeSessionStore>(claudeHome());
     ++m_sessionSource;
@@ -647,6 +654,65 @@ bool ClaudeCodeBackend::writeMcpConfig(const QJsonObject &config,
 // ---------------------------------------------------------------------------
 // async wrappers
 // ---------------------------------------------------------------------------
+
+void ClaudeCodeBackend::refreshSkills(const ClaudeSkillScope &scope, quint64 request)
+{
+    const auto store = m_skillStore;
+    const auto source = m_sessionSource;
+    schedule([this, store, source, scope, request] {
+        QString root, error;
+        const auto entries = store->list(scope, &root, &error);
+        emit skillsListed(source, request, entries, root, error);
+    });
+}
+void ClaudeCodeBackend::readSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, quint64 request)
+{
+    const auto store = m_skillStore;
+    const auto source = m_sessionSource;
+    schedule([this, store, source, scope, info, request] {
+        QString error;
+        const auto loaded = store->read(scope, info.directory, info.enabled, &error);
+        QStringList files;
+        if (error.isEmpty()) files = store->files(scope, loaded, &error);
+        emit skillLoaded(source, request, loaded, files, error);
+    });
+}
+void ClaudeCodeBackend::skillOperation(quint64 request, std::function<void(ClaudeSkillStore &, QString *)> operation)
+{
+    const auto store = m_skillStore;
+    const auto source = m_sessionSource;
+    schedule([this, store, source, request, operation = std::move(operation)] {
+        QString error;
+        operation(*store, &error);
+        emit skillOperationFinished(source, request, error);
+    });
+}
+void ClaudeCodeBackend::createSkill(const ClaudeSkillScope &scope, const QString &name, const QByteArray &content, quint64 request)
+{
+    skillOperation(request, [scope, name, content](auto &store, auto *error) {
+        store.create(scope, name, {{QStringLiteral("SKILL.md"), content, false, false}}, error);
+    });
+}
+void ClaudeCodeBackend::saveSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, const QByteArray &content, quint64 request)
+{
+    skillOperation(request, [scope, info, content](auto &store, auto *error) { store.save(scope, info, content, error); });
+}
+void ClaudeCodeBackend::importSkill(const ClaudeSkillScope &scope, const QString &name, const QString &path, quint64 request)
+{
+    skillOperation(request, [scope, name, path](auto &store, auto *error) { store.importSkill(scope, name, path, error); });
+}
+void ClaudeCodeBackend::exportSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, const QString &path, quint64 request)
+{
+    skillOperation(request, [scope, info, path](auto &store, auto *error) { store.exportSkill(scope, info, path, error); });
+}
+void ClaudeCodeBackend::setSkillEnabled(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, bool enabled, quint64 request)
+{
+    skillOperation(request, [scope, info, enabled](auto &store, auto *error) { store.setEnabled(scope, info, enabled, error); });
+}
+void ClaudeCodeBackend::removeSkill(const ClaudeSkillScope &scope, const ClaudeSkillInfo &info, quint64 request)
+{
+    skillOperation(request, [scope, info](auto &store, auto *error) { store.remove(scope, info, error); });
+}
 
 // 对应Python: status_widget.StatusWorker（行 44-69，bin_path 一并回传）
 void ClaudeCodeBackend::refreshStatus()

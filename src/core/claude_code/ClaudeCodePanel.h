@@ -1,7 +1,7 @@
 #pragma once
 
 // ClaudeCodePanel.h — Claude Code 集成管理面板：主面板容器，
-// 提供连接模式切换（本地 / 远程 SSH）和四个功能 Tab（状态/会话/设置/MCP）。
+// 提供连接模式切换（本地 / 远程 SSH）和状态/会话/设置/MCP/Skills 功能 Tab。
 // 对应Python: core/claude_code/claude_code_panel.py::ClaudeCodePanel
 
 #include <QList>
@@ -21,6 +21,7 @@ class CommandExecutor;
 class McpPanel;
 class SessionPanel;
 class SettingsPanel;
+class SkillsPanel;
 class StatusPanel;
 
 class ClaudeCodePanel : public QWidget {
@@ -74,6 +75,7 @@ private:
     SessionPanel *m_sessionPanel = nullptr;
     SettingsPanel *m_settingsPanel = nullptr;
     McpPanel *m_mcpPanel = nullptr;
+    SkillsPanel *m_skillsPanel = nullptr;
 };
 
 } // namespace cubeshell

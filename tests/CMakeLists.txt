@@ -732,6 +732,30 @@ add_test(NAME claude_session_test COMMAND claude_session_test)
 add_test(NAME claude_session_ui_test COMMAND claude_session_ui_test)
 set_tests_properties(claude_session_test claude_session_ui_test PROPERTIES TIMEOUT 60)
 
+# Skills 使用隔离配置目录；远程脚本在本地 shell 上验证，不访问真实 SSH 或用户技能。
+qt_add_executable(claude_skill_test claude_skill_test.cpp)
+target_include_directories(claude_skill_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(claude_skill_test PRIVATE Qt6::Core cube_core)
+qt_add_executable(claude_skill_ui_test claude_skill_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
+    ${CMAKE_SOURCE_DIR}/resources/icons/icons.qrc
+)
+target_include_directories(claude_skill_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(claude_skill_ui_test PRIVATE Qt6::Widgets cube_core)
+add_test(NAME claude_skill_test COMMAND claude_skill_test)
+add_test(NAME claude_skill_ui_test COMMAND claude_skill_ui_test)
+set_tests_properties(claude_skill_test claude_skill_ui_test PROPERTIES TIMEOUT 120)
+
+# 设置页表单对齐：亮暗主题、窗口伸缩和字体缩放，不读取真实设置。
+qt_add_executable(claude_settings_ui_test claude_settings_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
+    ${CMAKE_SOURCE_DIR}/resources/icons/icons.qrc
+)
+target_include_directories(claude_settings_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(claude_settings_ui_test PRIVATE Qt6::Widgets cube_core)
+add_test(NAME claude_settings_ui_test COMMAND claude_settings_ui_test)
+set_tests_properties(claude_settings_ui_test PROPERTIES TIMEOUT 60)
+
 # ---------------------------------------------------------------------------
 # CTest registration
 # ---------------------------------------------------------------------------

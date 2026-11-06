@@ -107,7 +107,12 @@ set(CORE_SOURCES
     claude_code/ClaudeCodeRenderer.cpp # 轻量 Markdown→HTML (聊天渲染)
     claude_code/ClaudeCodePanel.cpp    # port of core/claude_code/claude_code_panel.py (容器+连接模式)
     claude_code/StatusPanel.cpp        # port of core/claude_code/status_widget.py (状态 Tab)
-    claude_code/SessionPanel.cpp       # port of core/claude_code/session_widget.py (会话 Tab)
+    claude_code/SessionPanel.cpp       # 会话列表与详情导航
+    claude_code/SessionDetailPanel.cpp # 详情控制器：分页、目录、搜索与导出
+    claude_code/SessionTimelineView.cpp # 变高时间线：可见行虚拟化与滚动锚点
+    claude_code/SessionWidgets.cpp     # 消息 / 工具步骤 / 代码块及共享配色
+    claude_code/ClaudeSessionData.cpp  # JSONL 增量解析、轮次摘要与 Markdown 导出
+    claude_code/ClaudeSessionStore.cpp # 本地 / SSH 历史存储：采样缓存与字节分页
     claude_code/SettingsPanel.cpp      # port of core/claude_code/settings_widget.py (设置 Tab)
     claude_code/McpPanel.cpp           # port of core/claude_code/mcp_widget.py (MCP Tab)
     claude_code/McpEditDialog.cpp      # port of core/claude_code/mcp_widget.py::McpEditDialog

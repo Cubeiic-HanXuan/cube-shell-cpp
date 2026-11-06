@@ -1,24 +1,23 @@
 #pragma once
 
-// ClaudeCodeBackend.h — Claude Code CLI integration (local & remote).
+// ClaudeCodeBackend.h — Claude Code CLI 集成与历史会话访问（本地 / 远程）。
 // 对应Python: core/claude_code/backend.py（LocalBackend / RemoteBackend）
 //
-// Protocol note (confirmed from the Python source): Claude Code is driven
-// through the `claude` CLI — NOT a local/tcp socket.
-//   - one-shot commands:   claude <args>          (JSON or text stdout)
-//   - remote execution:    claude <args>; echo "__EXIT_CODE__$?"  哨兵取退出码
-//   - chat streaming:      claude -p <prompt> --output-format stream-json
-//                          (JSON-line protocol: one JSON object per line)
-//   - session transcripts: ~/.claude/projects/<proj>/<sessionId>.jsonl
+// 协议说明：命令与聊天通过 claude CLI 驱动，不使用本地 / TCP 套接字服务。
+//   - 一次性命令：claude <args>，标准输出为 JSON 或文本；
+//   - 远程执行：claude <args>; echo "__EXIT_CODE__$?"，通过哨兵提取退出码；
+//   - 流式聊天：claude -p <prompt> --output-format stream-json，逐行解析 JSON；
+//   - 历史会话：直接读取 Claude 配置目录下 projects/<proj>/<sessionId>.jsonl，
+//     由 ClaudeSessionStore 负责本地 / SSH 分页，与 CLI 可用性相互独立。
 //
 // - run_command        对应Python: LocalBackend/RemoteBackend.run_command
 // - version/auth/daemon对应Python: get_version/get_auth_status/get_daemon_status
-// - sessions           对应Python: list_sessions(_read_transcript_sessions)
+// - sessions           对应Python: list_sessions，C++ 扩展为独立存储与增量快照
 // - settings/MCP       对应Python: read/write_settings + read/write_mcp_config
 //
-// Blocking methods are worker-thread safe. The async refresh*/startChat API
-// emits signals on this object's thread (remote stream chunks are re-routed
-// via Qt::QueuedConnection internally).
+// 线程约定：界面线程提交异步任务，refresh* 的结果可能从工作线程发出，
+// 界面消费端使用 Qt::QueuedConnection；聊天生命周期信号在本对象线程发出。
+// 会话任务提交时固定 store / source，析构前取消读取并等待 m_futures 收尾。
 
 #include <QFuture>
 #include <QJsonObject>
@@ -31,6 +30,8 @@
 #include <QVector>
 
 #include <functional>
+#include <memory>
+#include "claude_code/ClaudeSessionStore.h"
 
 class QProcess;
 class QProcessEnvironment;
@@ -46,15 +47,6 @@ struct ClaudeRunResult {
     QString stderrText;
 };
 
-// 对应Python: list_sessions 返回的 session dict
-struct ClaudeSessionInfo {
-    QString sessionId;
-    QString name;
-    QString cwd;
-    QString status;     // saved / running / ...
-    bool running = false;
-    qint64 startedAtMs = 0;
-};
 
 class ClaudeCodeBackend : public QObject {
     Q_OBJECT
@@ -64,12 +56,22 @@ public:
     explicit ClaudeCodeBackend(QObject *parent = nullptr);
     ~ClaudeCodeBackend() override;
 
-    // Remote mode: all CLI/file operations run over the executor.
-    // 对应Python: RemoteBackend(ssh_conn);nullptr 回到 LocalBackend 行为
-    void setRemoteExecutor(CommandExecutor *executor);
+    // 远程 CLI / 配置操作使用 executor；历史读取使用 client 建立独立命令通道。
+    // 对应Python: RemoteBackend(ssh_conn)；nullptr 切回本地，同时更换会话存储实例。
+    void setRemoteExecutor(CommandExecutor *executor, std::shared_ptr<SshClient> client = {});
     bool isRemote() const { return !m_executor.isNull(); }
+    quint64 sessionSource() const { return m_sessionSource; }
+    // 存储来源不随 QPointer 失效而变成本地，避免连接断开后误恢复到本机。
+    bool sessionSourceIsRemote() const { return m_sessionStore->isRemote(); }
+    CommandExecutor *remoteExecutor() const;
+    // 异步读取一页并在工作线程复制 / 更新快照，通过 sessionPageReady 返回。
+    void readSessionPage(const ClaudeSessionInfo &session, qint64 offset, quint64 request,
+                         const ClaudeSessionSnapshot &snapshot);
+    // 独立后台导出，不依赖详情页当前已加载的内容，结果通过 sessionExported 返回。
+    void exportSession(const ClaudeSessionInfo &session, const QString &destination,
+                       bool markdown, quint64 request);
 
-    // --- blocking API (worker-thread safe) ---
+    // --- 阻塞接口（耗时操作应由工作线程调用） ---
 
     // 对应Python: run_command(远程带 __EXIT_CODE__$? 哨兵)
     ClaudeRunResult runCommand(const QStringList &args,
@@ -80,7 +82,7 @@ public:
     QJsonObject authStatus();
     // 对应Python: get_daemon_status(claude daemon status)
     QJsonObject daemonStatus();
-    // 对应Python: list_sessions(transcript 扫描 + agents --json 叠加)
+    // 直接读取已保存历史，不依赖 CLI 可用性；按文件最近活跃时间排序。
     QList<ClaudeSessionInfo> listSessions();
 
     // 对应Python: read_settings / write_settings(~/.claude/settings.json)
@@ -95,13 +97,13 @@ public:
                         const QString &projectPath = QString(),
                         QString *errorOut = nullptr);
 
-    // --- async wrappers (QtConcurrent; signals from worker threads) ---
+    // --- 异步包装（QtConcurrent 调度，结果可能从工作线程发出） ---
 
-    // Emits statusLoaded(version, auth, daemon, binPath).
+    // 发出 statusLoaded(version, auth, daemon, binPath)。
     // 对应Python: status_widget.py::StatusWorker.run（行 44-69）
     void refreshStatus();
-    // Emits sessionsLoaded(sessions).
-    void refreshSessions();
+    // 发出 sessionListReady(source, request, sessions, error)；request 由界面递增以识别过期结果。
+    void refreshSessions(quint64 request = 0);
     // 后台执行 `claude update`，完成后 emit updateFinished(output)。
     // 对应Python: status_widget.py::UpdateWorker.run（行 25-32）
     void refreshUpdate();
@@ -119,12 +121,11 @@ public:
     // 对应Python: status_widget.py::StatusWorker.run 行 57-65
     QString binPath();
 
-    // --- chat streaming (JSON-line protocol) ---
+    // --- 流式聊天（逐行 JSON 协议） ---
 
-    // Start `claude -p <prompt> --output-format stream-json --verbose`
-    // (plus --resume <sessionId> when given). Each stdout line is one JSON
-    // object emitted via chatMessage(). Only one chat at a time; must be
-    // called on this object's thread.
+    // 执行 claude -p <prompt> --output-format stream-json --verbose，
+    // 指定会话 ID 时追加 --resume。每行 JSON 经 chatMessage() 发出。
+    // 同时只允许一个聊天，必须在本对象所属线程调用。
     // 对应Python: claude CLI 的 stream-json 输出协议
     bool startChat(const QString &prompt, const QString &cwd = QString(),
                    const QString &resumeSessionId = QString());
@@ -153,10 +154,18 @@ public:
     static QString buildInstallCommand();
 
 signals:
-    // Emitted from worker threads — connect with Qt::QueuedConnection.
+    // 以下异步结果可能从工作线程发出，界面连接使用 Qt::QueuedConnection。
     void statusLoaded(const QString &version, const QJsonObject &auth,
                       const QJsonObject &daemon, const QString &binPath);
-    void sessionsLoaded(const QList<cubeshell::ClaudeSessionInfo> &sessions);
+    // 来源切换在界面线程通知；子面板立即清除旧内容并作废原请求。
+    void sessionSourceChanged();
+    // source 标识存储来源，request 标识调用方请求；两者必须同时匹配才能更新界面。
+    void sessionListReady(quint64 source, quint64 request,
+                          const QList<cubeshell::ClaudeSessionInfo> &sessions, const QString &error);
+    // page 只携带进度 / 错误信息，原始 bytes 已释放，解析结果在只读 snapshot 中。
+    void sessionPageReady(quint64 source, quint64 request, const cubeshell::ClaudeSessionPage &page,
+                          const cubeshell::ClaudeSessionSnapshot &snapshot);
+    void sessionExported(quint64 source, quint64 request, const QString &destination, const QString &error);
     // claude update 输出（stdout 优先，空则 stderr）。
     // 对应Python: status_widget.py::UpdateWorker.finished
     void updateFinished(const QString &output);
@@ -165,7 +174,7 @@ signals:
     void settingsSaved(bool ok, const QString &message);
     void mcpConfigLoaded(const QJsonObject &config);
     void mcpConfigSaved(bool ok, const QString &message);
-    // Chat lifecycle (emitted on this object's thread).
+    // 聊天生命周期信号在本对象所属线程发出。
     void chatMessage(const QJsonObject &message);
     void chatFinished(int exitCode);
     void chatError(const QString &message);
@@ -182,12 +191,9 @@ private:
     QString loginShellPath() const;
     QString shellQuote(const QString &s) const;
     QString claudeHome() const;
-    QList<ClaudeSessionInfo> readLocalTranscripts();
-    QList<ClaudeSessionInfo> readRemoteTranscripts();
-    QMap<QString, QString> liveAgentStatus();
 
-    // not owned；executor 随 SshSessionTab 析构，QPointer 自动置空，
-    // 所有远程分支判空后回退本地（对应Python: RemoteBackend 失效回退）。
+    // 非拥有指针；executor 随 SshSessionTab 析构，QPointer 自动置空。
+    // CLI / 配置路径沿用原有判空逻辑；历史存储独立记录来源，失联时报告错误而非读取本地。
     QPointer<CommandExecutor> m_executor;
     QProcess *m_chatProcess = nullptr;     // local chat stream
     bool m_remoteChatActive = false;
@@ -195,7 +201,10 @@ private:
     mutable QString m_cachedBin;
     mutable QString m_cachedLoginPath;
     mutable bool m_loginPathProbed = false;
-    QVector<QFuture<void>> m_futures; // joined in destructor
+    quint64 m_sessionSource = 1; // 每次切换数据源递增，与异步结果一起回传
+    std::shared_ptr<ClaudeSessionStore> m_sessionStore; // 任务捕获共享引用，切换模式不破坏在途存储
+    std::shared_ptr<std::atomic<quint64>> m_sessionReadRevision = std::make_shared<std::atomic<quint64>>(0); // 新分页请求淘汰旧读取
+    QVector<QFuture<void>> m_futures; // 析构前等待任务结束，保证捕获的 this 不悬挂
 };
 
 } // namespace cubeshell

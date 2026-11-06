@@ -717,6 +717,21 @@ target_link_libraries(kube_integration_test PRIVATE
 )
 endif()
 
+# Claude 会话解析 / 存储及离屏界面回归，全部使用合成日志，不访问用户真实历史。
+# 界面测试嵌入应用同款主题与图标资源，覆盖主题切换、字体缩放及会话导航。
+qt_add_executable(claude_session_test claude_session_test.cpp)
+target_include_directories(claude_session_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(claude_session_test PRIVATE Qt6::Core cube_core)
+qt_add_executable(claude_session_ui_test claude_session_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
+    ${CMAKE_SOURCE_DIR}/resources/icons/icons.qrc
+)
+target_include_directories(claude_session_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(claude_session_ui_test PRIVATE Qt6::Widgets cube_core)
+add_test(NAME claude_session_test COMMAND claude_session_test)
+add_test(NAME claude_session_ui_test COMMAND claude_session_ui_test)
+set_tests_properties(claude_session_test claude_session_ui_test PROPERTIES TIMEOUT 60)
+
 # ---------------------------------------------------------------------------
 # CTest registration
 # ---------------------------------------------------------------------------

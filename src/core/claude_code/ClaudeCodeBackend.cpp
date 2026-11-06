@@ -1,5 +1,5 @@
-// ClaudeCodeBackend.cpp — see ClaudeCodeBackend.h for the port map.
-// 对应Python: core/claude_code/backend.py
+// ClaudeCodeBackend.cpp — CLI 调用、流式聊天与历史会话异步任务调度。
+// Python 移植对应关系及线程约定见 ClaudeCodeBackend.h。
 
 #include "claude_code/ClaudeCodeBackend.h"
 
@@ -29,19 +29,39 @@ static const QLatin1String kExitSentinel("__EXIT_CODE__");
 
 ClaudeCodeBackend::ClaudeCodeBackend(QObject *parent)
     : QObject(parent)
+    , m_sessionStore(std::make_shared<ClaudeSessionStore>(claudeHome()))
 {
+    // 跨线程排队信号需要注册会话摘要、分页结果及只读快照类型。
+    qRegisterMetaType<QList<ClaudeSessionInfo>>();
+    qRegisterMetaType<ClaudeSessionPage>();
+    qRegisterMetaType<ClaudeSessionSnapshot>();
 }
 
 ClaudeCodeBackend::~ClaudeCodeBackend()
 {
     abortChat();
+    m_sessionStore->cancel();
     for (QFuture<void> &f : m_futures)
         f.waitForFinished();
 }
 
-void ClaudeCodeBackend::setRemoteExecutor(CommandExecutor *executor)
+void ClaudeCodeBackend::setRemoteExecutor(CommandExecutor *executor, std::shared_ptr<SshClient> client)
 {
+    if (m_executor == executor && m_sessionStore->isRemote() == (executor != nullptr))
+        return;
+    // 来源改变后取消旧存储，但不改写它的来源；已投递任务持有旧实例直到安全退出。
+    // 新来源编号随结果回传，界面可据此丢弃旧连接的迟到数据。
+    m_sessionStore->cancel();
     m_executor = executor;
+    m_sessionStore = executor ? std::make_shared<ClaudeSessionStore>(std::move(client))
+                             : std::make_shared<ClaudeSessionStore>(claudeHome());
+    ++m_sessionSource;
+    emit sessionSourceChanged();
+}
+
+CommandExecutor *ClaudeCodeBackend::remoteExecutor() const
+{
+    return m_executor.data();
 }
 
 void ClaudeCodeBackend::schedule(std::function<void()> job)
@@ -152,8 +172,12 @@ QString ClaudeCodeBackend::shellQuote(const QString &s) const
     return QLatin1Char('\'') + out + QLatin1Char('\'');
 }
 
+// 本地配置目录遵循 CLAUDE_CONFIG_DIR，并展开 ~/；远程路径由远端 shell 自行解析环境。
 QString ClaudeCodeBackend::claudeHome() const
 {
+    const QString configured = qEnvironmentVariable("CLAUDE_CONFIG_DIR");
+    if (!configured.isEmpty())
+        return configured.startsWith(QStringLiteral("~/")) ? QDir::homePath() + configured.mid(1) : configured;
     return QDir::homePath() + QStringLiteral("/.claude");
 }
 
@@ -454,128 +478,11 @@ void ClaudeCodeBackend::parseTranscriptHead(const QString &content,
         *firstTsMsOut = isoToMs(firstTs);
 }
 
-// 对应Python: _live_agent_status(claude agents --json --all)
-QMap<QString, QString> ClaudeCodeBackend::liveAgentStatus()
-{
-    QMap<QString, QString> result;
-    const ClaudeRunResult r = runCommand({QStringLiteral("agents"),
-                                          QStringLiteral("--json"),
-                                          QStringLiteral("--all")});
-    if (r.exitCode != 0 || r.stdoutText.trimmed().isEmpty())
-        return result;
-    const QJsonDocument doc = QJsonDocument::fromJson(r.stdoutText.toUtf8());
-    if (!doc.isArray())
-        return result;
-    const QJsonArray arr = doc.array();
-    for (const QJsonValue &v : arr) {
-        const QJsonObject a = v.toObject();
-        const QString sid = a.value(QStringLiteral("sessionId")).toString();
-        if (!sid.isEmpty())
-            result.insert(sid, a.value(QStringLiteral("status"))
-                                   .toString(QStringLiteral("running")));
-    }
-    return result;
-}
-
-// 对应Python: LocalBackend._read_transcript_sessions
-QList<ClaudeSessionInfo> ClaudeCodeBackend::readLocalTranscripts()
-{
-    QList<ClaudeSessionInfo> results;
-    const QDir projectsDir(claudeHome() + QStringLiteral("/projects"));
-    if (!projectsDir.exists())
-        return results;
-    const QStringList projects =
-        projectsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QString &proj : projects) {
-        const QDir projDir(projectsDir.filePath(proj));
-        const QStringList files = projDir.entryList(
-            {QStringLiteral("*.jsonl")}, QDir::Files);
-        for (const QString &fn : files) {
-            const QString path = projDir.filePath(fn);
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-                continue;
-            // 只读头部 32KB,对应Python逐行读 80 行的意图
-            const QString head = QString::fromUtf8(file.read(32 * 1024));
-            file.close();
-            ClaudeSessionInfo info;
-            qint64 firstTs = 0;
-            parseTranscriptHead(head, &info.name, &info.cwd, &firstTs);
-            info.sessionId = fn.chopped(6); // 去掉 ".jsonl"
-            info.status = QStringLiteral("saved");
-            info.startedAtMs = firstTs > 0
-                ? firstTs
-                : QFileInfo(path).lastModified().toMSecsSinceEpoch();
-            results.append(info);
-        }
-    }
-    return results;
-}
-
-// 对应Python: RemoteBackend._read_remote_transcripts(单条 shell 脚本)
-QList<ClaudeSessionInfo> ClaudeCodeBackend::readRemoteTranscripts()
-{
-    QList<ClaudeSessionInfo> results;
-    if (!m_executor)
-        return results;
-    // 兼容 GNU/BSD stat;grep 提取首个 aiTitle 与非空 cwd
-    const QString script = QStringLiteral(
-        "for f in ~/.claude/projects/*/*.jsonl; do "
-        "[ -f \"$f\" ] || continue; "
-        "sid=$(basename \"$f\" .jsonl); "
-        "mt=$(stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\" 2>/dev/null); "
-        "title=$(grep -m1 -oE '\"aiTitle\": *\"[^\"]*\"' \"$f\" 2>/dev/null); "
-        "cwd=$(grep -m1 -oE '\"cwd\": *\"[^\"]+\"' \"$f\" 2>/dev/null); "
-        "printf '%s\\t%s\\t%s\\t%s\\n' \"$sid\" \"$mt\" \"$title\" \"$cwd\"; "
-        "done");
-    const ExecResult r = m_executor->exec(script, false,
-                                          CommandExecutor::kDefaultTimeoutMs);
-    if (!r.ok() || r.stdoutText.isEmpty())
-        return results;
-
-    // fragment 形如 "aiTitle": "xxx",取冒号后引号内的值
-    const auto fragmentValue = [](const QString &fragment) -> QString {
-        const QJsonDocument doc = QJsonDocument::fromJson(
-            (QStringLiteral("{") + fragment + QStringLiteral("}")).toUtf8());
-        if (!doc.isObject() || doc.object().isEmpty())
-            return QString();
-        return doc.object().begin().value().toString();
-    };
-
-    const QStringList lines = r.stdoutText.split(QLatin1Char('\n'));
-    for (const QString &line : lines) {
-        const QStringList parts = line.split(QLatin1Char('\t'));
-        if (parts.isEmpty() || parts.at(0).isEmpty())
-            continue;
-        ClaudeSessionInfo info;
-        info.sessionId = parts.at(0);
-        const double mt = parts.size() > 1 ? parts.at(1).toDouble() : 0.0;
-        info.name = parts.size() > 2 ? fragmentValue(parts.at(2)) : QString();
-        info.cwd = parts.size() > 3 ? fragmentValue(parts.at(3)) : QString();
-        info.status = QStringLiteral("saved");
-        info.startedAtMs = static_cast<qint64>(mt * 1000);
-        results.append(info);
-    }
-    return results;
-}
-
-// 对应Python: list_sessions(transcript + 运行状态叠加,按时间降序)
+// 历史列表直接读取文件，不调用 CLI；界面使用异步 refreshSessions 以接收错误信息。
 QList<ClaudeSessionInfo> ClaudeCodeBackend::listSessions()
 {
-    QList<ClaudeSessionInfo> sessions =
-        m_executor ? readRemoteTranscripts() : readLocalTranscripts();
-    const QMap<QString, QString> live = liveAgentStatus();
-    for (ClaudeSessionInfo &s : sessions) {
-        if (live.contains(s.sessionId)) {
-            s.status = live.value(s.sessionId);
-            s.running = true;
-        }
-    }
-    std::sort(sessions.begin(), sessions.end(),
-              [](const ClaudeSessionInfo &a, const ClaudeSessionInfo &b) {
-                  return a.startedAtMs > b.startedAtMs;
-              });
-    return sessions;
+    QString error;
+    return m_sessionStore->list(&error);
 }
 
 // ---------------------------------------------------------------------------
@@ -749,11 +656,52 @@ void ClaudeCodeBackend::refreshStatus()
     });
 }
 
-// 对应Python: session_widget.SessionWorker
-void ClaudeCodeBackend::refreshSessions()
+// 对应Python: session_widget.SessionWorker；任务提交时固定存储和来源，避免执行时串到新连接。
+void ClaudeCodeBackend::refreshSessions(quint64 request)
 {
-    schedule([this]() {
-        emit sessionsLoaded(listSessions());
+    const auto store = m_sessionStore;
+    const auto source = m_sessionSource;
+    schedule([this, store, source, request]() {
+        QString error;
+        const auto sessions = store->list(&error);
+        emit sessionListReady(source, request, sessions, error);
+    });
+}
+
+void ClaudeCodeBackend::readSessionPage(const ClaudeSessionInfo &session, qint64 offset, quint64 request,
+                                       const ClaudeSessionSnapshot &snapshot)
+{
+    const auto store = m_sessionStore;
+    const auto source = m_sessionSource;
+    // 后端读取代次让新请求淘汰旧请求：IO 前后各检查一次，过期页不再做昂贵解析。
+    const auto revision = m_sessionReadRevision;
+    const auto generation = ++(*revision);
+    schedule([this, store, source, session, offset, request, snapshot, revision, generation]() {
+        if (revision->load() != generation)
+            return;
+        auto page = store->read(session, offset);
+        if (revision->load() != generation)
+            return;
+        // 不修改界面正在读取的旧快照；复制解析状态后追加新页，发布 const 共享指针。
+        auto parsed = std::make_shared<ClaudeSessionData>(snapshot ? *snapshot : ClaudeSessionData{});
+        if (page.error.isEmpty())
+            parsed->append(page.bytes, page.endOfFile);
+        // 信号只传解析快照与分页状态，不让原始页字节在界面队列中额外占用内存。
+        page.bytes.clear();
+        emit sessionPageReady(source, request, page, parsed);
+    });
+}
+
+// 导出固定提交时的数据源和文件信息，不参与详情页读取代次竞争。
+void ClaudeCodeBackend::exportSession(const ClaudeSessionInfo &session, const QString &destination,
+                                    bool markdown, quint64 request)
+{
+    const auto store = m_sessionStore;
+    const auto source = m_sessionSource;
+    schedule([this, store, source, session, destination, markdown, request]() {
+        QString error;
+        store->exportSession(session, destination, markdown, &error);
+        emit sessionExported(source, request, destination, error);
     });
 }
 

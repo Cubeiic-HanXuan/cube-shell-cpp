@@ -131,6 +131,9 @@ private:
     void openLocalTerminalAtPath(const QString &path, const QString &command = QString());
 #endif
     void openSshSession(const DeviceEntry &device);
+    // 在新 SSH 标签页首次连接成功后发送命令；用于恢复远程会话，不复用来源终端的输入流。
+    // initialCommand 非空时沿用来源会话的设备配置，避免按同名设备重新解析到不同主机。
+    void openSshSessionWithCommand(const DeviceEntry &device, const QString &initialCommand);
     void setStatus(const QString &text);
 
     // 首页标签内容：居中的快捷键提示清单。

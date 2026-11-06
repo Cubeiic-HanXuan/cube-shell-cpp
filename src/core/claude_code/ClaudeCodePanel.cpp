@@ -1,4 +1,4 @@
-// ClaudeCodePanel.cpp — see ClaudeCodePanel.h for the port map.
+// ClaudeCodePanel.cpp — 连接模式、功能 Tab 与本地 / 远程恢复请求的路由。
 // 对应Python: core/claude_code/claude_code_panel.py
 
 #include "claude_code/ClaudeCodePanel.h"
@@ -61,9 +61,14 @@ void ClaudeCodePanel::buildUi()
             this, &ClaudeCodePanel::openTerminalRequested);
     m_tabWidget->addTab(m_statusPanel, tr("状态"));
 
+    // 以历史存储的来源路由恢复请求，不能因远程 executor 已失效就误发到本地终端。
     m_sessionPanel = new SessionPanel(m_backend, this);
-    connect(m_sessionPanel, &SessionPanel::openTerminalRequested,
-            this, &ClaudeCodePanel::openTerminalRequested);
+    connect(m_sessionPanel, &SessionPanel::openTerminalRequested, this, [this](const QString &command) {
+        if (m_backend->sessionSourceIsRemote())
+            emit remoteSessionResumeRequested(command, m_backend->remoteExecutor());
+        else
+            emit openTerminalRequested(command);
+    });
     m_tabWidget->addTab(m_sessionPanel, tr("会话"));
 
     m_settingsPanel = new SettingsPanel(m_backend, this);
@@ -86,11 +91,12 @@ void ClaudeCodePanel::buildUi()
 
 // 对应Python: _refresh_connections（行 106-115，"远程: {hostname}" 文案）
 void ClaudeCodePanel::addRemoteConnection(const QString &hostname,
-                                          CommandExecutor *executor)
+                                          CommandExecutor *executor, std::shared_ptr<SshClient> client)
 {
     if (!executor)
         return;
     m_executors.append(QPointer<CommandExecutor>(executor));
+    m_clients.append(std::move(client));
     const int executorIndex = m_executors.size() - 1;
     m_modeCombo->addItem(tr("远程: %1").arg(hostname), executorIndex);
     // SSH 会话关闭时移除残留下拉条目；若移除的是当前选中项，
@@ -101,6 +107,8 @@ void ClaudeCodePanel::addRemoteConnection(const QString &hostname,
         const int idx = m_modeCombo->findData(executorIndex);
         if (idx >= 0)
             m_modeCombo->removeItem(idx);
+        // 与执行器索引同步释放客户端引用；存储中的在途任务仍持有自己的共享引用。
+        m_clients[executorIndex].reset();
     });
 }
 
@@ -128,7 +136,7 @@ void ClaudeCodePanel::onModeChanged(int index)
                 ? m_executors.at(executorIndex).data()
                 : nullptr;
         if (executor) {
-            m_backend->setRemoteExecutor(executor); // RemoteBackend 行为
+            m_backend->setRemoteExecutor(executor, m_clients.value(executorIndex));
         } else {
             // 对应Python: 找不到 SSH 连接时回退到本地模式
             qWarning() << "ClaudeCodePanel: SSH connection gone, "

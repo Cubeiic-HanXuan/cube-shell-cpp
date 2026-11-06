@@ -1363,16 +1363,30 @@ void MainWindow::showClaudeCodePanel()
             }
             const DeviceEntry &device = session->device();
             panel->addRemoteConnection(
-                device.host.isEmpty() ? device.name : device.host, executor);
+                device.host.isEmpty() ? device.name : device.host, executor, client);
         }
     }
 
+    // 远程恢复必须仍能找到来源标签页及有效连接；失联时提示重连，不静默改为本地执行。
+    connect(panel, &ClaudeCodePanel::remoteSessionResumeRequested, this,
+            [this](const QString &command, CommandExecutor *source) {
+        auto *session = source ? qobject_cast<SshSessionTab *>(source->parent()) : nullptr;
+        const auto client = session && session->terminal() ? session->terminal()->sshClient() : nullptr;
+        if (!session || !client || !client->isConnected()) {
+            QMessageBox::warning(this, tr("无法恢复会话"), tr("会话所属的 SSH 连接已断开，请重新连接后刷新会话列表。"));
+            return;
+        }
+        // 新开同一设备的 SSH 终端，不能把恢复命令注入来源终端里正在运行的程序。
+        openSshSessionWithCommand(session->device(), command);
+    });
 #ifdef CUBESHELL_WITH_LOCALPTY
-    // 子面板请求在终端执行 claude 命令 → 新开本机终端。
-    // 对应Python: panel.open_terminal_requested.connect(open_claude_terminal)
-    // 鸿蒙：无本地 shell，claude CLI 本地运行载体不存在（面板远程模式仍可用）。
+    // 本地命令仍走新建本机终端入口；未编入本地终端的构建明确提示，不静默忽略请求。
     connect(panel, &ClaudeCodePanel::openTerminalRequested,
             this, &MainWindow::openClaudeTerminal);
+#else
+    connect(panel, &ClaudeCodePanel::openTerminalRequested, this, [this] {
+        QMessageBox::information(this, tr("无法恢复会话"), tr("当前构建不支持本地终端，请复制恢复命令到外部终端执行。"));
+    });
 #endif
 
     TerminalTabWidget *pane = targetPane();
@@ -3067,13 +3081,15 @@ QTermWidget *MainWindow::openLocalTerminalAt(const QString &startDir)
 
 void MainWindow::openSshSession(const DeviceEntry &stub)
 {
-    // The list item only carries name/host; pull the full entry (credentials)
-    // from the store by name.
-    //
-    // resolved() 而非 find()：设备列表里的条目不带密码（密码只在钥匙串里），
-    // 这里是「真要连了」的时刻，才按需解锁取出来。找不到时回落 stub，
-    // 与原先 find() 返回 nullptr 的兜底行为一致。
-    const DeviceEntry full = m_store.resolved(stub.name);
+    openSshSessionWithCommand(stub, QString());
+}
+
+void MainWindow::openSshSessionWithCommand(const DeviceEntry &stub, const QString &initialCommand)
+{
+    // 普通设备入口按名称补全凭据；使用 resolved() 在真正连接时才从钥匙串取密码，
+    // 找不到设备则回落 stub，保留原有兜底行为。
+    // 恢复命令入口已经携带来源 SSH 会话的完整配置，不能再按同名设备覆盖它的主机 / 凭据。
+    const DeviceEntry full = initialCommand.isEmpty() ? m_store.resolved(stub.name) : DeviceEntry{};
     const DeviceEntry device = full.name.isEmpty() ? stub : full;
 
     // --- 协议分发 ---
@@ -3200,6 +3216,17 @@ void MainWindow::openSshSession(const DeviceEntry &stub)
         setStatus(tr("请在终端中输入密码…"));
     });
 
+    // 仅首次连接成功后发送一次，重连不能重复执行恢复命令。
+    // 延迟 500ms 给远端 shell 留出初始化时间；以 tab 为回调上下文，关闭标签页会取消回调。
+    if (!initialCommand.isEmpty()) {
+        connect(tab, &SshSessionTab::connected, tab, [tab, initialCommand] {
+            QTimer::singleShot(500, tab, [tab, initialCommand] {
+                if (tab->terminal() && tab->terminal()->sshClient()
+                    && tab->terminal()->sshClient()->isConnected())
+                    tab->terminal()->terminal()->sendText(initialCommand + QStringLiteral("\r"));
+            });
+        }, Qt::SingleShotConnection);
+    }
     bindMonitorToTab(tab);
     tab->connectToHost();
 }

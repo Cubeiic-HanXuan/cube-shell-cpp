@@ -627,6 +627,9 @@ if(CUBESHELL_WITH_SERIAL)
         cube_core
         cube_ui
     )
+
+    qt_add_executable(serial_line_sender_test serial_line_sender_test.cpp)
+    target_link_libraries(serial_line_sender_test PRIVATE cube_core cube_ui)
 endif()
 
 # TCP/Telnet 模块：IAC 状态机（含分块边界）、协商应答字节、自动登录提示词匹配、
@@ -796,6 +799,8 @@ add_test(NAME update_checker_test COMMAND update_checker_test)
 add_test(NAME secrets_migration_test COMMAND secrets_migration_test)
 if(CUBESHELL_WITH_SERIAL)
     add_test(NAME serial_test COMMAND serial_test)
+    add_test(NAME serial_line_sender_test COMMAND serial_line_sender_test)
+    set_tests_properties(serial_line_sender_test PROPERTIES TIMEOUT 60)
 endif()
 add_test(NAME telnet_test COMMAND telnet_test)
 

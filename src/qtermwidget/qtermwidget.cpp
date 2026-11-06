@@ -1378,6 +1378,7 @@ void QTermWidget::showContextMenu(const QPoint &pos)
     connect(aiAction, &QAction::triggered, this,
             [this] { Q_EMIT aiRequested(); });
 
+    Q_EMIT contextMenuAboutToShow(&menu);
     menu.exec(m_impl->m_terminalDisplay->mapToGlobal(pos));
 }
 

@@ -190,6 +190,7 @@ if(CUBESHELL_WITH_SERIAL)
     list(APPEND CORE_SOURCES
         serial/SerialClient.cpp   # QSerialPort 封装（端口枚举/热插拔/日志）
         serial/SerialBridge.cpp   # 串口字节流 ↔ qtermwidget Session
+        serial/SerialLineSender.cpp # 手动/自动逐行发送队列
     )
 endif()
 

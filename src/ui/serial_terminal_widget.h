@@ -25,6 +25,7 @@ class QTermWidget;
 namespace cubeshell {
 
 class SerialBridge;
+class SerialSendDialog;
 
 class SerialTerminalWidget : public QWidget {
     Q_OBJECT
@@ -63,10 +64,13 @@ private slots:
 private:
     void setFormEnabled(bool enabled);
     void updateStatus();
+    void showSendDialog(bool fromClipboard = false);
+    void updateSendDialogSettings();
 
     SerialClient *m_client = nullptr;
     SerialBridge *m_bridge = nullptr;
     QTermWidget *m_term = nullptr;
+    SerialSendDialog *m_sendDialog = nullptr;
 
     QComboBox *m_port = nullptr;
     QComboBox *m_baud = nullptr;

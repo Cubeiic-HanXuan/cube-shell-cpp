@@ -34,6 +34,7 @@
 
 class QAction;
 class QKeyEvent;
+class QMenu;
 class QResizeEvent;
 class QVBoxLayout;
 class QIODevice;
@@ -367,6 +368,8 @@ Q_SIGNALS:
     // 右键菜单切换终端配色后的新方案名 — 供上层持久化并广播到其它已打开终端。
     // 对应Python: cube-shell.py::apply_theme 中 util.THEME['terminal_theme'] 的更新
     void colorSchemeChanged(const QString &name);
+    // 同步扩展本次右键菜单；menu 仅在此次调用/显示期间有效，不可排队使用。
+    void contextMenuAboutToShow(QMenu *menu);
 
 protected:
     // 对应 Python resizeEvent()。

@@ -2,12 +2,15 @@
 
 #include "serial_terminal_widget.h"
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -19,6 +22,7 @@
 #include "config/GlobalState.h"
 
 #include "dialogs/SerialConnectDialog.h"   // serialcombo 辅助函数
+#include "dialogs/SerialSendDialog.h"
 #include "terminal_theme_util.h"
 
 namespace cubeshell {
@@ -49,6 +53,7 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     m_flow = new QComboBox(this);
     serialcombo::fillFlowControl(m_flow);
     m_newline = new QComboBox(this);
+    m_newline->setObjectName(QStringLiteral("serialNewlineMode"));
     serialcombo::fillNewlineMode(m_newline);
 
     m_localEcho = new QCheckBox(tr("本地回显"), this);
@@ -65,6 +70,10 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     m_disconnectButton = new QPushButton(tr("断开"), this);
     m_disconnectButton->setEnabled(false);
     m_clearButton = new QPushButton(tr("清屏"), this);
+    auto *sendButton = new QPushButton(tr("多行发送…"), this);
+    sendButton->setObjectName(QStringLiteral("serialSendOpen"));
+    sendButton->setToolTip(tr("预览并逐行发送命令，不改变普通粘贴行为"));
+    connect(sendButton, &QPushButton::clicked, this, [this]() { showSendDialog(); });
 
     // 两行工具栏：挤在一行会在窄窗口下被裁掉。
     // 分行原则：第一行放物理链路参数，但"流控"挪到第二行——六个参数框加六个
@@ -97,6 +106,7 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     row2->addWidget(m_rxImplicitCr);
     row2->addWidget(m_logging);
     row2->addStretch(1);
+    row2->addWidget(sendButton);
     row2->addWidget(m_clearButton);
     row2->addWidget(m_connectButton);
     row2->addWidget(m_disconnectButton);
@@ -137,6 +147,23 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
     // echoData 走 Session::onReceiveBlock 的 lambda 已在 bridge 内部接好。
     m_bridge->start();
 
+    connect(m_term, &QTermWidget::contextMenuAboutToShow, this, [this](QMenu *menu) {
+        auto *action = new QAction(tr("逐行粘贴…"), menu);
+        action->setObjectName(QStringLiteral("serialPasteLines"));
+        action->setEnabled(!QApplication::clipboard()->text().isEmpty());
+        connect(action, &QAction::triggered, this, [this]() { showSendDialog(true); });
+        QAction *separator = nullptr;
+        for (QAction *item : menu->actions()) {
+            if (item->isSeparator()) {
+                separator = item;
+                break;
+            }
+        }
+        menu->insertAction(separator, action);
+    });
+    connect(m_port, &QComboBox::currentTextChanged,
+            this, &SerialTerminalWidget::updateSendDialogSettings);
+
     // --- 信号接线 ---
     connect(m_connectButton, &QPushButton::clicked,
             this, &SerialTerminalWidget::onConnectClicked);
@@ -168,6 +195,8 @@ SerialTerminalWidget::SerialTerminalWidget(QWidget *parent)
 
 SerialTerminalWidget::~SerialTerminalWidget()
 {
+    delete m_sendDialog;   // 先取消待发送队列，再拆桥和关闭端口。
+    m_sendDialog = nullptr;
     // 先停桥（断开与 Session 的连接），再让 client 随父对象析构关端口。
     if (m_bridge)
         m_bridge->stop();
@@ -247,6 +276,7 @@ void SerialTerminalWidget::onStateChanged(SerialClient::State state)
     m_connectButton->setEnabled(!open);
     m_disconnectButton->setEnabled(open);
     updateStatus();
+    updateSendDialogSettings();
 
     if (open)
         emit connected();
@@ -273,6 +303,31 @@ void SerialTerminalWidget::onNewlineModeChanged()
 {
     if (m_bridge)
         m_bridge->setNewlineMode(serialcombo::newlineModeOf(m_newline));
+    updateSendDialogSettings();
+}
+
+void SerialTerminalWidget::showSendDialog(bool fromClipboard)
+{
+    if (!m_sendDialog) {
+        m_sendDialog = new SerialSendDialog(m_client, m_bridge, this);
+        connect(m_sendDialog, &SerialSendDialog::busyChanged,
+                m_newline, &QComboBox::setDisabled);
+    }
+    updateSendDialogSettings();
+    m_sendDialog->show();
+    m_sendDialog->raise();
+    m_sendDialog->activateWindow();
+    if (fromClipboard)
+        m_sendDialog->loadClipboard();
+}
+
+void SerialTerminalWidget::updateSendDialogSettings()
+{
+    if (m_sendDialog && m_bridge) {
+        const QString name = m_client->isOpen() ? m_client->settings().portName
+                                               : serialcombo::portNameOf(m_port);
+        m_sendDialog->setConnectionInfo(name, m_bridge->newlineMode());
+    }
 }
 
 void SerialTerminalWidget::onLocalEchoToggled(bool enabled)

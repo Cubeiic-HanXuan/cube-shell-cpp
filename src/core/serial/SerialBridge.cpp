@@ -83,6 +83,7 @@ void SerialBridge::onEmulationSendData(const char *data, int length)
     if (!m_running || !m_client || length <= 0)
         return;
 
+    emit terminalInputReceived();
     const QByteArray raw(data, length);
     const QByteArray converted = applyNewlineMode(raw, m_newlineMode);
 
@@ -112,14 +113,16 @@ void SerialBridge::writeToTerminal(const QByteArray &data)
     m_session->onReceiveBlock(data.constData(), int(data.size()));
 }
 
-void SerialBridge::sendText(const QString &text)
+bool SerialBridge::sendText(const QString &text)
 {
     if (!m_running || !m_client)
-        return;
+        return false;
     const QByteArray converted = applyNewlineMode(text.toUtf8(), m_newlineMode);
-    m_client->write(converted);
+    if (!m_client->write(converted))
+        return false;
     if (m_localEcho)
         emit echoData(converted);
+    return true;
 }
 
 QByteArray SerialBridge::applyNewlineMode(const QByteArray &input,

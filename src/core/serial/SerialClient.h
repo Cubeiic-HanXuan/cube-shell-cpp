@@ -104,6 +104,8 @@ public:
     // 写裸字节到串口。未打开时丢弃并返回 false。
     // 注意：换行转换由 SerialBridge 负责，到这里的字节已是最终形态。
     bool write(const QByteArray &data);
+    // 本机 Qt 写缓冲中的字节数，不表示设备是否执行完命令。
+    qint64 bytesToWrite() const;
 
     // --- 会话日志 ---
     // 把收到的原始字节 append 写入文件（发送的字节不记，避免与设备回显重复）。
@@ -120,6 +122,7 @@ signals:
     void stateChanged(cubeshell::SerialClient::State state);
     // 收到串口数据（已落日志，未做任何字符转换）。
     void dataReceived(const QByteArray &data);
+    void bytesWritten(qint64 bytes);
     // 可用端口集合发生变化（热插拔轮询发现）。UI 据此刷新端口下拉框。
     void portsChanged();
 

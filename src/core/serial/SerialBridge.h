@@ -42,8 +42,8 @@ public:
     void setRxImplicitCr(bool enabled) { m_rxImplicitCr = enabled; }
     bool rxImplicitCr() const { return m_rxImplicitCr; }
 
-    // 把一段文本当作用户输入发出去（含换行转换）。供"发送字符串"类功能复用。
-    void sendText(const QString &text);
+    // 把一段文本当作用户输入发出去（含换行转换）。true 仅表示完整提交给本机串口。
+    bool sendText(const QString &text);
 
     // 终端产生的 \r 按 mode 转换成实际要写入串口的字节序列。
     // 静态纯函数，便于单测（见 tests/serial_test.cpp）。
@@ -64,6 +64,8 @@ public:
 signals:
     // 供面板把字节回灌到终端（本地回显走这条路，与串口来的数据同一入口）。
     void echoData(const QByteArray &data);
+    // 普通键盘/粘贴输入到来，逐行发送工具据此暂停，避免两路输入交错。
+    void terminalInputReceived();
 
 private slots:
     void onSerialData(const QByteArray &data);

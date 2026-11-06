@@ -83,6 +83,7 @@ SerialClient::SerialClient(QObject *parent)
     , m_port(new QSerialPort(this))
 {
     connect(m_port, &QSerialPort::readyRead, this, &SerialClient::onReadyRead);
+    connect(m_port, &QSerialPort::bytesWritten, this, &SerialClient::bytesWritten);
     connect(m_port, &QSerialPort::errorOccurred, this, &SerialClient::onSerialError);
 
     // 热插拔轮询常开：未连接时也要让 UI 的端口下拉框跟着插拔刷新。
@@ -200,6 +201,11 @@ bool SerialClient::write(const QByteArray &data)
         return false;
     }
     return written == data.size();
+}
+
+qint64 SerialClient::bytesToWrite() const
+{
+    return isOpen() ? m_port->bytesToWrite() : 0;
 }
 
 void SerialClient::onReadyRead()

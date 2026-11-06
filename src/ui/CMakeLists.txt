@@ -78,6 +78,7 @@ if(CUBESHELL_WITH_SERIAL)
     list(APPEND UI_SOURCES
         serial_terminal_widget.cpp      # 工具栏 + QTermWidget + 状态栏
         dialogs/SerialConnectDialog.cpp # “新建串口连接”菜单的临时连接对话框
+        dialogs/SerialSendDialog.cpp    # 会话独立的多行发送工具
     )
 endif()
 

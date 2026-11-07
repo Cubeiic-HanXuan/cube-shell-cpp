@@ -229,6 +229,10 @@ MainWindow::~MainWindow()
     // 置位析构标志：~QWidget 删子对象时各 tab 的 destroyed lambda 会检查它，
     // 避免在 hash 销毁中状态下访问 m_aiAgents（退出时 hash 随本对象整体销毁）。
     m_destroying = true;
+    const auto agents = m_aiAgents.values();
+    m_aiAgents.clear();
+    qDeleteAll(agents); // stop workers before their tabs/executors are destroyed
+    if (m_plainChatWorker) m_plainChatWorker->stop();
 }
 
 // ---------------------------------------------------------------------------
@@ -913,8 +917,7 @@ void MainWindow::setupAiDock()
             this, &MainWindow::onAiClearRequested);
     connect(m_aiPanel, &AiChatPanel::chatModeChanged,
             this, &MainWindow::onAiChatModeChanged);
-    connect(m_aiPanel, &AiChatPanel::commandExecuteRequested,
-            this, &MainWindow::onAiCommandExecuteRequested);
+    m_plainChatModel = new AiConversationModel(this);
 }
 
 // 对应Python: cube-shell.py::_toggle_ai_panel
@@ -931,245 +934,156 @@ void MainWindow::toggleAiPanel()
 // 对应Python: cube-shell.py::_connect_ai_to_current_tab（行 5639-5695）
 void MainWindow::connectAiToCurrentTab()
 {
-    auto *session = qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
-
-    // 无活动 SSH 会话 → 断开旧 agent，面板置为未连接。
-    if (!session || !session->terminal()) {
-        if (m_activeAiAgent) {
-            disconnectAiFromAgent(m_activeAiAgent);
-            m_activeAiAgent = nullptr;
-        }
+    if (m_aiPanel->chatMode() == AiChatPanel::ChatMode::PlainChat) {
+        m_activeAiAgent = nullptr;
+        m_aiPanel->setConversationModel(m_plainChatModel);
         m_aiPanel->setStatus(false);
         return;
     }
-
-    // 查找或懒建该会话的 SshAiAgent。
-    SshAiAgent *agent = m_aiAgents.value(session, nullptr);
-    if (!agent) {
-        // 未连上（无 SshClient）时不建 agent，等下次切换/发送再试。
-        auto client = session->terminal()->sshClient();
-        if (!client) {
-            if (m_activeAiAgent) {
-                disconnectAiFromAgent(m_activeAiAgent);
-                m_activeAiAgent = nullptr;
-            }
-            m_aiPanel->setStatus(false);
-            return;
-        }
-        // CommandExecutor 会话内复用（objectName "aiExecutor"），
-        // parent 为会话标签 → 随标签销毁。对应Python: 复用 ssh_client
-        auto *executor = session->findChild<CommandExecutor *>(
-            QStringLiteral("aiExecutor"));
-        if (!executor) {
-            executor = new CommandExecutor(client.get(), session);
-            executor->setObjectName(QStringLiteral("aiExecutor"));
-        }
-        agent = new SshAiAgent(executor, AiPreferences::load(), session);
-        m_aiAgents.insert(session, agent);
-        // 绑定终端以支持 AI 交互式命令执行（哨兵机制）。
-        // 对应Python: _TerminalExecutor 绑定到活动 SSH 终端
-        if (session->terminal()->terminal())
-            agent->setTerminal(session->terminal()->terminal());
-        // 哨兵检测需要未过滤数据，故接 SshBridge 的原始数据信号。
-        //（bridge() 在连接建立前为空，此处 client 已存在所以常规不为空）
-        if (session->terminal()->bridge()) {
-            connect(session->terminal()->bridge(), &SshBridge::rawDataForAi,
-                    agent->terminalExecutor(), &TerminalExecutor::onRawData);
-        }
-        // 会话若在 closeTabIn 之外被销毁（应用退出等），同步摘掉哈希项，
-        // 避免悬垂键；agent 作为子对象随之析构，m_activeAiAgent 由 QPointer 置空。
-        // m_destroying 守卫：MainWindow 析构删子对象时本 lambda 仍会被 destroyed
-        // 触发，但此刻 m_aiAgents 已处销毁中状态，remove 会 UAF——直接返回，
-        // 退出时 hash 随 MainWindow 整体销毁，无需逐项 remove。
-        connect(session, &QObject::destroyed, this,
-                [this, session]() {
-                    if (m_destroying)
-                        return;
-                    m_aiAgents.remove(session);
-                });
-
-        // 异步构建服务器画像注入系统提示词。Builder parent 为 agent → 随之销毁。
-        // 对应Python: ServerProfile 首次 AI 交互时异步构建
-        auto *profiler = new ServerProfileBuilder(executor, agent);
-        connect(profiler, &ServerProfileBuilder::profileReady,
-                agent, &SshAiAgent::setServerProfile);
-        profiler->buildAsync();
+    auto *session = qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
+    if (!session || !session->terminal()) {
+        m_activeAiAgent = nullptr;
+        m_aiPanel->setConversationModel(nullptr);
+        m_aiPanel->setStatus(false);
+        return;
     }
-
-    if (agent == m_activeAiAgent)
-        return;   // 已是当前 agent，无需重接
-
-    if (m_activeAiAgent)
-        disconnectAiFromAgent(m_activeAiAgent);
-
-    // Agent → Panel 信号路由。对应Python: _connect_ai_to_current_tab 的各 connect
-    connect(agent, &SshAiAgent::aiMessage, m_aiPanel, &AiChatPanel::appendAiDelta);
-    // 以 m_aiPanel 为 context，disconnectAiFromAgent 时可一并断开。
-    // 捕获发出信号的 agent（QPointer 防悬垂）：确认框弹窗期间用户可能
-    // 切换标签页导致 m_activeAiAgent 变更，命令必须回到产生它的 agent 执行。
-    // 对应Python: agent.command_ready.connect(self._show_confirm_dialog)
-    QPointer<SshAiAgent> agentGuard(agent);
-    connect(agent, &SshAiAgent::commandReady, m_aiPanel,
-            [this, agentGuard](const QList<AiCommand> &commands) {
-        onAiCommandReady(commands, agentGuard.data());
-    });
-    connect(agent, &SshAiAgent::executionStarted, m_aiPanel,
-            [this](const QString &cmd) { m_aiPanel->setExecuting(true, cmd); });
-    connect(agent, &SshAiAgent::executionFinished, m_aiPanel,
-            [this](const AiCommandResult &result) {
-        // 失败命令的诊断信息通常只在 stderr，回落展示避免结果卡片空白。
-        const QString output = result.stdoutText.isEmpty() ? result.stderrText
-                                                           : result.stdoutText;
-        m_aiPanel->appendExecutionResult(result.cmd, result.exitCode, output,
-                                         result.description);
-        // 复位执行中状态。executionFinished 是逐条信号，与 Python 版同义
-        //（下一条命令的 executionStarted/Progress 会重新置 true）。
-        // 对应Python: _on_execution_finished 末尾 set_executing(False)
-        m_aiPanel->setExecuting(false);
-    });
-    connect(agent, &SshAiAgent::executionProgress, m_aiPanel,
-            [this](int current, int total) {
-        m_aiPanel->setExecuting(true, QString(), current, total);
-    });
-    connect(agent, &SshAiAgent::thinkingStarted, m_aiPanel,
-            [this]() { m_aiPanel->setThinking(true); });
-    connect(agent, &SshAiAgent::thinkingFinished, m_aiPanel,
-            [this]() { m_aiPanel->setThinking(false); });
-    connect(agent, &SshAiAgent::errorOccurred, m_aiPanel,
-            [this](const QString &message) {
-        // 对应Python: L5696 append_ai_message(f"❌ 错误: {msg}")
-        m_aiPanel->appendAiMessage(tr("❌ 错误: %1").arg(message));
-    });
-    connect(agent, &SshAiAgent::taskSummary, m_aiPanel, &AiChatPanel::appendTaskSummary);
-    connect(agent, &SshAiAgent::diagnosingStarted, m_aiPanel,
-            &AiChatPanel::appendDiagnosingHint);
-    connect(agent, &SshAiAgent::commandOutput, m_aiPanel,
-            &AiChatPanel::updateCommandOutput);
-
+    auto client = session->terminal()->sshClient();
+    auto *agent = m_aiAgents.value(session);
+    if (!agent && client && client->isConnected()) {
+        agent = new SshAiAgent(nullptr, AiPreferences::load(), session);
+        m_aiAgents.insert(session, agent);
+        QPointer<SshAiAgent> guard(agent);
+        connect(agent, &SshAiAgent::commandReady, this, [this, guard](const QList<AiCommand> &commands) {
+            // Background tasks retain pending approval in their session model.
+            if (guard && m_activeAiAgent == guard && m_aiPanel->chatMode() == AiChatPanel::ChatMode::SshAgent)
+                onAiCommandReady(commands, guard);
+        });
+        const auto updateAgentState = [this, guard, session] {
+            if (!guard || m_destroying) return;
+            refreshAiConnection(session, guard);
+            if (m_activeAiAgent == guard) m_aiPanel->setBusy(guard->isBusy());
+        };
+        connect(agent, &SshAiAgent::turnFinished, this, updateAgentState);
+        connect(agent, &SshAiAgent::executionIdle, this, updateAgentState);
+        connect(session, &QObject::destroyed, this, [this, session] {
+            if (!m_destroying) m_aiAgents.remove(session);
+        });
+    }
     m_activeAiAgent = agent;
-
-    // 面板顶部状态栏：已连接 + 主机名 + 模型名。
-    m_aiPanel->setStatus(true, session->device().hostPort().host);
+    if (agent) refreshAiConnection(session, agent);
+    m_aiPanel->setConversationModel(agent ? agent->displayModel() : nullptr);
+    m_aiPanel->setStatus(client && client->isConnected(), session->device().hostPort().host);
+    m_aiPanel->setBusy(agent && agent->isBusy());
     m_aiPanel->refreshModelLabel();
+    if (agent && !agent->pendingCommands().isEmpty()) {
+        QTimer::singleShot(0, this, [this, guard = QPointer<SshAiAgent>(agent)] {
+            if (guard && m_activeAiAgent == guard && !guard->pendingCommands().isEmpty())
+                onAiCommandReady(guard->pendingCommands(), guard);
+        });
+    }
 }
 
-// 断开 agent 到 Panel 的所有信号连接（含 lambda 连接，以 m_aiPanel 为 context）。
+void MainWindow::refreshAiConnection(SshSessionTab *session, SshAiAgent *agent)
+{
+    if (!session || !session->terminal() || !agent || agent->isBusy()) return;
+    auto client = session->terminal()->sshClient();
+    auto *bridge = session->terminal()->bridge();
+    if (!client || !client->isConnected() || !bridge) return;
+    const qulonglong connection = reinterpret_cast<quintptr>(bridge);
+    if (agent->property("aiBridge").toULongLong() == connection) return;
+    agent->setProperty("aiBridge", connection);
+    agent->terminalExecutor()->resetConnection();
+    agent->setTerminal(session->terminal()->terminal());
+    disconnect(bridge, nullptr, agent, nullptr);
+    connect(bridge, &SshBridge::rawDataForAi, agent, [agent, connection](const QString &text) {
+        if (agent->property("aiBridge").toULongLong() == connection)
+            agent->terminalExecutor()->onRawData(text);
+    });
+    auto *executor = new CommandExecutor(client.get(), agent);
+    executor->setObjectName(QStringLiteral("aiExecutor"));
+    // Retain this exact connection while its executor/profiler can still use it.
+    connect(executor, &QObject::destroyed, executor, [client] { Q_UNUSED(client); });
+    agent->setExecutor(executor);
+    agent->setServerProfile({});
+    auto *profiler = new ServerProfileBuilder(executor, agent);
+    connect(profiler, &ServerProfileBuilder::profileReady, agent, [agent, connection](const QString &profile) {
+        if (agent->property("aiBridge").toULongLong() == connection) agent->setServerProfile(profile);
+    });
+    profiler->buildAsync();
+}
+
 void MainWindow::disconnectAiFromAgent(SshAiAgent *agent)
 {
-    if (!agent)
-        return;
-    disconnect(agent, nullptr, m_aiPanel, nullptr);
+    if (agent && m_aiPanel->conversationModel() == agent->displayModel())
+        m_aiPanel->setConversationModel(nullptr);
+    // Control callbacks stay connected; transcript/approval state belongs to the agent.
 }
 
-// 用户发送消息 → 按 ChatMode 路由到对应后端。
-// 对应Python: cube-shell.py::_on_ai_user_message
-// 注意：用户气泡已由 AiChatPanel::onSend 自行插入，此处不可重复 append。
 void MainWindow::onAiUserMessage(const QString &text)
 {
-    if (text.trimmed().isEmpty())
-        return;
-
+    if (text.trimmed().isEmpty()) return;
     if (m_aiPanel->chatMode() == AiChatPanel::ChatMode::SshAgent) {
-        // SSH 代理模式：路由到当前活动 SshAiAgent（必要时先绑定当前标签）。
-        if (!m_activeAiAgent)
-            connectAiToCurrentTab();
-        if (!m_activeAiAgent) {
-            m_aiPanel->appendAiMessage(
-                tr("⚠️ 未连接 SSH 服务器，请先连接一个远程会话。"));
+        connectAiToCurrentTab();
+        auto *session = qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
+        auto client = session && session->terminal() ? session->terminal()->sshClient() : nullptr;
+        if (!m_activeAiAgent || !client || !client->isConnected()) {
+            m_aiPanel->appendAiMessage(tr("请先连接一个 SSH 会话。"));
+            return;
+        }
+        if (m_activeAiAgent->isBusy()) {
+            m_aiPanel->appendAiMessage(tr("上一任务仍在执行或等待清理，请稍后发送。"));
             return;
         }
         m_activeAiAgent->processUserInput(text);
         return;
     }
-
-    // 普通聊天模式：无工具的纯文本对话，直接走 AiChatWorker。
     if (!m_plainChatWorker) {
         m_plainChatWorker = new AiChatWorker(this);
-        // deltaReceived(content, reasoning) 与 appendAiDelta(reasoning, content)
-        // 参数顺序相反 — 必须经 lambda 换序，否则思考过程与正文互换。
-        connect(m_plainChatWorker, &AiChatWorker::deltaReceived, m_aiPanel,
+        connect(m_plainChatWorker, &AiChatWorker::deltaReceived, this,
                 [this](const QString &content, const QString &reasoning) {
-            m_aiPanel->appendAiDelta(reasoning, content);
+            if (m_plainRequestId == m_plainChatWorker->requestId())
+                m_plainChatModel->appendDelta(m_plainMessageId, content, reasoning);
         });
-        // setThinking(false) 内部会 finalizeAiRender，冲刷节流中的最后一帧。
-        connect(m_plainChatWorker, &AiChatWorker::finishedText, m_aiPanel,
-                [this](const QString &) { m_aiPanel->setThinking(false); });
-        connect(m_plainChatWorker, &AiChatWorker::failed, m_aiPanel,
-                [this](const QString &message) {
-            m_aiPanel->setThinking(false);
-            m_aiPanel->appendAiMessage(message);
+        connect(m_plainChatWorker, &AiChatWorker::requestFinished, this, [this](const AiRequestResult &result) {
+            if (result.requestId != m_plainRequestId || !m_plainChatModel->isBusy()) return;
+            m_plainChatModel->finalizeMessage(m_plainMessageId, result.text, true);
+            const bool complete = result.outcome == AiRequestOutcome::Complete && result.toolCalls.isEmpty();
+            const QString text = complete ? result.text
+                : result.text + tr("\n\n回复未完成：%1").arg(result.error.isEmpty() ? tr("普通聊天不执行工具调用") : result.error);
+            m_plainChatModel->finishTurn(complete ? AiTurnOutcome::Complete
+                : result.outcome == AiRequestOutcome::Cancelled ? AiTurnOutcome::Cancelled : AiTurnOutcome::Failed,
+                text, !complete);
         });
     }
-
-    const AiPreferences prefs = AiPreferences::load();
+    if (m_plainChatWorker->isRunning()) return;
+    const auto prefs = AiPreferences::load();
     m_plainChatWorker->setPreferences(prefs);
-    QJsonArray messages;
-    messages.append(QJsonObject{
-        {QStringLiteral("role"), QStringLiteral("system")},
-        {QStringLiteral("content"), prefs.systemPrompt},
+    m_plainChatModel->beginTurn(text, prefs.model);
+    m_plainMessageId = m_plainChatModel->beginMessage();
+    m_plainRequestId = m_plainChatWorker->requestId() + 1;
+    m_plainChatWorker->start(QJsonArray{
+        QJsonObject{{QStringLiteral("role"), QStringLiteral("system")}, {QStringLiteral("content"), prefs.systemPrompt}},
+        QJsonObject{{QStringLiteral("role"), QStringLiteral("user")}, {QStringLiteral("content"), text}}
     });
-    messages.append(QJsonObject{
-        {QStringLiteral("role"), QStringLiteral("user")},
-        {QStringLiteral("content"), text},
-    });
-    m_aiPanel->setThinking(true);
-    m_plainChatWorker->start(messages);
 }
 
-// 上下文模式切换：切到 SSH 代理时立即绑定当前标签。
-void MainWindow::onAiChatModeChanged(AiChatPanel::ChatMode mode)
+void MainWindow::onAiChatModeChanged(AiChatPanel::ChatMode)
 {
-    if (mode == AiChatPanel::ChatMode::SshAgent) {
-        connectAiToCurrentTab();
-    } else {
-        // 普通聊天不依附会话 — 断开并清理当前 agent，
-        // 否则切回 SSH 代理时 connectAiToCurrentTab 会因指针未清空而提前返回。
-        if (m_activeAiAgent) {
-            disconnectAiFromAgent(m_activeAiAgent);
-            m_activeAiAgent = nullptr;
-        }
-        m_aiPanel->setStatus(false);
-    }
+    connectAiToCurrentTab();
 }
 
-// 停止当前 AI 请求 / 命令执行。对应Python: AI 面板停止按钮
 void MainWindow::onAiStopRequested()
 {
-    if (m_activeAiAgent)
-        m_activeAiAgent->stop();
-    if (m_plainChatWorker && m_plainChatWorker->isRunning())
-        m_plainChatWorker->stop();
-    m_aiPanel->setThinking(false);
-    m_aiPanel->setExecuting(false);
+    if (m_aiPanel->chatMode() == AiChatPanel::ChatMode::SshAgent) {
+        if (m_activeAiAgent) { m_activeAiAgent->stop(); m_aiPanel->setBusy(m_activeAiAgent->isBusy()); }
+    } else if (m_plainChatWorker) m_plainChatWorker->stop();
 }
 
-// 清空对话历史（面板侧的气泡清理由面板自身负责）。
 void MainWindow::onAiClearRequested()
 {
-    if (m_activeAiAgent)
-        m_activeAiAgent->clearConversation();
-}
-
-// 命令卡片"执行"按钮回调 — 直接把单条命令发到当前活动终端，
-// 不走 AI 执行线程（与批量确认执行是两条独立路径）。
-// 对应Python: cube-shell.py::_on_single_command_exec（行 5712-5717）
-void MainWindow::onAiCommandExecuteRequested(const QString &cmd)
-{
-    // "当前活动标签页"语义沿用 Python 版：卡片生成后用户切换 tab 再点执行，
-    // 命令会发到当前会话而非产生卡片的会话（固有语义，不做更改）。
-    auto *session =
-        qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
-    if (!session || !session->terminal() || !session->terminal()->terminal()) {
-        m_aiPanel->appendAiMessage(tr("⚠️ 无活动的 SSH 会话，无法执行命令。"));
-        return;
-    }
-    // 与 Python 版一致：多行内容原样发送到终端，不做首行截断
-    //（for 循环、heredoc、反斜杠续行等合法多行单命令需完整发送）。
-    if (cmd.trimmed().isEmpty()) {
-        m_aiPanel->appendAiMessage(tr("⚠️ 命令为空，已忽略执行。"));
-        return;
-    }
-    session->terminal()->terminal()->sendText(cmd + QStringLiteral("\n"));
+    if (m_aiPanel->chatMode() == AiChatPanel::ChatMode::SshAgent) {
+        if (m_activeAiAgent) m_activeAiAgent->clearConversation();
+    } else if (!m_plainChatWorker || !m_plainChatWorker->isRunning()) m_plainChatModel->clear();
 }
 
 // AI 命令就绪 → 按安全检查结果分流：全部 SAFE/LOW 自动整批执行，
@@ -1180,8 +1094,16 @@ void MainWindow::onAiCommandExecuteRequested(const QString &cmd)
 void MainWindow::onAiCommandReady(const QList<AiCommand> &commands,
                                   SshAiAgent *agent)
 {
-    if (commands.isEmpty())
+    if (commands.isEmpty() || !agent || agent->pendingCommands().isEmpty()
+        || agent->pendingCommands().first().stepId != commands.first().stepId
+        || agent->property("aiApprovalOpen").toBool())
         return;
+    for (const auto &command : commands) {
+        if (!command.safety.isAllowed) {
+            agent->rejectPendingCommands(tr("安全规则禁止执行本批计划中的命令：%1").arg(command.safety.reason));
+            return;
+        }
+    }
 
     bool hasRisky = false;
     for (const AiCommand &cmd : commands) {
@@ -1200,6 +1122,7 @@ void MainWindow::onAiCommandReady(const QList<AiCommand> &commands,
 
     // QPointer 守卫：对话框 exec 期间会话标签可能被关闭，agent 随之析构。
     QPointer<SshAiAgent> agentGuard(agent);
+    agent->setProperty("aiApprovalOpen", true);
     CommandConfirmDialog dialog(commands, this);
     connect(&dialog, &CommandConfirmDialog::commandsApproved, this,
             [this, agentGuard](const QList<AiCommand> &approved) {
@@ -1210,6 +1133,12 @@ void MainWindow::onAiCommandReady(const QList<AiCommand> &commands,
         onCommandsStepMode(stepCommands, agentGuard.data());
     });
     dialog.exec();
+    if (agentGuard) {
+        agentGuard->setProperty("aiApprovalOpen", false);
+        if (!agentGuard->pendingCommands().isEmpty()
+            && agentGuard->pendingCommands().first().stepId == commands.first().stepId)
+            agentGuard->rejectPendingCommands();
+    }
 }
 
 // 用户确认后整批下发 executeCommands（agent 工作线程逐条执行）。
@@ -1241,11 +1170,12 @@ void MainWindow::onCommandsStepMode(const QList<AiCommand> &commands,
         if (dialog.exec() == QDialog::Accepted) {
             approved.append(commands.at(i));
         } else if (dialog.abortAll()) {
-            break;   // 终止全部后续命令
+            if (agentGuard) agentGuard->rejectPendingCommands(tr("用户终止了全部命令，尚未下发的批准项也未执行"));
+            return;
         }
         // 否则只是跳过当前命令，继续下一条
     }
-    if (!approved.isEmpty())
+    if (agentGuard)
         onCommandsApproved(approved, agentGuard.data());
 }
 
@@ -3150,6 +3080,8 @@ void MainWindow::openSshSessionWithCommand(const DeviceEntry &stub, const QStrin
     connect(tab, &SshSessionTab::connected, this, [this, device, tab]() {
         setStatus(tr("已连接：%1@%2").arg(device.username, device.host));
         setTabConnected(tab, true);
+        if (auto *agent = m_aiAgents.value(tab)) refreshAiConnection(tab, agent);
+        if (activeTabWidget()->currentWidget() == tab && m_aiDock->isVisible()) connectAiToCurrentTab();
         // 连接成功 → 把会话的 SFTP 浏览器挂到左侧面板（reparent 到 stack）。
         // 对应Python: on_ssh_connected 后左侧 treeWidget 展示远程文件树
         if (SftpBrowserWidget *browser = tab->sftpBrowser()) {
@@ -3189,6 +3121,14 @@ void MainWindow::openSshSessionWithCommand(const DeviceEntry &stub, const QStrin
     connect(tab, &SshSessionTab::disconnected, this, [this, device, tab]() {
         setStatus(tr("已断开：%1").arg(device.host));
         setTabConnected(tab, false);
+        if (auto *agent = m_aiAgents.value(tab)) {
+            agent->setProperty("aiBridge", qulonglong(0));
+            agent->connectionLost();
+            if (m_activeAiAgent == agent) {
+                m_aiPanel->setStatus(false);
+                m_aiPanel->setBusy(agent->isBusy());
+            }
+        }
 #ifdef CUBESHELL_WITH_LOCALPROC
         // Docker 后端若正用着该会话的 executor，撤下避免悬垂
         // （DockerManager 持裸指针，凭 QPointer 判归属）。

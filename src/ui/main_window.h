@@ -232,6 +232,7 @@ private:
     // AI 面板绑定到当前活动 SSH 会话（懒建 per-session Agent 并路由信号）。
     // 对应Python: cube-shell.py::_connect_ai_to_current_tab（行 5639-5695）
     void connectAiToCurrentTab();
+    void refreshAiConnection(SshSessionTab *session, SshAiAgent *agent);
     // 断开 agent → 面板的全部信号连接。
     void disconnectAiFromAgent(SshAiAgent *agent);
     // 面板输入区回调（按 ChatMode 路由到 SshAiAgent 或 AiChatWorker）。
@@ -240,7 +241,6 @@ private:
     void onAiChatModeChanged(AiChatPanel::ChatMode mode);
     void onAiStopRequested();
     void onAiClearRequested();
-    void onAiCommandExecuteRequested(const QString &cmd);
     // 命令就绪分流：安全命令自动整批执行，危险命令弹确认对话框。
     // agent 为发出 commandReady 的会话 agent — 命令必须回到该 agent 执行，
     // 不能用 m_activeAiAgent（弹窗期间用户切标签会导致跨主机误执行）。
@@ -431,6 +431,9 @@ private:
     // QPointer 守卫会话在 closeTabIn 之外被销毁（应用退出）时的悬垂。
     QPointer<SshAiAgent> m_activeAiAgent;
     AiChatWorker *m_plainChatWorker = nullptr;   // 普通聊天模式（无工具）
+    AiConversationModel *m_plainChatModel = nullptr;
+    quint64 m_plainRequestId = 0;
+    quint64 m_plainMessageId = 0;
     // 对应Python: ui.follow_folder 复选框（OSC7 cwd 跟随 + SFTP 联动）
     bool m_followFolder = false;
     // 会话 Tab 页 → 左侧文件浏览器（SftpBrowserWidget / LocalFileBrowserWidget）。

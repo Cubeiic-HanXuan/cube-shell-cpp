@@ -759,6 +759,20 @@ target_link_libraries(claude_settings_ui_test PRIVATE Qt6::Widgets cube_core)
 add_test(NAME claude_settings_ui_test COMMAND claude_settings_ui_test)
 set_tests_properties(claude_settings_ui_test PROPERTIES TIMEOUT 60)
 
+# AI request/agent lifecycle uses loopback fixtures and a fake executor only.
+qt_add_executable(ai_agent_lifecycle_test ai_agent_lifecycle_test.cpp)
+target_include_directories(ai_agent_lifecycle_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(ai_agent_lifecycle_test PRIVATE Qt6::Network cube_core)
+qt_add_executable(ai_conversation_ui_test ai_conversation_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
+    ${CMAKE_SOURCE_DIR}/resources/icons/icons.qrc)
+target_include_directories(ai_conversation_ui_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/qtermwidget)
+target_link_libraries(ai_conversation_ui_test PRIVATE Qt6::Widgets Qt6::Network cube_core qtermwidget)
+add_test(NAME ai_agent_lifecycle_test COMMAND ai_agent_lifecycle_test)
+add_test(NAME ai_conversation_ui_test COMMAND ai_conversation_ui_test)
+set_tests_properties(ai_agent_lifecycle_test ai_conversation_ui_test PROPERTIES TIMEOUT 90)
+
 # ---------------------------------------------------------------------------
 # CTest registration
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 // 行控件可随滚动销毁重建，因此展开状态使用条目索引/稳定键存放在 ViewState 中。
 
 #include "claude_code/ClaudeSessionData.h"
+#include "widgets/ConversationWidgets.h"
 #include <QColor>
 #include <QIcon>
 #include <QStyledItemDelegate>
@@ -18,23 +19,10 @@ class QUrl;
 
 namespace cubeshell {
 namespace sessionui {
-struct Colors {
-    QColor canvas, surface, raised, code, text, muted, border, accent, accentSoft;
-    QColor user, userBorder, success, error;
-};
-// 主背景取应用 QPalette::Window；其他颜色区分气泡、代码与状态，避免页面底色脱离主题。
-Colors colors(const QPalette &palette);
-QString css(const QColor &color);
 QString timeLabel(qint64 milliseconds, bool date = false);
 QString durationLabel(qint64 milliseconds);
 QString toolSummary(const ClaudeSessionEntry &entry);
 QString messagePreview(const QString &text);
-
-enum class Glyph { Back, Previous, Next, Search, Copy, Folder, Download, Refresh,
-                   Sidebar, More, Chevron, Play, Check, Close, Expand, Collapse, Down, Filter, Cube };
-QIcon icon(Glyph glyph, const QColor &color);
-QToolButton *iconButton(Glyph glyph, const QString &label, const Colors &colors, QWidget *parent);
-void styleIconButton(QToolButton *button, const Colors &colors);
 
 // 交互状态独立于控件生命周期：滚出视口后销毁控件，返回时仍保持原来的展开状态。
 struct ViewState {

@@ -45,9 +45,6 @@ public:
     static QStringList splitBlocks(const QString &markdown);
 
 private:
-    // 对应Python: AIChatPanel._build_table_html
-    static QString buildTableHtml(const QStringList &rows);
-
     QCache<QString, QString> m_cache;
 };
 

@@ -52,6 +52,8 @@ struct AiCommand {
     bool allowFailure = false;
     bool interactive = false;
     SafetyCheckResult safety;
+    quint64 stepId = 0;          // 本地执行身份，不发送给模型
+    QString toolCallId;
 };
 
 // Stateless rule engine; all patterns are pre-compiled at construction so an

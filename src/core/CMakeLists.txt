@@ -77,6 +77,9 @@ set(CORE_SOURCES
     ai/TerminalExecutor.cpp     # port of core/ai/ssh_agent.py::_TerminalExecutor
     ai/CommandConfirmDialog.cpp # port of core/ai/confirm_dialog.py
     ai/AiChatPanel.cpp          # port of core/ai/ai_panel.py UI
+    ai/AiConversationModel.cpp  # session-owned live execution transcript
+    ai/AiConversationView.cpp   # native execution timeline and final report
+    widgets/ConversationWidgets.cpp # shared conversation primitives
     ai/ServerProfileBuilder.cpp # port of core/ai/server_profile.py
 
     # --- docker (compose YAML 解析；纯数据层，不起子进程) ---

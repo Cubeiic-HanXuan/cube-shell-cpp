@@ -20,7 +20,7 @@ namespace cubeshell {
 // 哨兵：__CUBE_AI_END__:<命令id>:<退出码>
 // 对应Python: re.compile(r'__CUBE_AI_END__:(\d+):(-?\d+)')
 const QRegularExpression TerminalExecutor::s_sentinelRe(
-    QStringLiteral("__CUBE_AI_END__:(\\d+):(-?\\d+)"));
+    QStringLiteral("__CUBE_AI_END__:(\\d+):(-?\\d+)\\r?\\n"));
 
 // 控制序列：OSC(ESC ] ... BEL/ST)、CSI(ESC [ ... 字母)、字符集选择、单字符转义。
 // 对应Python: re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07')
@@ -46,6 +46,7 @@ void TerminalExecutor::setTerminal(QTermWidget *terminal)
     if (m_terminal == terminal)
         return;
 
+    resetConnection();
     if (m_terminal)
         disconnect(m_terminal, nullptr, this, nullptr);
 
@@ -64,24 +65,35 @@ QTermWidget *TerminalExecutor::terminal() const
 }
 
 // 对应Python: _TerminalExecutor.run_blocking
-QPair<int, QString> TerminalExecutor::runBlocking(const QString &cmd, int timeoutMs)
+void TerminalExecutor::resetConnection()
+{
+    cancel();
+    m_initializedTerminalId = 0;
+}
+
+QPair<int, QString> TerminalExecutor::runBlocking(const QString &cmd, int timeoutMs,
+                                                 const std::atomic<bool> *stopFlag)
 {
     if (cmd.trimmed().isEmpty())
         return {-1, QStringLiteral("(空命令)")};
 
+    int id = 0;
     {
         QMutexLocker locker(&m_mutex);
-        m_currentId = m_nextId++;
+        if (m_inFlight) return {-1, QStringLiteral("(已有命令正在执行)")};
+        if (stopFlag && stopFlag->load()) return {-1, QStringLiteral("(已取消)")};
+        m_inFlight = true;
+        id = m_currentId = m_nextId++;
         m_resultReady = false;
         m_resultExitCode = -1;
         m_resultOutput.clear();
         m_outputBuffer.clear();
+        m_outputTruncated = false;
         m_cancelled.store(false);
     }
 
     // sendText 会走 Session/Emulation，必须在本对象所属线程（主线程）执行。
-    QMetaObject::invokeMethod(this, "dispatch", Qt::QueuedConnection,
-                              Q_ARG(QString, cmd));
+    QMetaObject::invokeMethod(this, [this, cmd, id] { dispatch(cmd, id); }, Qt::QueuedConnection);
 
     // 主线程自己调用时不能用 QWaitCondition：事件循环被挂死后哨兵永远送不到。
     if (thread() == QThread::currentThread())
@@ -92,8 +104,10 @@ QPair<int, QString> TerminalExecutor::runBlocking(const QString &cmd, int timeou
     while (!m_resultReady) {
         if (!m_condition.wait(&m_mutex, deadline)) {
             m_currentId = 0;
+            m_inFlight = false;
+            const QString output = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString()) + stripAnsi(m_outputBuffer);
             m_outputBuffer.clear();
-            return {-1, QStringLiteral("(命令执行超时)")};
+            return {-1, output + QStringLiteral("\n(命令执行超时，远端状态未知)")};
         }
     }
     return takeResultLocked();
@@ -115,14 +129,17 @@ QPair<int, QString> TerminalExecutor::waitOnOwnThread(int timeoutMs)
 
     QMutexLocker locker(&m_mutex);
     m_currentId = 0;
+    m_inFlight = false;
+    const QString output = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString()) + stripAnsi(m_outputBuffer);
     m_outputBuffer.clear();
-    return {-1, QStringLiteral("(命令执行超时)")};
+    return {-1, output + QStringLiteral("\n(命令执行超时，远端状态未知)")};
 }
 
 QPair<int, QString> TerminalExecutor::takeResultLocked()
 {
     const QPair<int, QString> result(m_resultExitCode, m_resultOutput);
     m_resultReady = false;
+    m_inFlight = false;
     m_resultOutput.clear();
     m_currentId = 0;
     m_outputBuffer.clear();
@@ -130,8 +147,12 @@ QPair<int, QString> TerminalExecutor::takeResultLocked()
 }
 
 // 主线程执行：注入环境 hook（首次）并把带 _CUBE_ID 前缀的命令喂给终端。
-void TerminalExecutor::dispatch(const QString &cmd)
+void TerminalExecutor::dispatch(const QString &cmd, int id)
 {
+    {
+        QMutexLocker locker(&m_mutex);
+        if (id != m_currentId || m_resultReady || !m_inFlight) return;
+    }
     if (!m_terminal) {
         QMutexLocker locker(&m_mutex);
         m_resultExitCode = -1;
@@ -145,13 +166,10 @@ void TerminalExecutor::dispatch(const QString &cmd)
     if (m_initializedTerminalId != quintptr(m_terminal.data()))
         setupEnvironment();
 
-    int id = 0;
     {
         QMutexLocker locker(&m_mutex);
-        id = m_currentId;
+        if (id != m_currentId || m_resultReady) return;
     }
-    if (id == 0)
-        return; // 已被 cancel() / 超时接管，别再往终端里塞命令
 
     // _CUBE_ID 前缀既是哨兵的关联 id，也是 SshBridge 过滤回显的依据。
     const QString commandStr = QStringLiteral("_CUBE_ID=%1; %2").arg(id).arg(cmd);
@@ -203,8 +221,10 @@ void TerminalExecutor::onRawData(const QString &text)
         return; // 没有在跑的命令
 
     m_outputBuffer += text;
-    if (m_outputBuffer.size() > kMaxBufferChars)
+    if (m_outputBuffer.size() > kMaxBufferChars) {
+        m_outputTruncated = true;
         m_outputBuffer = m_outputBuffer.right(kMaxBufferChars);
+    }
 
     const QString clean = stripAnsi(m_outputBuffer);
     QRegularExpressionMatchIterator it = s_sentinelRe.globalMatch(clean);
@@ -215,12 +235,16 @@ void TerminalExecutor::onRawData(const QString &text)
 
         m_resultExitCode = match.captured(2).toInt();
         m_resultOutput = extractOutput(clean, match.capturedStart(0));
+        if (m_outputTruncated)
+            m_resultOutput.prepend(QStringLiteral("[输出过长，已截断；仅保留最后 %1 字符]\n").arg(kMaxBufferChars));
         m_resultReady = true;
         m_currentId = 0;
         m_outputBuffer.clear();
         m_condition.wakeAll();
         return;
     }
+    locker.unlock();
+    emit outputReceived(stripAnsi(text));
 }
 
 void TerminalExecutor::cancel()
@@ -231,7 +255,8 @@ void TerminalExecutor::cancel()
 
     m_cancelled.store(true);
     m_resultExitCode = -1;
-    m_resultOutput = QStringLiteral("(已取消)");
+    m_resultOutput = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString())
+        + stripAnsi(m_outputBuffer) + QStringLiteral("\n(已停止等待，远端进程可能仍在运行)");
     m_resultReady = true;
     m_currentId = 0;
     m_outputBuffer.clear();
@@ -246,9 +271,9 @@ QString TerminalExecutor::extractOutput(const QString &cleanBuffer, int sentinel
 
     QStringList lines = body.split(QLatin1Char('\n'));
 
-    // 末段是哨兵行的行首（提示符等），不属于输出。
-    if (!lines.isEmpty())
-        lines.removeLast();
+    // A command such as printf has no trailing newline: its final fragment is
+    // real output, not a prompt to discard.
+    if (!lines.isEmpty() && lines.last().isEmpty()) lines.removeLast();
     // 首行是命令回显："<提示符> _CUBE_ID=N; <cmd>"。
     if (!lines.isEmpty() && lines.first().contains(QLatin1String("_CUBE_ID=")))
         lines.removeFirst();

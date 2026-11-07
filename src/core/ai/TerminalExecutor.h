@@ -46,7 +46,14 @@ public:
     // or timeout fires. Safe to call from ANY thread (cross-thread dispatch).
     // Returns (exitCode, capturedOutput). exitCode=-1 on timeout/cancel/error.
     // 对应Python: _TerminalExecutor.run_blocking
-    QPair<int, QString> runBlocking(const QString &cmd, int timeoutMs = kDefaultTimeoutMs);
+    QPair<int, QString> runBlocking(const QString &cmd, int timeoutMs = kDefaultTimeoutMs,
+                                   const std::atomic<bool> *stopFlag = nullptr);
+    void resetConnection();
+
+signals:
+    void outputReceived(const QString &text);
+
+public:
 
     // Cancel the currently running command (wakes the blocked thread).
     void cancel();
@@ -57,7 +64,7 @@ public slots:
     void onRawData(const QString &text);
 
 private:
-    Q_INVOKABLE void dispatch(const QString &cmd);
+    void dispatch(const QString &cmd, int id);
     void setupEnvironment();
 
     // 从 m_outputBuffer 里剥掉命令回显与哨兵行，得到可回填给 LLM 的纯输出。
@@ -82,10 +89,12 @@ private:
     int m_resultExitCode = -1;
     QString m_resultOutput;
     bool m_resultReady = false;
+    bool m_inFlight = false;
     std::atomic<bool> m_cancelled{false};
 
     // Output buffer for current command
     QString m_outputBuffer;
+    bool m_outputTruncated = false;
 
     // Environment initialization tracking (per terminal instance)
     quintptr m_initializedTerminalId = 0;

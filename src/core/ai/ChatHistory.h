@@ -23,6 +23,8 @@ struct ChatMessage {
     QString role;
     QString content;
     QString timestamp;   // ISO-8601, e.g. "2026-07-29T12:00:00"
+    QJsonArray toolCalls;
+    QString toolCallId;
 };
 
 // 对应Python: conversation.py::ConversationManager
@@ -44,6 +46,8 @@ public:
     void addUserMessage(const QString &content);
     // 对应Python: add_assistant_message
     void addAssistantMessage(const QString &content);
+    void addAssistantToolCalls(const QString &content, const QJsonArray &calls);
+    void addToolResult(const QString &callId, const QString &content);
     // 对应Python: add_tool_response（以 user 角色回填工具结果）
     void addToolResponse(const QString &toolName, const QString &content);
     // 对应Python: add_command_result（截断 + ANSI 清理 + user 角色回填）

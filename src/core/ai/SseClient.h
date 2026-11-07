@@ -98,6 +98,7 @@ signals:
     void eventReceived(const QString &type, const QString &data);
     void streamFinished();
     void streamError(const QString &message);
+    void jsonReceived(const QByteArray &body); // servers ignoring stream=true
 
 private:
     void onReadyRead();
@@ -110,6 +111,9 @@ private:
     QByteArray m_errorBody;      // body accumulated when HTTP status >= 400
     bool m_httpError = false;
     bool m_aborted = false;
+    quint64 m_generation = 0;
+    bool m_jsonResponse = false;
+    QByteArray m_jsonBody;
 };
 
 } // namespace cubeshell

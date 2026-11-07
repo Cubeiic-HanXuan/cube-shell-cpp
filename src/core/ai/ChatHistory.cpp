@@ -58,6 +58,28 @@ void ChatHistory::addAssistantMessage(const QString &content)
     appendMessage(QStringLiteral("assistant"), content);
 }
 
+void ChatHistory::addAssistantToolCalls(const QString &content, const QJsonArray &calls)
+{
+    ChatMessage message;
+    message.role = QStringLiteral("assistant");
+    message.content = content;
+    message.toolCalls = calls;
+    message.timestamp = QDateTime::currentDateTime().toString(Qt::ISODate);
+    m_messages.append(message);
+    compressIfNeeded();
+}
+
+void ChatHistory::addToolResult(const QString &callId, const QString &content)
+{
+    ChatMessage message;
+    message.role = QStringLiteral("tool");
+    message.content = SensitiveDataMasker::mask(content);
+    message.toolCallId = callId;
+    message.timestamp = QDateTime::currentDateTime().toString(Qt::ISODate);
+    m_messages.append(message);
+    compressIfNeeded();
+}
+
 // 对应Python: ConversationManager.add_tool_response
 void ChatHistory::addToolResponse(const QString &toolName, const QString &content)
 {
@@ -108,6 +130,8 @@ QJsonArray ChatHistory::buildMessages() const
         QJsonObject obj;
         obj.insert(QStringLiteral("role"), m.role);
         obj.insert(QStringLiteral("content"), m.content);
+        if (!m.toolCalls.isEmpty()) obj.insert(QStringLiteral("tool_calls"), m.toolCalls);
+        if (!m.toolCallId.isEmpty()) obj.insert(QStringLiteral("tool_call_id"), m.toolCallId);
         messages.append(obj);
     }
     return messages;
@@ -138,6 +162,8 @@ bool ChatHistory::saveToFile(const QString &conversationId,
         QJsonObject obj;
         obj.insert(QStringLiteral("role"), m.role);
         obj.insert(QStringLiteral("content"), m.content);
+        if (!m.toolCalls.isEmpty()) obj.insert(QStringLiteral("tool_calls"), m.toolCalls);
+        if (!m.toolCallId.isEmpty()) obj.insert(QStringLiteral("tool_call_id"), m.toolCallId);
         obj.insert(QStringLiteral("timestamp"), m.timestamp);
         arr.append(obj);
     }
@@ -183,6 +209,8 @@ bool ChatHistory::loadFromFile(const QString &conversationId, QString *errorOut)
         msg.role = obj.value(QStringLiteral("role")).toString();
         msg.content = obj.value(QStringLiteral("content")).toString();
         msg.timestamp = obj.value(QStringLiteral("timestamp")).toString();
+        msg.toolCalls = obj.value(QStringLiteral("tool_calls")).toArray();
+        msg.toolCallId = obj.value(QStringLiteral("tool_call_id")).toString();
         if (!msg.role.isEmpty())
             m_messages.append(msg);
     }
@@ -235,12 +263,13 @@ QString ChatHistory::truncateOutput(const QString &text)
 // 对应Python: ConversationManager._compress_if_needed
 void ChatHistory::compressIfNeeded()
 {
-    const int keepCount = m_maxHistory * 2;
-    if (m_messages.size() <= kCompressThreshold
-        && m_messages.size() <= keepCount)
-        return;
-    if (m_messages.size() > keepCount)
-        m_messages = m_messages.mid(m_messages.size() - keepCount);
+    const int keepCount = qMax(2, m_maxHistory * 2);
+    if (m_messages.size() <= keepCount) return;
+    int cut = m_messages.size() - keepCount;
+    // Keep the entire assistant-tool exchange if the nominal boundary lands
+    // inside it, even when a single batch exceeds the history message budget.
+    while (cut > 0 && m_messages.at(cut).role == QLatin1String("tool")) --cut;
+    if (cut > 0) m_messages = m_messages.mid(cut);
 }
 
 } // namespace cubeshell

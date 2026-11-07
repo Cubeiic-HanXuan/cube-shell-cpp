@@ -157,6 +157,8 @@ void SseClient::post(const QUrl &url, const QByteArray &jsonBody,
     m_errorBody.clear();
     m_httpError = false;
     m_aborted = false;
+    m_jsonResponse = false;
+    m_jsonBody.clear();
 
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader,
@@ -167,14 +169,18 @@ void SseClient::post(const QUrl &url, const QByteArray &jsonBody,
     request.setTransferTimeout(transferTimeoutMs);
 
     m_reply = m_manager->post(request, jsonBody);
-    connect(m_reply, &QNetworkReply::readyRead,
-            this, &SseClient::onReadyRead);
-    connect(m_reply, &QNetworkReply::finished,
-            this, &SseClient::onFinished);
+    const quint64 generation = m_generation;
+    connect(m_reply, &QNetworkReply::readyRead, this, [this, generation] {
+        if (generation == m_generation) onReadyRead();
+    });
+    connect(m_reply, &QNetworkReply::finished, this, [this, generation] {
+        if (generation == m_generation) onFinished();
+    });
 }
 
 void SseClient::abort()
 {
+    ++m_generation;
     if (!m_reply)
         return;
     m_aborted = true;
@@ -199,9 +205,18 @@ void SseClient::onReadyRead()
         return;
     }
 
+    m_jsonResponse = m_reply->header(QNetworkRequest::ContentTypeHeader).toString()
+                         .contains(QLatin1String("application/json"), Qt::CaseInsensitive);
+    if (m_jsonResponse) {
+        m_jsonBody.append(m_reply->readAll());
+        return;
+    }
+    const quint64 generation = m_generation;
     const QList<SseEvent> events = m_parser.feed(m_reply->readAll());
-    for (const SseEvent &ev : events)
+    for (const SseEvent &ev : events) {
         emit eventReceived(ev.type, ev.data);
+        if (generation != m_generation) return;
+    }
     if (m_parser.isDone() && m_reply) {
         // Stop reading further bytes; onFinished will emit streamFinished.
         m_reply->close();
@@ -238,11 +253,24 @@ void SseClient::onFinished()
         return;
     }
 
-    // Flush any unterminated trailing event.
-    const QList<SseEvent> events = m_parser.finish();
+    const quint64 generation = m_generation;
+    if (m_jsonResponse || m_reply->header(QNetworkRequest::ContentTypeHeader).toString()
+                              .contains(QLatin1String("application/json"), Qt::CaseInsensitive)) {
+        m_jsonBody.append(m_reply->readAll());
+        const QByteArray body = m_jsonBody;
+        cleanupReply();
+        emit jsonReceived(body);
+        if (generation == m_generation) emit streamFinished();
+        return;
+    }
+    // A backend can leave bytes readable only at finished, without readyRead.
+    QList<SseEvent> events = m_parser.feed(m_reply->readAll());
+    events.append(m_parser.finish());
     cleanupReply();
-    for (const SseEvent &ev : events)
+    for (const SseEvent &ev : events) {
         emit eventReceived(ev.type, ev.data);
+        if (generation != m_generation) return;
+    }
     emit streamFinished();
 }
 

@@ -7,6 +7,7 @@
 #include "AiPreferences.h"
 
 #include <QAudioSource>
+#include <QCoreApplication>
 #include <QHttpMultiPart>
 #include <QHttpPart>
 #include <QIODevice>
@@ -18,6 +19,9 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QtEndian>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0) && QT_CONFIG(permissions)
+#include <QPermissions>
+#endif
 
 namespace cubeshell {
 
@@ -127,22 +131,38 @@ VoiceInput::VoiceInput(QObject *parent)
 
 VoiceInput::~VoiceInput()
 {
-    if (m_audioSource) {
-        m_audioSource->stop();
-        m_audioSource = nullptr;
-        m_audioIo = nullptr;
+    ++m_generation;
+    m_state = State::Idle;
+    releaseAudioInput();
+    cancelPendingRequests();
+}
+
+void VoiceInput::requestMicrophonePermission(std::function<void(bool)> completion)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0) && QT_CONFIG(permissions)
+    const QMicrophonePermission permission;
+    const auto status = qApp->checkPermission(permission);
+    if (status == Qt::PermissionStatus::Undetermined) {
+        qApp->requestPermission(permission, this, [completion](const QPermission &result) {
+            completion(result.status() == Qt::PermissionStatus::Granted);
+        });
+    } else {
+        completion(status == Qt::PermissionStatus::Granted);
     }
+#else
+    completion(true);
+#endif
 }
 
 // 对应Python: VoiceInputManager._ensure_recorder
-bool VoiceInput::ensureAudioSource()
+bool VoiceInput::ensureAudioSource(QString &error)
 {
     if (m_audioSource)
         return true;
 
     const QAudioDevice device = QMediaDevices::defaultAudioInput();
     if (device.isNull()) {
-        emit errorOccurred(QStringLiteral("未检测到麦克风设备"));
+        error = QStringLiteral("未检测到麦克风设备");
         return false;
     }
 
@@ -158,7 +178,69 @@ bool VoiceInput::ensureAudioSource()
     }
 
     m_audioSource = new QAudioSource(device, m_format, this);
+    connect(m_audioSource, &QAudioSource::stateChanged, this, [this](QAudio::State state) {
+        if (m_state == State::Recording && state == QAudio::StoppedState && m_audioSource->error() != QAudio::NoError)
+            failRecording(QStringLiteral("录音设备已停止，请检查麦克风后重试 (%1)").arg(int(m_audioSource->error())));
+    });
     return true;
+}
+
+QIODevice *VoiceInput::startAudioCapture(QString &error)
+{
+    if (!ensureAudioSource(error))
+        return nullptr;
+    auto *io = m_audioSource->start();
+    if (!io || m_audioSource->error() != QAudio::NoError) {
+        error = QStringLiteral("初始化录音设备失败: %1").arg(int(m_audioSource->error()));
+        return nullptr;
+    }
+    return io;
+}
+
+void VoiceInput::stopAudioCapture()
+{
+    if (m_audioSource)
+        m_audioSource->stop();
+}
+
+void VoiceInput::releaseAudioInput()
+{
+    m_chunkTimer.stop();
+    if (m_audioIo)
+        disconnect(m_audioIo, nullptr, this, nullptr);
+    m_audioIo = nullptr;
+    stopAudioCapture();
+}
+
+void VoiceInput::cancelPendingRequests()
+{
+    const auto replies = m_pendingReplies;
+    m_pendingReplies.clear();
+    for (auto *reply : replies) {
+        disconnect(reply, nullptr, this, nullptr);
+        reply->abort();
+        reply->deleteLater();
+    }
+}
+
+void VoiceInput::setState(State state)
+{
+    if (m_state == state) return;
+    m_state = state;
+    emit stateChanged(state);
+}
+
+void VoiceInput::failRecording(const QString &message)
+{
+    ++m_generation;
+    // Move out of Recording before stopping the source: stop() can emit synchronously.
+    const State previous = m_state;
+    m_state = State::Idle;
+    releaseAudioInput();
+    cancelPendingRequests();
+    m_pcmBuffer.clear();
+    if (previous != State::Idle) emit stateChanged(State::Idle);
+    emit errorOccurred(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,9 +250,9 @@ bool VoiceInput::ensureAudioSource()
 // 对应Python: VoiceInputManager.toggle_recording
 void VoiceInput::toggleRecording()
 {
-    if (m_state != State::Idle)
+    if (m_state == State::Recording)
         stopRecording();
-    else
+    else if (m_state == State::Idle)
         startRecording();
 }
 
@@ -179,23 +261,39 @@ void VoiceInput::startRecording()
 {
     if (m_state != State::Idle)
         return;
-    if (!ensureAudioSource())
-        return;
+    const quint64 generation = ++m_generation;
+    setState(State::RequestingPermission);
+    const QPointer<VoiceInput> guard(this);
+    requestMicrophonePermission([guard, generation](bool granted) {
+        if (!guard || guard->m_generation != generation || guard->m_state != State::RequestingPermission)
+            return;
+        if (!granted) {
+#ifdef Q_OS_MACOS
+            guard->failRecording(QStringLiteral("麦克风权限未开启，请在「系统设置 → 隐私与安全性 → 麦克风」中允许 CubeShell 访问"));
+#else
+            guard->failRecording(QStringLiteral("麦克风权限未开启，请在系统隐私设置中允许访问麦克风后重试"));
+#endif
+            return;
+        }
+        guard->beginRecording();
+    });
+}
 
+void VoiceInput::beginRecording()
+{
     m_accumulatedText.clear();
-    m_pendingChunks = 0;
     m_pcmBuffer.clear();
 
-    m_audioIo = m_audioSource->start();
+    QString error;
+    m_audioIo = startAudioCapture(error);
     if (!m_audioIo) {
-        emit errorOccurred(QStringLiteral("初始化录音设备失败: %1")
-                               .arg(int(m_audioSource->error())));
+        failRecording(error.isEmpty() ? QStringLiteral("初始化录音设备失败") : error);
         return;
     }
     connect(m_audioIo, &QIODevice::readyRead,
             this, &VoiceInput::onAudioReadyRead, Qt::UniqueConnection);
 
-    m_state = State::Recording;
+    setState(State::Recording);
     m_chunkTimer.start();
     emit recordingStarted();
 }
@@ -203,19 +301,21 @@ void VoiceInput::startRecording()
 // 对应Python: VoiceInputManager.stop_recording
 void VoiceInput::stopRecording()
 {
+    if (m_state == State::RequestingPermission) {
+        ++m_generation;
+        setState(State::Idle);
+        return;
+    }
     if (m_state != State::Recording)
         return;
 
-    m_chunkTimer.stop();
-    emit recordingStopped();
-
+    setState(State::Processing);
     // 冲刷设备中剩余样本后停止采集
     if (m_audioIo)
         m_pcmBuffer.append(m_audioIo->readAll());
-    m_audioSource->stop();
-    m_audioIo = nullptr;
+    releaseAudioInput();
+    emit recordingStopped();
 
-    m_state = State::Processing;
     flushChunk();       // 最终段送识别
     tryFinalize();      // 若无任何待识别分段，立即收尾
 }
@@ -257,14 +357,9 @@ void VoiceInput::recognizeChunk(const QByteArray &pcm)
     if (apiKey.isEmpty())
         apiKey = AiPreferences::load().apiKey();
     if (apiKey.isEmpty()) {
-        emit errorOccurred(QStringLiteral(
-            "未配置 API Key，请在「设置 -> AI 设置」中配置"));
-        tryFinalize();
+        failRecording(QStringLiteral("未配置 API Key，请在「设置 -> AI 设置」中配置"));
         return;
     }
-
-    ++m_pendingChunks;
-    emit recognitionStarted();
 
     auto *multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
 
@@ -287,32 +382,37 @@ void VoiceInput::recognizeChunk(const QByteArray &pcm)
     request.setRawHeader("Authorization",
                          QByteArrayLiteral("Bearer ") + apiKey.toUtf8());
     request.setTransferTimeout(30000);
+    // Qt 6.9 can crash in QHttp2Stream::uploadDeviceDestroyed while retiring
+    // a multipart upload. ASR does not need HTTP/2 multiplexing.
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
     QNetworkReply *reply = m_network->post(request, multiPart);
     multiPart->setParent(reply);
+    m_pendingReplies.insert(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         onRecognitionFinished(reply);
     });
+    emit recognitionStarted();
 }
 
 // 对应Python: _on_chunk_recognized / _on_recognition_error /
 //             _on_chunk_finished 三个回调的合并处理
 void VoiceInput::onRecognitionFinished(QNetworkReply *reply)
 {
+    if (!m_pendingReplies.remove(reply))
+        return;
     reply->deleteLater();
-    --m_pendingChunks;
 
     const int status =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QByteArray body = reply->readAll();
 
     if (reply->error() != QNetworkReply::NoError || status >= 400) {
-        emit errorOccurred(mapHttpError(
+        failRecording(mapHttpError(
             status, QString::fromUtf8(body),
             reply->error() != QNetworkReply::NoError
                 ? reply->errorString()
                 : QStringLiteral("HTTP %1").arg(status)));
-        tryFinalize();
         return;
     }
 
@@ -344,10 +444,11 @@ void VoiceInput::onRecognitionFinished(QNetworkReply *reply)
 // 对应Python: VoiceInputManager._try_finalize
 void VoiceInput::tryFinalize()
 {
-    if (m_state != State::Processing || m_pendingChunks > 0)
+    if (m_state != State::Processing || !m_pendingReplies.isEmpty())
         return;
-    m_state = State::Idle;
-    emit textRecognized(m_accumulatedText);
+    const QString text = m_accumulatedText;
+    setState(State::Idle);
+    emit textRecognized(text);
 }
 
 } // namespace cubeshell

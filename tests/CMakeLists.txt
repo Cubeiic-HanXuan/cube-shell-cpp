@@ -772,6 +772,19 @@ target_link_libraries(ai_conversation_ui_test PRIVATE Qt6::Widgets Qt6::Network 
 add_test(NAME ai_agent_lifecycle_test COMMAND ai_agent_lifecycle_test)
 add_test(NAME ai_conversation_ui_test COMMAND ai_conversation_ui_test)
 set_tests_properties(ai_agent_lifecycle_test ai_conversation_ui_test PROPERTIES TIMEOUT 90)
+qt_add_executable(ai_composer_ui_test ai_composer_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc)
+target_include_directories(ai_composer_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+target_link_libraries(ai_composer_ui_test PRIVATE Qt6::Widgets cube_core)
+add_test(NAME ai_composer_ui_test COMMAND ai_composer_ui_test)
+set_tests_properties(ai_composer_ui_test PROPERTIES TIMEOUT 60)
+if(CUBESHELL_WITH_VOICE)
+    qt_add_executable(voice_input_test voice_input_test.cpp)
+    target_include_directories(voice_input_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+    target_link_libraries(voice_input_test PRIVATE Qt6::Network cube_core)
+    add_test(NAME voice_input_test COMMAND voice_input_test)
+    set_tests_properties(voice_input_test PROPERTIES TIMEOUT 60)
+endif()
 
 # ---------------------------------------------------------------------------
 # CTest registration

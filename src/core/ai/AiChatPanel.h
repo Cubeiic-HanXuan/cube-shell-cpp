@@ -2,8 +2,10 @@
 
 #include "AiConversationModel.h"
 #include <QPointer>
+#include <QTimer>
 #include <QWidget>
 
+class QFrame;
 class QComboBox;
 class QLabel;
 class QPlainTextEdit;
@@ -38,9 +40,14 @@ signals:
 protected:
     bool eventFilter(QObject *object, QEvent *event) override;
     void changeEvent(QEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 private:
     void onSend();
     void applyTheme();
+    void updateComposerMetrics();
+    void updateSendButton();
+    QTimer m_composerTimer;
+    QFrame *m_inputFrame = nullptr;
     QLabel *m_statusLabel, *m_modelLabel, *m_notice;
     QPlainTextEdit *m_inputEdit;
     QComboBox *m_modeCombo;

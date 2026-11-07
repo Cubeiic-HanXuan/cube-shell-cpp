@@ -13,13 +13,16 @@
 // 录音过程中每 5s 自动分段识别（partialTextRecognized 实时回显），
 // 停止后等全部分段完成再发 textRecognized。
 //
-// 状态机：Idle → Recording → Processing(等待剩余分段识别) → Idle。
+// 状态机：Idle → RequestingPermission → Recording → Processing → Idle。
 
 #include <QAudioFormat>
 #include <QByteArray>
 #include <QObject>
+#include <QPointer>
+#include <QSet>
 #include <QString>
 #include <QTimer>
+#include <functional>
 
 class QAudioSource;
 class QIODevice;
@@ -37,6 +40,7 @@ public:
         Idle,
         Recording,
         Processing,     // 录音已停止，等待剩余分段识别完成
+        RequestingPermission,
     };
     Q_ENUM(State)
 
@@ -48,7 +52,7 @@ public:
 
     State state() const { return m_state; }
     // 对应Python: VoiceInputManager.is_recording
-    bool isRecording() const { return m_state != State::Idle; }
+    bool isRecording() const { return m_state == State::Recording; }
 
     // 识别接口地址（默认智谱 GLM-ASR，可覆盖用于测试）。
     void setTranscriptionUrl(const QString &url) { m_transcriptionUrl = url; }
@@ -68,6 +72,7 @@ public slots:
     void stopRecording();
 
 signals:
+    void stateChanged(cubeshell::VoiceInput::State state);
     // 对应Python: VoiceInputManager 的同名信号集
     void recordingStarted();                    // recording_started
     void recordingStopped();                    // recording_stopped
@@ -76,14 +81,25 @@ signals:
     void textRecognized(const QString &text);   // text_recognized
     void errorOccurred(const QString &message); // error_occurred
 
+protected:
+    // Platform boundaries can be substituted in tests without opening a real microphone.
+    virtual void requestMicrophonePermission(std::function<void(bool)> completion);
+    virtual QIODevice *startAudioCapture(QString &error);
+    virtual void stopAudioCapture();
+
 private:
+    void setState(State state);
+    void beginRecording();
+    void releaseAudioInput();
+    void cancelPendingRequests();
+    void failRecording(const QString &message);
     void onAudioReadyRead();
     void onChunkTimeout();          // 对应Python: _on_chunk_timeout
     void flushChunk();              // 截取当前 PCM 缓冲送识别
     void recognizeChunk(const QByteArray &pcm); // _start_chunk_recognition
     void onRecognitionFinished(QNetworkReply *reply);
     void tryFinalize();             // 对应Python: _try_finalize
-    bool ensureAudioSource();       // 对应Python: _ensure_recorder
+    bool ensureAudioSource(QString &error); // 对应Python: _ensure_recorder
     static QString mapHttpError(int status, const QString &body,
                                 const QString &fallback);
 
@@ -92,7 +108,7 @@ private:
     QString m_apiKeyOverride;
 
     QAudioSource *m_audioSource = nullptr;
-    QIODevice *m_audioIo = nullptr;         // QAudioSource::start() 返回
+    QPointer<QIODevice> m_audioIo;          // QAudioSource::start() 返回
     QAudioFormat m_format;
     QByteArray m_pcmBuffer;                 // 当前分段累积的原始 PCM
 
@@ -100,7 +116,8 @@ private:
     QNetworkAccessManager *m_network = nullptr;
 
     QString m_accumulatedText;              // _accumulated_text
-    int m_pendingChunks = 0;                // _pending_chunks
+    QSet<QNetworkReply *> m_pendingReplies;
+    quint64 m_generation = 0;              // Ignore permission callbacks from cancelled attempts.
 };
 
 } // namespace cubeshell

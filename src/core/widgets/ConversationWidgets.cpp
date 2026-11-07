@@ -45,6 +45,14 @@ void drawGlyph(QPainter *p, Glyph glyph)
     case Glyph::Previous: line(12, 5, 7, 10); line(7, 10, 12, 15); break;
     case Glyph::Next: line(8, 5, 13, 10); line(13, 10, 8, 15); break;
     case Glyph::Chevron: line(6, 8, 10, 12); line(10, 12, 14, 8); break;
+    case Glyph::Send: line(10, 17, 10, 3); line(5, 8, 10, 3); line(10, 3, 15, 8); break;
+    case Glyph::Microphone: {
+        p->drawRoundedRect(QRectF(7, 2, 6, 10), 3, 3);
+        QPainterPath path; path.moveTo(4, 8); path.lineTo(4, 10);
+        path.cubicTo(4, 17, 16, 17, 16, 10); path.lineTo(16, 8); p->drawPath(path);
+        line(10, 15, 10, 18); line(7, 18, 13, 18); break;
+    }
+    case Glyph::Stop: p->setBrush(p->pen().color()); p->drawRoundedRect(QRectF(5, 5, 10, 10), 1, 1); break;
     case Glyph::Down: line(10, 3, 10, 16); line(5, 11, 10, 16); line(10, 16, 15, 11); break;
     case Glyph::Search: p->drawEllipse(QRectF(3, 3, 10, 10)); line(12, 12, 17, 17); break;
     case Glyph::Copy: p->drawRoundedRect(QRectF(7, 7, 10, 10), 2, 2); line(12, 3, 4, 3); line(4, 3, 3, 4); line(3, 4, 3, 12); break;

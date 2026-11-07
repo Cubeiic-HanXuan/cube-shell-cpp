@@ -17,7 +17,8 @@ struct Colors {
 Colors colors(const QPalette &palette);
 QString css(const QColor &color);
 enum class Glyph { Back, Previous, Next, Search, Copy, Folder, Download, Refresh,
-                   Sidebar, More, Chevron, Play, Check, Close, Expand, Collapse, Down, Filter, Cube };
+                   Sidebar, More, Chevron, Play, Check, Close, Expand, Collapse, Down, Filter, Cube,
+                   Send, Microphone, Stop };
 QIcon icon(Glyph glyph, const QColor &color);
 QToolButton *iconButton(Glyph glyph, const QString &label, const Colors &colors, QWidget *parent);
 void styleIconButton(QToolButton *button, const Colors &colors);

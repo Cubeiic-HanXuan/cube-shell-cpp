@@ -56,7 +56,7 @@ void TerminalExecutor::setTerminal(QTermWidget *terminal)
     m_initializedTerminalId = 0;
 
     QMutexLocker locker(&m_mutex);
-    m_outputBuffer.clear();
+    resetOutputLocked();
 }
 
 QTermWidget *TerminalExecutor::terminal() const
@@ -87,7 +87,7 @@ QPair<int, QString> TerminalExecutor::runBlocking(const QString &cmd, int timeou
         m_resultReady = false;
         m_resultExitCode = -1;
         m_resultOutput.clear();
-        m_outputBuffer.clear();
+        resetOutputLocked();
         m_outputTruncated = false;
         m_cancelled.store(false);
     }
@@ -105,8 +105,8 @@ QPair<int, QString> TerminalExecutor::runBlocking(const QString &cmd, int timeou
         if (!m_condition.wait(&m_mutex, deadline)) {
             m_currentId = 0;
             m_inFlight = false;
-            const QString output = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString()) + stripAnsi(m_outputBuffer);
-            m_outputBuffer.clear();
+            const QString output = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString()) + capturedOutputLocked();
+            resetOutputLocked();
             return {-1, output + QStringLiteral("\n(命令执行超时，远端状态未知)")};
         }
     }
@@ -130,8 +130,8 @@ QPair<int, QString> TerminalExecutor::waitOnOwnThread(int timeoutMs)
     QMutexLocker locker(&m_mutex);
     m_currentId = 0;
     m_inFlight = false;
-    const QString output = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString()) + stripAnsi(m_outputBuffer);
-    m_outputBuffer.clear();
+    const QString output = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString()) + capturedOutputLocked();
+    resetOutputLocked();
     return {-1, output + QStringLiteral("\n(命令执行超时，远端状态未知)")};
 }
 
@@ -142,7 +142,7 @@ QPair<int, QString> TerminalExecutor::takeResultLocked()
     m_inFlight = false;
     m_resultOutput.clear();
     m_currentId = 0;
-    m_outputBuffer.clear();
+    resetOutputLocked();
     return result;
 }
 
@@ -220,31 +220,30 @@ void TerminalExecutor::onRawData(const QString &text)
     if (m_currentId == 0 || m_resultReady)
         return; // 没有在跑的命令
 
-    m_outputBuffer += text;
-    if (m_outputBuffer.size() > kMaxBufferChars) {
-        m_outputTruncated = true;
-        m_outputBuffer = m_outputBuffer.right(kMaxBufferChars);
-    }
-
-    const QString clean = stripAnsi(m_outputBuffer);
-    QRegularExpressionMatchIterator it = s_sentinelRe.globalMatch(clean);
+    const QString clean = cleanChunkLocked(text);
+    appendOutputLocked(clean);
+    // Generated IDs and exit codes are 32-bit decimal values. Retain enough
+    // overlap for a complete split marker; never rescan the accumulated log.
+    constexpr qsizetype markerOverlap = 64;
+    const qsizetype scanFrom = qMax(m_outputStart, m_outputBuffer.size() - clean.size() - markerOverlap);
+    QRegularExpressionMatchIterator it = s_sentinelRe.globalMatch(m_outputBuffer, scanFrom);
     while (it.hasNext()) {
         const QRegularExpressionMatch match = it.next();
         if (match.captured(1).toInt() != m_currentId)
             continue; // 上一条命令的残留哨兵，忽略
 
         m_resultExitCode = match.captured(2).toInt();
-        m_resultOutput = extractOutput(clean, match.capturedStart(0));
+        m_resultOutput = extractOutput(m_outputBuffer.mid(m_outputStart), int(match.capturedStart(0) - m_outputStart));
         if (m_outputTruncated)
             m_resultOutput.prepend(QStringLiteral("[输出过长，已截断；仅保留最后 %1 字符]\n").arg(kMaxBufferChars));
         m_resultReady = true;
         m_currentId = 0;
-        m_outputBuffer.clear();
+        resetOutputLocked();
         m_condition.wakeAll();
         return;
     }
     locker.unlock();
-    emit outputReceived(stripAnsi(text));
+    if (!clean.isEmpty()) emit outputReceived(clean);
 }
 
 void TerminalExecutor::cancel()
@@ -256,10 +255,10 @@ void TerminalExecutor::cancel()
     m_cancelled.store(true);
     m_resultExitCode = -1;
     m_resultOutput = (m_outputTruncated ? QStringLiteral("[较早输出已截断]\n") : QString())
-        + stripAnsi(m_outputBuffer) + QStringLiteral("\n(已停止等待，远端进程可能仍在运行)");
+        + capturedOutputLocked() + QStringLiteral("\n(已停止等待，远端进程可能仍在运行)");
     m_resultReady = true;
     m_currentId = 0;
-    m_outputBuffer.clear();
+    resetOutputLocked();
     m_condition.wakeAll();
 }
 
@@ -293,6 +292,80 @@ QString TerminalExecutor::extractOutput(const QString &cleanBuffer, int sentinel
     while (out.startsWith(QLatin1Char('\n')))
         out.remove(0, 1);
     return out;
+}
+
+void TerminalExecutor::resetOutputLocked()
+{
+    m_outputBuffer.clear();
+    m_outputStart = 0;
+    m_pendingAnsi.clear();
+    m_outputTruncated = false;
+}
+
+void TerminalExecutor::appendOutputLocked(const QString &text)
+{
+    m_outputBuffer += text;
+    if (m_outputBuffer.size() - m_outputStart > kMaxBufferChars) {
+        m_outputStart = m_outputBuffer.size() - kMaxBufferChars;
+        m_outputTruncated = true;
+    }
+    // Amortize copying the retained tail while keeping physical storage bounded.
+    if (m_outputStart >= kMaxBufferChars / 4) {
+        m_outputBuffer.remove(0, m_outputStart);
+        m_outputStart = 0;
+    }
+}
+
+QString TerminalExecutor::capturedOutputLocked() const
+{
+    // Incomplete escapes on timeout/cancellation remain visible rather than
+    // silently losing output. Normal packet processing never rescans this tail.
+    return stripAnsi((m_outputBuffer.mid(m_outputStart) + m_pendingAnsi).right(kMaxBufferChars));
+}
+
+QString TerminalExecutor::cleanChunkLocked(const QString &text)
+{
+    const QString data = m_pendingAnsi + text;
+    m_pendingAnsi.clear();
+    QString clean;
+    clean.reserve(data.size());
+    qsizetype position = 0;
+    while (position < data.size()) {
+        const qsizetype escape = data.indexOf(QChar(0x1b), position);
+        if (escape < 0) { clean += data.mid(position); break; }
+        clean += data.mid(position, escape - position);
+        const auto match = s_ansiRe.match(data, escape, QRegularExpression::NormalMatch,
+                                        QRegularExpression::AnchorAtOffsetMatchOption);
+        if (match.hasMatch()) { position = match.capturedEnd(); continue; }
+        // Keep only a possible incomplete supported sequence, not arbitrary log
+        // text. CSI, OSC/ST and charset introducers may straddle any packet.
+        bool incomplete = escape + 1 == data.size();
+        if (!incomplete) {
+            const QChar kind = data.at(escape + 1);
+            if (kind == '[') {
+                qsizetype i = escape + 2;
+                while (i < data.size() && (data.at(i).isDigit() || data.at(i) == ';' || data.at(i) == '?')) ++i;
+                incomplete = i == data.size();
+            } else if (kind == ']') {
+                qsizetype i = escape + 2;
+                while (i < data.size() && data.at(i) != QChar(0x1b) && data.at(i) != QChar(7)) ++i;
+                incomplete = i == data.size() || (i + 1 == data.size() && data.at(i) == QChar(0x1b));
+            } else if (kind == '(' || kind == ')') incomplete = escape + 2 == data.size();
+        }
+        if (incomplete && data.size() - escape <= 4096) {
+            const auto tail = data.mid(escape);
+            if (!tail.contains(QStringLiteral("__CUBE_AI_END__:"))) {
+                m_pendingAnsi = tail;
+                break;
+            }
+        }
+        // Malformed/unbounded escapes must not swallow visible output or the
+        // completion marker forever. Preserve them as the old normalizer did.
+        clean += data.at(escape);
+        position = escape + 1;
+    }
+    clean.remove(QChar(7));
+    return clean;
 }
 
 QString TerminalExecutor::stripAnsi(const QString &text)

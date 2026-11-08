@@ -73,9 +73,13 @@ MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent)
         if (url.scheme() == QLatin1String("https") || url.scheme() == QLatin1String("http"))
             QDesktopServices::openUrl(url);
     });
+    connect(document(), &QTextDocument::contentsChanged, this, [this] {
+        if (!m_rendering) m_heightCache.clear();
+    });
     connect(document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] {
+        if (m_rendering) return;
         updateGeometry();
-        if (!m_rendering) positionActions();
+        positionActions();
     });
     connect(this, &QTextBrowser::selectionChanged, this, [this] {
         // Do not destroy the user's selection on every streaming delta. The
@@ -83,23 +87,58 @@ MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent)
         if (!m_rendering && m_hasPending && !textCursor().hasSelection())
             QTimer::singleShot(0, this, [this] {
                 if (m_hasPending && !textCursor().hasSelection()) {
-                    const auto text = m_pending; m_hasPending = false; setMarkdownText(text);
+                    const auto text = m_pending;
+                    const bool streaming = m_pendingStreaming;
+                    m_hasPending = false;
+                    setMarkdownText(text, streaming);
                 }
             });
     });
 }
 
-void MarkdownView::setMarkdownText(const QString &text)
+void MarkdownView::setMarkdownText(const QString &text, bool streaming)
 {
-    if (textCursor().hasSelection()) { m_pending = text; m_hasPending = true; return; }
+    if (textCursor().hasSelection()) {
+        m_pending = text; m_pendingStreaming = streaming; m_hasPending = true;
+        return;
+    }
     m_hasPending = false;
-    if (text == m_rendered && !document()->isEmpty()) return;
-    render(text);
+    const bool finalize = m_streaming && !streaming;
+    m_streaming = streaming;
+    if (!finalize && text == m_rendered && !document()->isEmpty()) return;
+    if (streaming && appendPlainTail(text)) return;
+    render(text); // structural edits and final replies retain full Markdown semantics
+}
+
+bool MarkdownView::appendPlainTail(const QString &text)
+{
+    if (m_rendered.isEmpty() || !text.startsWith(m_rendered) || text.size() == m_rendered.size()) return false;
+    const QString suffix = text.mid(m_rendered.size());
+    const QString paragraph = m_rendered.mid(m_rendered.lastIndexOf(QLatin1Char('\n')) + 1);
+    // Only an existing literal root paragraph is appendable. Markup, tables,
+    // lists, code fences, escapes and newlines go through the real parser.
+    static const QRegularExpression syntax(QStringLiteral("[\\n\\r`*_\\[\\]<>!#|\\\\~&:=.(){}+-]"));
+    if (paragraph.isEmpty() || syntax.match(paragraph).hasMatch() || syntax.match(suffix).hasMatch()) return false;
+    const auto block = document()->lastBlock();
+    QTextCursor cursor(block);
+    if (block.text() != paragraph || block.textList() || block.blockFormat().headingLevel()
+        || cursor.currentFrame() != document()->rootFrame()) return false;
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(suffix);
+    m_rendered = text;
+    m_heightCache.clear();
+    updateGeometry();
+    return true;
 }
 
 void MarkdownView::render(const QString &text)
 {
     m_rendering = true;
+    m_heightCache.clear();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
+    const bool layoutEnabled = document()->isLayoutEnabled();
+    document()->setLayoutEnabled(false);
+#endif
     m_rendered = text;
     for (const auto &action : m_actions) delete action.button;
     m_actions.clear(); m_quotes.clear();
@@ -114,6 +153,8 @@ void MarkdownView::render(const QString &text)
     document()->setIndentWidth(fontMetrics().horizontalAdvance(QStringLiteral("MM")));
     document()->setMarkdown(text, QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub)
                                      | QTextDocument::MarkdownNoHTML);
+    QTextCursor formatting(document());
+    formatting.beginEditBlock();
     QList<QPair<int, int>> quotes;
     bool inQuote = false;
     for (auto block = document()->begin(); block.isValid(); block = block.next()) {
@@ -269,9 +310,13 @@ void MarkdownView::render(const QString &text)
         QTextBlockFormat bf; bf.setLineHeight(3, QTextBlockFormat::FixedHeight);
         cursor.setBlockFormat(bf);
     }
+    formatting.endEditBlock();
     new CodeHighlighter(document(), c, {}, true);
     // Apply synchronously as well: the first paint must already be highlighted.
     for (auto *highlighter : document()->findChildren<QSyntaxHighlighter *>()) highlighter->rehighlight();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
+    document()->setLayoutEnabled(layoutEnabled);
+#endif
     m_rendering = false;
     updateGeometry(); positionActions();
 }
@@ -282,11 +327,16 @@ int MarkdownView::heightForWidth(int width) const
     // Layout probes sizeHint() at 300px even when the visible widget is wider.
     // Never leave that probe width on the live document: it would wrap into
     // extra, clipped lines after the parent has already assigned its height.
+    const int measuredWidth = qMax(40, width - 2);
+    const auto cached = m_heightCache.constFind(measuredWidth);
+    if (cached != m_heightCache.cend()) return cached.value();
     QSignalBlocker blocker(document()->documentLayout());
     const qreal previous = document()->textWidth();
-    document()->setTextWidth(qMax(40, width - 2));
+    document()->setTextWidth(measuredWidth);
     const int height = int(std::ceil(document()->documentLayout()->documentSize().height())) + 4;
     document()->setTextWidth(previous);
+    if (m_heightCache.size() >= 8) m_heightCache.clear();
+    m_heightCache.insert(measuredWidth, height);
     return height;
 }
 void MarkdownView::positionActions()
@@ -302,6 +352,15 @@ void MarkdownView::resizeEvent(QResizeEvent *event)
     QTextBrowser::resizeEvent(event);
     document()->setTextWidth(qMax(40, viewport()->width()));
     positionActions();
+}
+void MarkdownView::changeEvent(QEvent *event)
+{
+    QTextBrowser::changeEvent(event);
+    if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange
+        || event->type() == QEvent::StyleChange || event->type() == QEvent::PaletteChange) {
+        m_heightCache.clear();
+        if (!m_rendering) updateGeometry();
+    }
 }
 void MarkdownView::wheelEvent(QWheelEvent *event) { event->ignore(); }
 void MarkdownView::paintEvent(QPaintEvent *event)

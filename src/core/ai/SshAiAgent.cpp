@@ -30,8 +30,10 @@ void AiCommandExecThread::requestStop()
 void AiCommandExecThread::run()
 {
     QList<AiCommandResult> results;
-    static const QRegularExpression sudoRe(QStringLiteral("\\bsudo\\b"));
-    static const QRegularExpression leadingSudoRe(QStringLiteral("^\\s*sudo\\s+(-\\S+\\s+)*"));
+    // Only the plain leading form can safely use the legacy sudoExec helper.
+    // A word inside grep/echo is data, and -u/-n/-i etc. must never be stripped
+    // (that changes the identity/semantics of the command the user approved).
+    static const QRegularExpression leadingSudoRe(QStringLiteral("^[ \\t]*sudo[ \\t]+(?=[^ \\t-])"));
     for (int i = 0; i < m_commands.size(); ++i) {
         if (m_stopFlag.load()) break;
         const auto &command = m_commands.at(i);
@@ -52,10 +54,9 @@ void AiCommandExecThread::run()
             result.stdoutText = value.second;
         } else if (m_executor) {
             ExecResult value;
-            if (sudoRe.match(command.cmd).hasMatch()) {
-                QString bare = command.cmd;
-                bare.remove(leadingSudoRe);
-                value = m_executor->sudoExec(bare, false, timeout);
+            const auto leadingSudo = leadingSudoRe.match(command.cmd);
+            if (leadingSudo.hasMatch()) {
+                value = m_executor->sudoExec(command.cmd.mid(leadingSudo.capturedLength()), false, timeout);
             } else value = m_executor->exec(command.cmd, false, timeout);
             result.exitCode = value.exitCode;
             result.stdoutText = value.stdoutText;

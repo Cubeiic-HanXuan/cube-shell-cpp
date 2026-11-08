@@ -16,9 +16,7 @@
 #include <QDialog>
 #include <QList>
 
-class QLabel;
 class QLineEdit;
-class QListWidget;
 class QPushButton;
 class QWidget;
 
@@ -48,15 +46,12 @@ private slots:
 
 private:
     void setupUi();
-    void populateCommands();          // 对应Python: _populate_commands
-    void showHighRiskConfirm();       // 对应Python: _show_high_risk_confirm
-    RiskLevel computeMaxRisk() const; // 对应Python: _compute_max_risk
-    QString riskReason() const;       // 对应Python: _get_risk_reason
+    void showHighRiskConfirm();
+    RiskLevel computeMaxRisk() const;
 
     QList<AiCommand> m_commands;
     RiskLevel m_maxRisk = RiskLevel::Safe;
 
-    QListWidget *m_listWidget = nullptr;
     QWidget *m_confirmWidget = nullptr;
     QLineEdit *m_confirmInput = nullptr;
     QPushButton *m_btnExecute = nullptr;

@@ -1,387 +1,555 @@
-// CommandConfirmDialog.cpp — see CommandConfirmDialog.h.
-//
-// 对应Python: core/ai/confirm_dialog.py
-
+// Native command review: purpose, exact shell source and safety evidence have
+// separate visual layers. Batch and single-step approval share the same card.
 #include "CommandConfirmDialog.h"
+#include "widgets/ConversationWidgets.h"
 
-#include <QFont>
+#include <QAbstractTextDocumentLayout>
+#include <QApplication>
+#include <QClipboard>
+#include <QFontInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
-#include <QListWidgetItem>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QTextDocument>
+#include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
+#include <QtMath>
 
 namespace cubeshell {
-
 namespace {
+using namespace sessionui;
 
-// 单条命令的自定义列表项 Widget。
-// 对应Python: confirm_dialog.py::_CommandItemWidget
-class CommandItemWidget : public QWidget {
+QColor blend(const QColor &base, const QColor &tint, qreal weight)
+{
+    return QColor::fromRgbF(base.redF() * (1 - weight) + tint.redF() * weight,
+                           base.greenF() * (1 - weight) + tint.greenF() * weight,
+                           base.blueF() * (1 - weight) + tint.blueF() * weight);
+}
+
+QLabel *label(const QString &text, const QColor &color, QWidget *parent,
+              qreal scale = 1.0, bool bold = false)
+{
+    auto *value = new QLabel(text, parent);
+    value->setTextFormat(Qt::PlainText);
+    value->setWordWrap(true);
+    value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    value->setStyleSheet(QStringLiteral("background:transparent; color:%1; border:none;").arg(css(color)));
+    QFont font = parent->font();
+    // Scale the inherited UI font, rather than fixing a platform-specific point size.
+    font.setPixelSize(qMax(10, qRound(QFontInfo(font).pixelSize() * scale)));
+    font.setWeight(bold ? QFont::DemiBold : QFont::Normal);
+    value->setFont(font);
+    return value;
+}
+
+QColor riskColor(RiskLevel level, const Colors &c)
+{
+    switch (level) {
+    case RiskLevel::Safe: return c.success;
+    case RiskLevel::Low: return c.accent;
+    case RiskLevel::Medium: return c.canvas.lightness() < 128 ? QColor("#e6b66b") : QColor("#946000");
+    case RiskLevel::High:
+    case RiskLevel::Critical: return c.error;
+    }
+    return c.muted;
+}
+
+QString riskText(RiskLevel level)
+{
+    switch (level) {
+    case RiskLevel::Safe: return QStringLiteral("只读查询");
+    case RiskLevel::Low: return QStringLiteral("低风险");
+    case RiskLevel::Medium: return QStringLiteral("需人工确认");
+    case RiskLevel::High: return QStringLiteral("高风险 · 二次确认");
+    case RiskLevel::Critical: return QStringLiteral("禁止执行");
+    }
+    return QStringLiteral("待审核");
+}
+
+QLabel *riskBadge(RiskLevel level, const Colors &c, QWidget *parent)
+{
+    const QColor tone = riskColor(level, c);
+    auto *badge = label(riskText(level), tone, parent, .9, true);
+    badge->setObjectName(QStringLiteral("aiRiskBadge"));
+    badge->setToolTip(QStringLiteral("风险等级：%1").arg(riskLevelLabel(level)));
+    badge->setWordWrap(false);
+    badge->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    badge->setStyleSheet(QStringLiteral("color:%1; background:%2; border:1px solid %3; border-radius:5px; padding:2px 6px;")
+                            .arg(css(tone), css(blend(c.surface, tone, .10)), css(blend(c.surface, tone, .24))));
+    return badge;
+}
+
+void configureDialog(QDialog *dialog, const QSize &preferred)
+{
+    const Colors c = colors(dialog->palette());
+    dialog->setObjectName(QStringLiteral("aiCommandConfirm"));
+    dialog->setModal(true);
+    QFont base = dialog->font();
+#ifdef CUBESHELL_PLATFORM_OHOS
+    // OHOS point-size conversion misses screen density; keep UI text in pixels.
+    base.setPixelSize(qMax(QFontInfo(base).pixelSize(), qRound(18 * dialog->devicePixelRatioF())));
+#else
+    base.setPixelSize(qMax(14, QFontInfo(base).pixelSize()));
+#endif
+    dialog->setFont(base);
+    dialog->setMinimumSize(580, 420);
+    // Fit the active display, including laptops with a smaller work area.
+    const auto available = dialog->screen()->availableGeometry().size() - QSize(48, 80);
+    dialog->setMinimumSize(dialog->minimumSize().boundedTo(available));
+    dialog->resize(preferred.boundedTo(available));
+    const QColor primary = c.accent.darker(c.canvas.lightness() < 128 ? 140 : 115);
+    dialog->setStyleSheet(QStringLiteral(
+        "QDialog#aiCommandConfirm { background:%1; color:%2; }"
+        "QFrame#aiCommandCard { background:%3; border:1px solid %4; border-radius:10px; }"
+        "QFrame#aiCommandCodePanel { background:%5; border:1px solid %4; border-radius:7px; }"
+        "QWidget#aiSafetyDetails { background:%5; border-radius:6px; }"
+        "QFrame#aiConfirmBox { background:%3; border:1px solid %6; border-radius:8px; }"
+        "QPushButton { color:%2; background:%3; border:1px solid %4; border-radius:7px; padding:8px 16px; font-weight:500; }"
+        "QPushButton:hover { background:%7; border-color:%8; }"
+        "QPushButton:focus { border:2px solid %8; padding:7px 15px; }"
+        "QPushButton[primary=\"true\"] { background:%9; border-color:%9; color:white; }"
+        "QPushButton[primary=\"true\"]:hover { background:%8; border-color:%8; }"
+        "QPushButton:disabled { color:%10; background:%7; border-color:%4; }"
+        "QLineEdit { background:%5; color:%2; border:1px solid %4; border-radius:6px; padding:8px; }"
+        "QLineEdit:focus { border-color:%8; }")
+        .arg(css(c.canvas), css(c.text), css(c.surface), css(c.border), css(c.code),
+             css(c.error), css(c.raised), css(c.accent), css(primary)).arg(css(c.muted)));
+}
+
+QPushButton *actionButton(const QString &text, QWidget *parent, bool primary = false)
+{
+    auto *button = new QPushButton(text, parent);
+    button->setProperty("primary", primary);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setAutoDefault(false); // Enter in a preview must never approve a batch.
+    button->setMinimumHeight(36);
+    return button;
+}
+
+QFrame *separator(const Colors &c, QWidget *parent)
+{
+    auto *line = new QFrame(parent);
+    line->setFixedHeight(1);
+    line->setStyleSheet(QStringLiteral("background:%1; border:none;").arg(css(c.border)));
+    return line;
+}
+
+// Return the complete command unchanged. Highlighting and soft wrapping are
+// presentation only; neither rendered labels nor descriptions enter the clipboard.
+QToolButton *copyButton(const QString &source, const Colors &c, QWidget *parent)
+{
+    auto *copy = iconButton(Glyph::Copy, QStringLiteral("复制原始命令"), c, parent);
+    copy->setObjectName(QStringLiteral("aiCopyCommand"));
+    copy->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    copy->setText(QStringLiteral("复制"));
+    copy->setFixedSize(copy->fontMetrics().horizontalAdvance(QStringLiteral("已复制")) + 36,
+                       qMax(28, copy->fontMetrics().height() + 8));
+    auto *reset = new QTimer(copy);
+    reset->setSingleShot(true);
+    QObject::connect(reset, &QTimer::timeout, copy, [copy, c] {
+        copy->setText(QStringLiteral("复制")); copy->setIcon(icon(Glyph::Copy, c.muted));
+    });
+    QObject::connect(copy, &QToolButton::clicked, copy, [copy, source, c, reset] {
+        QApplication::clipboard()->setText(source);
+        copy->setText(QStringLiteral("已复制")); copy->setIcon(icon(Glyph::Check, c.success));
+        reset->start(1600);
+    });
+    return copy;
+}
+
+class CommandCard : public QFrame {
 public:
-    CommandItemWidget(int index, const AiCommand &cmdInfo,
-                      QWidget *parent = nullptr)
-        : QWidget(parent)
+    CommandCard(int index, const AiCommand &command, const Colors &c, QWidget *parent)
+        : QFrame(parent)
     {
-        auto *layout = new QHBoxLayout(this);
-        layout->setContentsMargins(8, 4, 8, 4);
+        setObjectName(QStringLiteral("aiCommandCard"));
+        setFont(parent->window()->font());
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(10, 8, 10, 8);
+        layout->setSpacing(6);
+        QStringList evidence = command.safety.warnings;
+        evidence.removeDuplicates();
+        if (evidence.isEmpty()) evidence.append(command.safety.reason);
 
-        // 序号
-        auto *indexLabel = new QLabel(QStringLiteral("%1.").arg(index), this);
-        indexLabel->setFixedWidth(24);
-        layout->addWidget(indexLabel);
+        auto *heading = new QHBoxLayout;
+        heading->setSpacing(8);
+        auto *number = label(QStringLiteral("%1").arg(index, 2, 10, QLatin1Char('0')), c.muted, this, .95, true);
+        number->setObjectName(QStringLiteral("aiCommandNumber"));
+        number->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+        number->setFixedWidth(24);
+        heading->addWidget(number);
+        auto *purpose = new ElidedLabel(command.description.isEmpty() ? QStringLiteral("Shell 命令") : command.description, this);
+        purpose->setObjectName(QStringLiteral("aiCommandPurpose"));
+        purpose->setFont(font());
+        purpose->setStyleSheet(QStringLiteral("color:%1; background:transparent; border:none;").arg(css(c.text)));
+        purpose->setToolTip(QStringLiteral("<qt>%1</qt>").arg(purpose->text().toHtmlEscaped()));
+        heading->addWidget(purpose, 1);
+        heading->addWidget(riskBadge(command.safety.riskLevel, c, this));
+        m_toggle = disclosureButton(QStringLiteral("依据"), c, this);
+        m_toggle->setObjectName(QStringLiteral("aiToggleSafetyDetails"));
+        m_toggle->setToolTip(QStringLiteral("展开完整执行说明与安全判定依据"));
+        m_toggle->setMinimumSize(m_toggle->fontMetrics().horizontalAdvance(QStringLiteral("收起 (99)")) + 20, 26);
+        heading->addWidget(m_toggle);
+        auto *copy = copyButton(command.cmd, c, this);
+        copy->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        copy->setFixedSize(26, 26);
+        heading->addWidget(copy);
+        layout->addLayout(heading);
 
-        // 命令文本（等宽字体）
-        auto *cmdLabel = new QLabel(cmdInfo.cmd, this);
-        QFont monoFont(QStringLiteral("Courier New"), 11);
-        monoFont.setStyleHint(QFont::Monospace);
-        cmdLabel->setFont(monoFont);
-        cmdLabel->setWordWrap(true);
-        layout->addWidget(cmdLabel, 1);
+        auto *codePanel = new QFrame(this);
+        codePanel->setFont(font());
+        codePanel->setObjectName(QStringLiteral("aiCommandCodePanel"));
+        auto *codeLayout = new QVBoxLayout(codePanel);
+        codeLayout->setContentsMargins(4, 0, 4, 0);
+        codeLayout->setSpacing(0);
+        auto *code = codeView(command.cmd, c, codePanel, QStringLiteral("bash"));
+        QFont mono = code->font();
+        mono.setPixelSize(qMax(14, QFontInfo(window()->font()).pixelSize()));
+        code->setFont(mono);
+        code->setTabChangesFocus(true);
+        code->setObjectName(QStringLiteral("aiSafetyCommand"));
+        code->setAccessibleName(QStringLiteral("命令 %1：原始 Shell 命令，只读预览").arg(index));
+        code->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        code->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        code->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        code->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // QPlainTextDocumentLayout reports height in visual lines. Grow with
+        // soft wraps, cap large scripts, then let the code view scroll internally.
+        const auto fitCode = [code] {
+            const qreal lines = code->document()->documentLayout()->documentSize().height();
+            // Keep the code view's document/viewport padding so a single line
+            // stays fully visible instead of gaining a needless inner scrollbar.
+            const int height = qCeil(qBound<qreal>(1, lines, 8) * code->fontMetrics().lineSpacing()) + 20;
+            if (code->height() != height) code->setFixedHeight(height);
+        };
+        QObject::connect(code->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged,
+                         code, [fitCode](const QSizeF &) { fitCode(); });
+        QTimer::singleShot(0, code, fitCode);
+        codeLayout->addWidget(code);
+        layout->addWidget(codePanel);
 
-        // 风险等级标签
-        const RiskLevel level = cmdInfo.safety.riskLevel;
-        auto *riskLabel = new QLabel(
-            QStringLiteral("[%1]").arg(riskLevelLabel(level)), this);
-        riskLabel->setStyleSheet(
-            QStringLiteral("color: %1; font-weight: bold; padding: 0 4px;")
-                .arg(riskLevelColor(level)));
-        layout->addWidget(riskLabel);
+        // No separate boilerplate row: evidence is available from the compact
+        // header action, and remains expanded by default for high/critical risk.
+
+        m_details = new QWidget(this);
+        m_details->setFont(font());
+        m_details->setObjectName(QStringLiteral("aiSafetyDetails"));
+        auto *detailsLayout = new QVBoxLayout(m_details);
+        detailsLayout->setContentsMargins(10, 8, 10, 8);
+        if (!command.description.isEmpty()) {
+            auto *description = label(command.description, c.text, m_details, .92);
+            description->setObjectName(QStringLiteral("aiFullCommandPurpose"));
+            description->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            detailsLayout->addWidget(description);
+        }
+        auto *detailsCaption = label(QStringLiteral("判定依据 · %1 项").arg(evidence.size()), c.muted, m_details, .85, true);
+        detailsLayout->addWidget(detailsCaption);
+        QStringList lines;
+        for (int i = 0; i < evidence.size(); ++i)
+            lines.append(QStringLiteral("%1.  %2").arg(i + 1).arg(evidence.at(i)));
+        auto *reason = label(lines.join(QLatin1Char('\n')), c.text, m_details, .92);
+        reason->setObjectName(QStringLiteral("aiSafetyReason"));
+        reason->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        reason->setToolTip(QStringLiteral("<qt>%1</qt>").arg(command.safety.reason.toHtmlEscaped()));
+        detailsLayout->addWidget(reason);
+        layout->addWidget(m_details);
+        const int count = evidence.size();
+        const auto updateDetails = [this, c, count](bool expanded) {
+            m_details->setVisible(expanded);
+            m_toggle->setText(QStringLiteral("%1 (%2)").arg(expanded ? QStringLiteral("收起") : QStringLiteral("依据")).arg(count));
+            m_toggle->setAccessibleName(m_toggle->text());
+            m_toggle->setIcon(icon(expanded ? Glyph::Down : Glyph::Chevron, c.muted));
+        };
+        QObject::connect(m_toggle, &QToolButton::toggled, this, updateDetails);
+        const bool expanded = command.safety.riskLevel >= RiskLevel::High;
+        m_toggle->setChecked(expanded);
+        updateDetails(expanded); // setChecked(false) does not emit toggled.
     }
 
-    // 提供合理的尺寸提示。对应Python: _CommandItemWidget.sizeHint
-    QSize sizeHint() const override
-    {
-        QSize hint = QWidget::sizeHint();
-        hint.setHeight(qMax(hint.height(), 36));
-        return hint;
-    }
+    void setDetailsExpanded(bool expanded) { m_toggle->setChecked(expanded); }
+    bool detailsExpanded() const { return m_toggle->isChecked(); }
+
+private:
+    QToolButton *m_toggle = nullptr;
+    QWidget *m_details = nullptr;
 };
 
+QScrollArea *commandArea(const QList<AiCommand> &commands, const Colors &c, QWidget *parent,
+                         int firstIndex = 1, bool reviewOnly = false)
+{
+    auto *scroll = new QScrollArea(parent);
+    scroll->setObjectName(QStringLiteral("aiCommandScroll"));
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(QStringLiteral("QScrollArea#aiCommandScroll { background:transparent; border:none; }"));
+    auto *content = new QWidget(scroll);
+    content->setObjectName(QStringLiteral("aiCommandList"));
+    content->setStyleSheet(QStringLiteral("QWidget#aiCommandList { background:transparent; }"));
+    auto *layout = new QVBoxLayout(content);
+    layout->setContentsMargins(0, 0, 6, 0);
+    layout->setSpacing(8);
+    int displayed = 0;
+    for (const auto &command : commands) {
+        if (reviewOnly && !command.safety.requiresConfirmation()) continue;
+        layout->addWidget(new CommandCard(firstIndex + displayed++, command, c, content));
+    }
+    if (!displayed)
+        layout->addWidget(label(QStringLiteral("没有需要人工确认的命令"), c.muted, content));
+    layout->addStretch();
+    scroll->setWidget(content);
+    return scroll;
+}
+
+void addHeader(QVBoxLayout *layout, const QString &title, const QString &subtitle,
+               RiskLevel risk, const Colors &c, QWidget *parent)
+{
+    auto *heading = new QHBoxLayout;
+    heading->setSpacing(14);
+    auto *mark = label(QStringLiteral(">_"), c.accent, parent, 1.3, true);
+    mark->setObjectName(QStringLiteral("aiReviewIcon"));
+    mark->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    mark->setFixedSize(42, 42);
+    mark->setAlignment(Qt::AlignCenter);
+    mark->setStyleSheet(QStringLiteral("color:%1; background:%2; border-radius:10px;").arg(css(c.accent), css(c.accentSoft)));
+    heading->addWidget(mark, 0, Qt::AlignTop);
+    auto *text = new QVBoxLayout;
+    text->setSpacing(5);
+    auto *titleLabel = label(title, c.text, parent, 1.35, true);
+    titleLabel->setObjectName(QStringLiteral("aiReviewTitle"));
+    text->addWidget(titleLabel);
+    text->addWidget(label(subtitle, c.muted, parent, .92));
+    heading->addLayout(text, 1);
+    heading->addWidget(riskBadge(risk, c, parent), 0, Qt::AlignTop);
+    layout->addLayout(heading);
+}
+
+QWidget *confirmationBox(QLineEdit **input, const Colors &c, QWidget *parent)
+{
+    auto *box = new QFrame(parent);
+    box->setObjectName(QStringLiteral("aiConfirmBox"));
+    auto *layout = new QVBoxLayout(box);
+    layout->setContentsMargins(14, 12, 14, 12);
+    layout->setSpacing(8);
+    layout->addWidget(label(QStringLiteral("高风险操作需要二次确认"), c.error, box, 1.0, true));
+    layout->addWidget(label(QStringLiteral("请核对命令与判定依据，输入 CONFIRM 后才能执行。"), c.muted, box, .92));
+    *input = new QLineEdit(box);
+    (*input)->setObjectName(QStringLiteral("aiHighRiskConfirm"));
+    (*input)->setAccessibleName(QStringLiteral("高风险二次确认：输入 CONFIRM"));
+    (*input)->setPlaceholderText(QStringLiteral("输入 CONFIRM"));
+    (*input)->setClearButtonEnabled(true);
+    auto *entryRow = new QHBoxLayout;
+    entryRow->setObjectName(QStringLiteral("aiConfirmInputRow"));
+    entryRow->addWidget(*input, 1);
+    layout->addLayout(entryRow);
+    return box;
+}
 } // namespace
 
-// ---------------------------------------------------------------------------
-// CommandConfirmDialog
-// ---------------------------------------------------------------------------
-
-CommandConfirmDialog::CommandConfirmDialog(const QList<AiCommand> &commands,
-                                           QWidget *parent)
-    : QDialog(parent)
-    , m_commands(commands)
+CommandConfirmDialog::CommandConfirmDialog(const QList<AiCommand> &commands, QWidget *parent)
+    : QDialog(parent), m_commands(commands)
 {
+    const CommandSafetyChecker checker;
+    for (auto &command : m_commands) command.safety = checker.check(command.cmd);
     m_maxRisk = computeMaxRisk();
     setupUi();
 }
 
-// 对应Python: CommandConfirmDialog._setup_ui
 void CommandConfirmDialog::setupUi()
 {
     setWindowTitle(QStringLiteral("AI 命令确认"));
-    setMinimumWidth(500);
-    setModal(true);
+    configureDialog(this, QSize(820, 600));
+    const Colors c = colors(palette());
+    auto *main = new QVBoxLayout(this);
+    main->setContentsMargins(18, 16, 18, 14);
+    main->setSpacing(10);
+    addHeader(main, QStringLiteral("审核执行计划"), QStringLiteral("仅展示需确认命令；隐藏的查询将在批准后按原顺序执行。"), m_maxRisk, c, this);
 
-    auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(12);
-    mainLayout->setContentsMargins(16, 16, 16, 16);
-
-    // 顶部提示
-    auto *header = new QLabel(QStringLiteral("⚠️  AI 建议执行以下命令:"), this);
-    QFont headerFont;
-    headerFont.setPointSize(13);
-    headerFont.setBold(true);
-    header->setFont(headerFont);
-    mainLayout->addWidget(header);
-
-    // 命令列表
-    m_listWidget = new QListWidget(this);
-    m_listWidget->setAlternatingRowColors(true);
-    populateCommands();
-    mainLayout->addWidget(m_listWidget);
-
-    // 整体风险等级
-    auto *riskInfo = new QLabel(
-        QStringLiteral(
-            "风险等级: <span style=\"color:%1; font-weight:bold;\">●%2</span>"
-            "  (%3)")
-            .arg(riskLevelColor(m_maxRisk), riskLevelLabel(m_maxRisk),
-                 riskReason()),
-        this);
-    riskInfo->setTextFormat(Qt::RichText);
-    mainLayout->addWidget(riskInfo);
-
-    // 描述信息（如有）— 取前 3 条 description 用 "; " 连接
-    QStringList descriptions;
-    for (const AiCommand &cmd : m_commands) {
-        if (!cmd.description.isEmpty())
-            descriptions.append(cmd.description);
+    int queries = 0, needsApproval = 0, blocked = 0;
+    for (const auto &command : m_commands) {
+        if (!command.safety.isAllowed) ++blocked;
+        else if (command.safety.requiresConfirmation()) ++needsApproval;
+        else ++queries;
     }
-    if (!descriptions.isEmpty()) {
-        const QString descText =
-            QStringList(descriptions.mid(0, 3)).join(QStringLiteral("; "));
-        auto *descLabel =
-            new QLabel(QStringLiteral("说明: %1").arg(descText), this);
-        descLabel->setStyleSheet(QStringLiteral("color: gray;"));
-        descLabel->setWordWrap(true);
-        mainLayout->addWidget(descLabel);
-    }
+    QString summaryText = QStringLiteral("需确认 %1 条").arg(needsApproval);
+    if (queries) summaryText += QStringLiteral("  ·  已隐藏只读/低风险 %1 条").arg(queries);
+    if (blocked) summaryText += QStringLiteral("  ·  已阻止 %1 条").arg(blocked);
+    auto *summary = label(summaryText, c.muted, this, .9);
+    summary->setObjectName(QStringLiteral("aiSafetySummary"));
+    auto *toolbar = new QHBoxLayout;
+    toolbar->addWidget(summary, 1);
+    auto *expand = disclosureButton(QStringLiteral("展开全部依据"), c, this);
+    expand->setObjectName(QStringLiteral("aiExpandAllSafety"));
+    expand->setIcon(icon(Glyph::Expand, c.muted));
+    expand->setMinimumSize(expand->fontMetrics().horizontalAdvance(QStringLiteral("展开全部依据")) + 28, 28);
+    toolbar->addWidget(expand);
+    main->addLayout(toolbar);
+    auto *scroll = commandArea(m_commands, c, this, 1, true);
+    main->addWidget(scroll, 1);
+    QList<CommandCard *> cards;
+    for (auto *child : scroll->widget()->children())
+        if (auto *card = dynamic_cast<CommandCard *>(child)) cards.append(card);
+    connect(expand, &QToolButton::toggled, this, [cards](bool expanded) {
+        for (auto *card : cards) card->setDetailsExpanded(expanded);
+    });
+    const auto syncDisclosure = [cards, expand, c] {
+        bool allExpanded = !cards.isEmpty();
+        for (auto *card : cards) allExpanded &= card->detailsExpanded();
+        const QSignalBlocker guard(expand);
+        expand->setChecked(allExpanded);
+        expand->setEnabled(!cards.isEmpty());
+        expand->setText(allExpanded ? QStringLiteral("收起全部依据") : QStringLiteral("展开全部依据"));
+        expand->setAccessibleName(expand->text());
+        expand->setIcon(icon(allExpanded ? Glyph::Collapse : Glyph::Expand, c.muted));
+    };
+    for (auto *toggle : scroll->findChildren<QToolButton *>(QStringLiteral("aiToggleSafetyDetails")))
+        connect(toggle, &QToolButton::toggled, this, syncDisclosure);
+    syncDisclosure();
 
-    // 二次确认区域（初始隐藏）
-    m_confirmWidget = new QWidget(this);
-    auto *confirmLayout = new QHBoxLayout(m_confirmWidget);
-    confirmLayout->setContentsMargins(0, 8, 0, 0);
-    auto *confirmHint = new QLabel(
-        QStringLiteral("⚠️ 高风险操作！请输入 \"CONFIRM\" 以确认执行:"),
-        m_confirmWidget);
-    confirmHint->setStyleSheet(
-        QStringLiteral("color: #F44336; font-weight: bold;"));
-    confirmLayout->addWidget(confirmHint);
-    m_confirmInput = new QLineEdit(m_confirmWidget);
-    m_confirmInput->setPlaceholderText(QStringLiteral("输入 CONFIRM"));
-    m_confirmInput->setMaximumWidth(140);
-    connect(m_confirmInput, &QLineEdit::returnPressed,
-            this, &CommandConfirmDialog::onConfirmInput);
-    confirmLayout->addWidget(m_confirmInput);
-    auto *confirmBtn = new QPushButton(QStringLiteral("确认"), m_confirmWidget);
-    connect(confirmBtn, &QPushButton::clicked,
-            this, &CommandConfirmDialog::onConfirmInput);
-    confirmLayout->addWidget(confirmBtn);
-    m_confirmWidget->setVisible(false);
-    mainLayout->addWidget(m_confirmWidget);
+    m_confirmWidget = confirmationBox(&m_confirmInput, c, this);
+    auto *confirm = actionButton(QStringLiteral("确认执行"), m_confirmWidget, true);
+    confirm->setObjectName(QStringLiteral("aiConfirmHighRisk"));
+    confirm->setEnabled(false);
+    m_confirmWidget->findChild<QHBoxLayout *>(QStringLiteral("aiConfirmInputRow"))->addWidget(confirm);
+    connect(m_confirmInput, &QLineEdit::textChanged, this, [confirm](const QString &text) {
+        confirm->setEnabled(text.trimmed() == QStringLiteral("CONFIRM"));
+    });
+    connect(m_confirmInput, &QLineEdit::returnPressed, this, &CommandConfirmDialog::onConfirmInput);
+    connect(confirm, &QPushButton::clicked, this, &CommandConfirmDialog::onConfirmInput);
+    m_confirmWidget->hide();
+    main->addWidget(m_confirmWidget);
+    main->addWidget(separator(c, this));
 
-    // 底部按钮
-    auto *btnLayout = new QHBoxLayout();
-    btnLayout->setSpacing(12);
-
-    m_btnExecute = new QPushButton(QStringLiteral("全部执行"), this);
-    m_btnExecute->setMinimumHeight(32);
-    m_btnExecute->setStyleSheet(QStringLiteral(
-        "QPushButton { background-color: #4CAF50; color: white; "
-        "border-radius: 4px; padding: 4px 16px; }"
-        "QPushButton:hover { background-color: #388E3C; }"));
-    connect(m_btnExecute, &QPushButton::clicked,
-            this, &CommandConfirmDialog::onExecuteAll);
-    btnLayout->addWidget(m_btnExecute);
-
-    auto *btnStep = new QPushButton(QStringLiteral("逐条确认"), this);
-    btnStep->setMinimumHeight(32);
-    btnStep->setStyleSheet(QStringLiteral(
-        "QPushButton { background-color: #2196F3; color: white; "
-        "border-radius: 4px; padding: 4px 16px; }"
-        "QPushButton:hover { background-color: #1976D2; }"));
-    connect(btnStep, &QPushButton::clicked,
-            this, &CommandConfirmDialog::onStepMode);
-    btnLayout->addWidget(btnStep);
-
-    auto *btnCancel = new QPushButton(QStringLiteral("取消"), this);
-    btnCancel->setMinimumHeight(32);
-    btnCancel->setStyleSheet(QStringLiteral(
-        "QPushButton { border: 1px solid #999; border-radius: 4px; "
-        "padding: 4px 16px; }"
-        "QPushButton:hover { background-color: #eee; }"));
-    connect(btnCancel, &QPushButton::clicked,
-            this, &CommandConfirmDialog::onCancel);
-    btnLayout->addWidget(btnCancel);
-
-    mainLayout->addLayout(btnLayout);
+    auto *footer = new QHBoxLayout;
+    footer->setSpacing(10);
+    auto *hint = label(blocked ? QStringLiteral("包含禁止执行的命令\n请取消并调整计划")
+                              : QStringLiteral("尚未执行任何命令\n批准后执行本批 %1 条").arg(m_commands.size()),
+                       blocked ? c.error : c.muted, this, .87);
+    footer->addWidget(hint, 1);
+    auto *cancel = actionButton(QStringLiteral("取消"), this);
+    cancel->setObjectName(QStringLiteral("aiCancelCommands"));
+    cancel->setFocus(Qt::OtherFocusReason);
+    connect(cancel, &QPushButton::clicked, this, &CommandConfirmDialog::onCancel);
+    footer->addWidget(cancel);
+    auto *step = actionButton(QStringLiteral("逐条确认"), this);
+    step->setObjectName(QStringLiteral("aiStepCommands"));
+    step->setEnabled(!blocked && !m_commands.isEmpty());
+    connect(step, &QPushButton::clicked, this, &CommandConfirmDialog::onStepMode);
+    footer->addWidget(step);
+    m_btnExecute = actionButton(m_maxRisk == RiskLevel::High ? QStringLiteral("继续确认")
+                                                            : QStringLiteral("批准并执行"), this, true);
+    m_btnExecute->setObjectName(QStringLiteral("aiExecuteAll"));
+    m_btnExecute->setEnabled(!blocked && !m_commands.isEmpty());
+    connect(m_btnExecute, &QPushButton::clicked, this, &CommandConfirmDialog::onExecuteAll);
+    footer->addWidget(m_btnExecute);
+    main->addLayout(footer);
 }
 
-// 对应Python: CommandConfirmDialog._populate_commands
-void CommandConfirmDialog::populateCommands()
-{
-    for (int i = 0; i < m_commands.size(); ++i) {
-        auto *item = new QListWidgetItem(m_listWidget);
-        auto *widget = new CommandItemWidget(i + 1, m_commands.at(i));
-        item->setSizeHint(widget->sizeHint());
-        m_listWidget->addItem(item);
-        m_listWidget->setItemWidget(item, widget);
-    }
-}
-
-// 对应Python: CommandConfirmDialog._on_execute_all
 void CommandConfirmDialog::onExecuteAll()
 {
-    if (m_maxRisk == RiskLevel::High) {
-        showHighRiskConfirm();
-    } else {
-        emit commandsApproved(m_commands);
-        accept();
-    }
+    if (m_maxRisk == RiskLevel::Critical || m_commands.isEmpty()) return;
+    if (m_maxRisk == RiskLevel::High) showHighRiskConfirm();
+    else { emit commandsApproved(m_commands); accept(); }
 }
 
-// 对应Python: CommandConfirmDialog._on_step_mode
 void CommandConfirmDialog::onStepMode()
 {
+    if (m_maxRisk == RiskLevel::Critical || m_commands.isEmpty()) return;
     emit commandStep(m_commands);
     accept();
 }
 
-// 对应Python: CommandConfirmDialog._on_cancel
 void CommandConfirmDialog::onCancel()
 {
     emit commandsCancelled();
     reject();
 }
 
-// 对应Python: CommandConfirmDialog._show_high_risk_confirm
 void CommandConfirmDialog::showHighRiskConfirm()
 {
-    m_confirmWidget->setVisible(true);
+    m_confirmWidget->show();
     m_confirmInput->setFocus();
     m_btnExecute->setEnabled(false);
 }
 
-// 对应Python: CommandConfirmDialog._on_confirm_input
 void CommandConfirmDialog::onConfirmInput()
 {
+    if (m_maxRisk != RiskLevel::High || m_confirmWidget->isHidden()) return;
     if (m_confirmInput->text().trimmed() == QStringLiteral("CONFIRM")) {
         emit commandsApproved(m_commands);
         accept();
     } else {
-        m_confirmInput->setStyleSheet(
-            QStringLiteral("border: 1px solid #F44336;"));
-        m_confirmInput->setPlaceholderText(QStringLiteral("请输入 CONFIRM"));
         m_confirmInput->clear();
+        m_confirmInput->setPlaceholderText(QStringLiteral("输入不匹配，请输入 CONFIRM"));
+        m_confirmInput->setFocus();
     }
 }
 
-// 对应Python: CommandConfirmDialog._compute_max_risk
-// RiskLevel enum 底层值即 _RISK_ORDER 排序权重，直接取最大。
 RiskLevel CommandConfirmDialog::computeMaxRisk() const
 {
-    RiskLevel maxRisk = RiskLevel::Safe;
-    for (const AiCommand &cmd : m_commands) {
-        if (static_cast<int>(cmd.safety.riskLevel)
-            > static_cast<int>(maxRisk))
-            maxRisk = cmd.safety.riskLevel;
-    }
-    return maxRisk;
+    RiskLevel risk = RiskLevel::Safe;
+    for (const auto &command : m_commands) risk = qMax(risk, command.safety.riskLevel);
+    return risk;
 }
 
-// 对应Python: CommandConfirmDialog._get_risk_reason
-QString CommandConfirmDialog::riskReason() const
+SingleCommandConfirmDialog::SingleCommandConfirmDialog(const AiCommand &command, int index, int total, QWidget *parent)
+    : QDialog(parent), m_cmdInfo(command)
 {
-    for (const AiCommand &cmd : m_commands) {
-        if (cmd.safety.riskLevel == m_maxRisk) {
-            if (!cmd.safety.reason.isEmpty())
-                return cmd.safety.reason;
-            if (!cmd.description.isEmpty())
-                return cmd.description;
-        }
-    }
-    return QStringLiteral("AI 建议操作");
-}
-
-// ---------------------------------------------------------------------------
-// SingleCommandConfirmDialog
-// ---------------------------------------------------------------------------
-
-SingleCommandConfirmDialog::SingleCommandConfirmDialog(const AiCommand &cmdInfo,
-                                                       int index, int total,
-                                                       QWidget *parent)
-    : QDialog(parent)
-    , m_cmdInfo(cmdInfo)
-{
+    m_cmdInfo.safety = CommandSafetyChecker().check(m_cmdInfo.cmd);
     setupUi(index, total);
 }
 
-// 对应Python: SingleCommandConfirmDialog._setup_ui
 void SingleCommandConfirmDialog::setupUi(int index, int total)
 {
     setWindowTitle(QStringLiteral("逐条确认 (%1/%2)").arg(index).arg(total));
-    setMinimumWidth(450);
-    setModal(true);
-
-    auto *layout = new QVBoxLayout(this);
-    layout->setSpacing(12);
-    layout->setContentsMargins(16, 16, 16, 16);
-
-    // 进度提示
-    auto *progressLabel = new QLabel(
-        QStringLiteral("命令 %1 / %2").arg(index).arg(total), this);
-    progressLabel->setStyleSheet(
-        QStringLiteral("color: gray; font-size: 12px;"));
-    layout->addWidget(progressLabel);
-
-    // 命令内容（等宽、可选中、带边框）
-    auto *cmdLabel = new QLabel(m_cmdInfo.cmd, this);
-    QFont monoFont(QStringLiteral("Courier New"), 12);
-    monoFont.setStyleHint(QFont::Monospace);
-    cmdLabel->setFont(monoFont);
-    cmdLabel->setWordWrap(true);
-    cmdLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    cmdLabel->setStyleSheet(QStringLiteral(
-        "background: palette(base); border: 1px solid palette(mid); "
-        "border-radius: 4px; padding: 8px;"));
-    layout->addWidget(cmdLabel);
-
-    // 描述
-    if (!m_cmdInfo.description.isEmpty()) {
-        auto *descLabel = new QLabel(
-            QStringLiteral("说明: %1").arg(m_cmdInfo.description), this);
-        descLabel->setStyleSheet(QStringLiteral("color: gray;"));
-        descLabel->setWordWrap(true);
-        layout->addWidget(descLabel);
-    }
-
-    // 风险等级
+    configureDialog(this, QSize(760, 460));
+    const Colors c = colors(palette());
     const RiskLevel level = m_cmdInfo.safety.riskLevel;
-    auto *riskLabel = new QLabel(
-        QStringLiteral(
-            "风险: <span style=\"color:%1; font-weight:bold;\">●%2</span>")
-            .arg(riskLevelColor(level), riskLevelLabel(level)),
-        this);
-    riskLabel->setTextFormat(Qt::RichText);
-    layout->addWidget(riskLabel);
-
-    // 安全检查警告（前 3 条）
-    const QStringList &warnings = m_cmdInfo.safety.warnings;
-    for (int i = 0; i < warnings.size() && i < 3; ++i) {
-        auto *warnLabel = new QLabel(
-            QStringLiteral("⚠️ %1").arg(warnings.at(i)), this);
-        warnLabel->setStyleSheet(
-            QStringLiteral("color: #FF9800; font-size: 11px;"));
-        warnLabel->setWordWrap(true);
-        layout->addWidget(warnLabel);
+    auto *main = new QVBoxLayout(this);
+    main->setContentsMargins(18, 16, 18, 14);
+    main->setSpacing(10);
+    addHeader(main, QStringLiteral("审核当前命令"), QStringLiteral("第 %1 / %2 条 · 批准项将在审核完成后按原顺序执行。")
+                  .arg(index).arg(total), level, c, this);
+    main->addWidget(separator(c, this));
+    main->addWidget(commandArea({m_cmdInfo}, c, this, index), 1);
+    QLineEdit *confirm = nullptr;
+    if (level == RiskLevel::High) main->addWidget(confirmationBox(&confirm, c, this));
+    main->addWidget(separator(c, this));
+    auto *footer = new QHBoxLayout;
+    footer->setSpacing(10);
+    auto *abort = actionButton(QStringLiteral("终止全部"), this);
+    abort->setObjectName(QStringLiteral("aiAbortCommands"));
+    connect(abort, &QPushButton::clicked, this, [this] { m_abortAll = true; reject(); });
+    footer->addWidget(abort);
+    footer->addStretch();
+    auto *skip = actionButton(QStringLiteral("跳过此条"), this);
+    skip->setObjectName(QStringLiteral("aiSkipCommand"));
+    connect(skip, &QPushButton::clicked, this, &QDialog::reject);
+    footer->addWidget(skip);
+    auto *execute = actionButton(QStringLiteral("批准此条"), this, true);
+    execute->setObjectName(QStringLiteral("aiExecuteSingle"));
+    execute->setEnabled(m_cmdInfo.safety.isAllowed && level != RiskLevel::High);
+    if (confirm) {
+        connect(confirm, &QLineEdit::textChanged, this, [execute](const QString &text) {
+            execute->setEnabled(text.trimmed() == QStringLiteral("CONFIRM"));
+        });
     }
-
-    // 按钮区域
-    auto *btnLayout = new QHBoxLayout();
-    btnLayout->setSpacing(10);
-
-    auto *btnExecute = new QPushButton(QStringLiteral("✓ 执行此条"), this);
-    btnExecute->setMinimumHeight(32);
-    btnExecute->setStyleSheet(QStringLiteral(
-        "QPushButton { background-color: #4CAF50; color: white; "
-        "border-radius: 4px; padding: 4px 16px; }"
-        "QPushButton:hover { background-color: #388E3C; }"));
-    connect(btnExecute, &QPushButton::clicked, this, &QDialog::accept);
-    btnLayout->addWidget(btnExecute);
-
-    auto *btnSkip = new QPushButton(QStringLiteral("⏭ 跳过"), this);
-    btnSkip->setMinimumHeight(32);
-    btnSkip->setStyleSheet(QStringLiteral(
-        "QPushButton { background-color: #FF9800; color: white; "
-        "border-radius: 4px; padding: 4px 16px; }"
-        "QPushButton:hover { background-color: #F57C00; }"));
-    connect(btnSkip, &QPushButton::clicked, this, &QDialog::reject);
-    btnLayout->addWidget(btnSkip);
-
-    auto *btnAbort = new QPushButton(QStringLiteral("✕ 终止全部"), this);
-    btnAbort->setMinimumHeight(32);
-    btnAbort->setStyleSheet(QStringLiteral(
-        "QPushButton { border: 1px solid #F44336; color: #F44336; "
-        "border-radius: 4px; padding: 4px 16px; }"
-        "QPushButton:hover { background-color: #FFEBEE; }"));
-    // 对应Python: _on_abort — abort_all = True 后 reject
-    connect(btnAbort, &QPushButton::clicked, this, [this]() {
-        m_abortAll = true;
-        reject();
+    connect(execute, &QPushButton::clicked, this, [this, confirm] {
+        if (!m_cmdInfo.safety.isAllowed) return;
+        if (confirm && confirm->text().trimmed() != QStringLiteral("CONFIRM")) return;
+        accept();
     });
-    btnLayout->addWidget(btnAbort);
-
-    layout->addLayout(btnLayout);
+    footer->addWidget(execute);
+    main->addLayout(footer);
 }
 
 } // namespace cubeshell

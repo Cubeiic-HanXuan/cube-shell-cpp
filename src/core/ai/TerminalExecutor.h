@@ -71,6 +71,10 @@ private:
     static QString extractOutput(const QString &cleanBuffer, int sentinelStart);
     // 去掉 CSI / OSC 等控制序列（哨兵匹配与最终输出都基于剥离后的文本）。
     static QString stripAnsi(const QString &text);
+    QString cleanChunkLocked(const QString &text);
+    void appendOutputLocked(const QString &text);
+    QString capturedOutputLocked() const;
+    void resetOutputLocked();
 
     // runBlocking 被本对象所属线程（主线程）调用时的退化路径：QWaitCondition
     // 会把事件循环一起挂死（哨兵永远送不到），故改用局部事件循环轮询。
@@ -92,8 +96,10 @@ private:
     bool m_inFlight = false;
     std::atomic<bool> m_cancelled{false};
 
-    // Output buffer for current command
+    // Normalized output; expired prefix is compacted in batches, not per packet.
     QString m_outputBuffer;
+    qsizetype m_outputStart = 0;
+    QString m_pendingAnsi; // bounded, incomplete escape sequence across packets
     bool m_outputTruncated = false;
 
     // Environment initialization tracking (per terminal instance)

@@ -233,6 +233,23 @@ static void testCancelSingleFlightAndSafety()
     approveAutomatically(safety); safety.processUserInput("synthetic forbidden fixture");
     CHECK(waitFor([&] { return !safety.isBusy(); })); CHECK(count == 0);
     CHECK(safety.displayModel()->currentTurn()->localReport);
+
+    // The worker must independently recheck even if stale/default metadata says
+    // Safe. The adapter only counts calls; destructive fixtures are never run.
+    for (const QString &fixture : {QStringLiteral("ls && rm -rf /"),
+                                  QStringLiteral("sudo /bin/rm --recursive --force /"),
+                                  QStringLiteral("echo $(rm -rf /)")}) {
+        AiCommand forged; forged.cmd = fixture;
+        forged.safety.riskLevel = RiskLevel::Safe;
+        forged.safety.isAllowed = true;
+        AiCommandExecThread thread(nullptr, nullptr, {forged}, nullptr,
+                                   [&](const AiCommand &c) { ++count; return success(c); });
+        thread.start();
+        const bool finished = thread.wait(3000);
+        CHECK(finished);
+        if (!finished) { thread.requestStop(); thread.wait(); }
+        CHECK(count == 0);
+    }
 }
 
 static void testDiagnosisLimitAndHistory()

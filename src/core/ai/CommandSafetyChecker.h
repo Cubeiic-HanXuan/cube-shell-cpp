@@ -13,7 +13,6 @@
 
 #include <QList>
 #include <QMetaType>
-#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 
@@ -41,6 +40,9 @@ struct SafetyCheckResult {
     bool isAllowed = true;      // 是否允许执行
     QString reason;             // 检查结论说明
     QStringList warnings;       // 警告信息
+
+    // Shared by automatic execution, review-list filtering and step approval.
+    bool requiresConfirmation() const { return !isAllowed || riskLevel >= RiskLevel::Medium; }
 };
 
 // One command proposed by the AI agent, plus its safety verdict.
@@ -56,35 +58,15 @@ struct AiCommand {
     QString toolCallId;
 };
 
-// Stateless rule engine; all patterns are pre-compiled at construction so an
-// instance can be shared freely.
-// 对应Python: safety.py::CommandSafetyChecker
+// Stateless, quote-aware assessment of a deliberately limited shell grammar.
+// Pipelines/lists take the highest component risk; unknown syntax/commands need
+// confirmation (Medium), never automatic Low. Not a sandbox: remote binaries,
+// aliases and configuration are assumed trusted. Safe means an understood query,
+// not a guarantee against sensitive output or resource consumption.
 class CommandSafetyChecker {
 public:
-    CommandSafetyChecker();
-
-    // 对应Python: CommandSafetyChecker.check
     SafetyCheckResult check(const QString &command) const;
-
-    // 对应Python: CommandSafetyChecker.check_batch
     QList<SafetyCheckResult> checkBatch(const QStringList &commands) const;
-
-private:
-    // 预编译正则 + 中文说明（对应 Python 的 (re.Pattern, str) 元组）
-    struct Rule {
-        QRegularExpression pattern;
-        QString description;
-    };
-
-    // 对应Python: CommandSafetyChecker._is_safe_command
-    bool isSafeCommand(const QString &cmd) const;
-    // 对应Python: CommandSafetyChecker._strip_env_prefix
-    static QString stripEnvPrefix(const QString &cmd);
-
-    QList<Rule> m_criticalRules;    // _CRITICAL_PATTERNS
-    QList<Rule> m_highRules;        // _HIGH_PATTERNS
-    QList<Rule> m_mediumRules;      // _MEDIUM_PATTERNS
-    QStringList m_safePrefixes;     // _SAFE_PREFIXES
 };
 
 } // namespace cubeshell

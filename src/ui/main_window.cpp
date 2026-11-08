@@ -1087,7 +1087,7 @@ void MainWindow::onAiClearRequested()
 }
 
 // AI 命令就绪 → 按安全检查结果分流：全部 SAFE/LOW 自动整批执行，
-// 含 MEDIUM 及以上则弹窗确认（展示全部命令，标记风险命令）。
+// 含 MEDIUM 及以上则弹窗确认（仅展示需确认命令，批准仍保留完整计划）。
 // agent 为发出 commandReady 的会话 agent：弹窗期间用户切标签会改变
 // m_activeAiAgent，命令必须回到产生它的 agent，避免跨主机误执行。
 // 对应Python: cube-shell.py::_show_confirm_dialog（行 5719-5746）
@@ -1107,8 +1107,7 @@ void MainWindow::onAiCommandReady(const QList<AiCommand> &commands,
 
     bool hasRisky = false;
     for (const AiCommand &cmd : commands) {
-        if (static_cast<int>(cmd.safety.riskLevel)
-            > static_cast<int>(RiskLevel::Low)) {
+        if (cmd.safety.requiresConfirmation()) {
             hasRisky = true;
             break;
         }
@@ -1164,9 +1163,19 @@ void MainWindow::onCommandsStepMode(const QList<AiCommand> &commands,
     // QPointer 守卫：逐条弹窗期间会话可能被关闭，执行前再判空。
     QPointer<SshAiAgent> agentGuard(agent);
     QList<AiCommand> approved;
+    int reviewTotal = 0, reviewIndex = 0;
+    for (const auto &command : commands)
+        if (command.safety.requiresConfirmation()) ++reviewTotal;
     for (int i = 0; i < commands.size(); ++i) {
-        SingleCommandConfirmDialog dialog(commands.at(i), i + 1,
-                                          commands.size(), this);
+        // Hidden queries need no dialog, but remain in their original position.
+        // Collect approvals only: nothing is executed until the review is over.
+        if (!commands.at(i).safety.requiresConfirmation()) {
+            approved.append(commands.at(i));
+            continue;
+        }
+        if (!agentGuard) return;
+        SingleCommandConfirmDialog dialog(commands.at(i), ++reviewIndex,
+                                          reviewTotal, this);
         if (dialog.exec() == QDialog::Accepted) {
             approved.append(commands.at(i));
         } else if (dialog.abortAll()) {

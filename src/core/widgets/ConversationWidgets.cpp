@@ -24,6 +24,8 @@
 #include <QTextBrowser>
 #include <QTextLayout>
 #include <QTimer>
+#include <QHash>
+#include <QSignalBlocker>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -162,6 +164,7 @@ public:
         setStyleSheet(QStringLiteral("QTextBrowser { background:transparent; border:0; padding:0; color:%1; selection-background-color:%2; }")
                           .arg(css(c.text), css(c.accent)));
         setHtml(text);
+        connect(document(), &QTextDocument::contentsChanged, this, [this] { m_heights.clear(); });
         auto policy = QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         policy.setHeightForWidth(true); setSizePolicy(policy);
     }
@@ -169,12 +172,31 @@ public:
     QSize sizeHint() const override { return {300, heightForWidth(300)}; }
     int heightForWidth(int width) const override
     {
-        document()->setTextWidth(qMax(40, width - 2));
-        return static_cast<int>(std::ceil(document()->documentLayout()->documentSize().height())) + 4;
+        width = qMax(40, width - 2);
+        const auto cached = m_heights.constFind(width);
+        if (cached != m_heights.cend()) return cached.value();
+        const QSignalBlocker blocker(document()->documentLayout());
+        const qreal previous = document()->textWidth();
+        document()->setTextWidth(width);
+        const int height = static_cast<int>(std::ceil(document()->documentLayout()->documentSize().height())) + 4;
+        document()->setTextWidth(previous);
+        if (m_heights.size() >= 8) m_heights.clear();
+        m_heights.insert(width, height);
+        return height;
     }
 protected:
+    void changeEvent(QEvent *event) override
+    {
+        QTextBrowser::changeEvent(event);
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange
+            || event->type() == QEvent::StyleChange || event->type() == QEvent::PaletteChange) {
+            m_heights.clear(); updateGeometry();
+        }
+    }
     QVariant loadResource(int, const QUrl &) override { return {}; }
     void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+private:
+    mutable QHash<int, int> m_heights;
 };
 
 class CodeView;

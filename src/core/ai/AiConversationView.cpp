@@ -16,6 +16,8 @@
 #include <QTextBrowser>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWheelEvent>
+#include <QShowEvent>
 
 namespace cubeshell {
 namespace {
@@ -146,10 +148,10 @@ public:
             });
         }
     }
-    void sync(const AiConversationEntry &entry, bool expanded)
+    void sync(const AiConversationEntry &entry, bool expanded, bool streaming)
     {
-        if (entry.revision == m_revision && expanded == m_expanded) return;
-        m_revision = entry.revision; m_expanded = expanded;
+        if (entry.revision == m_revision && expanded == m_expanded && streaming == m_streaming) return;
+        m_revision = entry.revision; m_expanded = expanded; m_streaming = streaming;
         const auto c = colors(palette());
         m_dot = c.muted;
         layout()->setContentsMargins(entry.parentEntryId ? 38 : 24, 5, 0, 5);
@@ -217,7 +219,7 @@ public:
             const bool showBody = !entry.finalAnswer && !entry.text.isEmpty();
             m_copyText = entry.text;
             m_body->setVisible(showBody); m_messageHeader->setVisible(showBody);
-            if (showBody) m_body->setMarkdownText(entry.text);
+            if (showBody) m_body->setMarkdownText(entry.text, streaming);
             m_reasonToggle->setVisible(!entry.reasoning.isEmpty());
             m_reasonToggle->setChecked(expanded);
             m_reasonToggle->setIcon(icon(expanded ? Glyph::Chevron : Glyph::Next, c.muted));
@@ -276,6 +278,7 @@ private:
     AiConversationEntry::Kind m_kind;
     int m_revision = -1;
     bool m_expanded = false;
+    bool m_streaming = false;
     QColor m_dot;
     QString m_copyText;
     QToolButton *m_toggle = nullptr, *m_reasonToggle = nullptr;
@@ -386,10 +389,12 @@ public:
         const bool process = commands > 0 || messages > 1 || reasoning || notices > 0 || !activities.isEmpty();
         // Plain replies render once, in the reply area. Instantiate process
         // rows only when the turn actually acquires an execution timeline.
-        if (process) for (const auto &entry : turn.entries) {
+        // A collapsed process keeps its data in the model, but does not create
+        // or refresh hidden text documents. Expansion catches up from revisions.
+        if (process && !turn.processCollapsed) for (const auto &entry : turn.entries) {
             auto *widget = m_rows.value(entry.id);
             if (!widget) { widget = new EntryWidget(m_model, turn.id, entry, m_entries); m_rows.insert(entry.id, widget); m_entryLayout->addWidget(widget); }
-            widget->sync(entry, turn.expandedEntries.contains(entry.id));
+            widget->sync(entry, turn.expandedEntries.contains(entry.id), turn.phase != AiPhase::Finished);
         }
         m_process->setVisible(process);
         m_toggle->setChecked(!turn.processCollapsed);
@@ -410,9 +415,9 @@ public:
         m_result->setVisible(!body.isEmpty());
         m_resultTitle->setVisible(finished); m_copy->setVisible(!body.isEmpty());
         m_resultTitle->setText(turn.localReport ? tr("本地执行摘要") : commands ? tr("最终结果") : tr("回复"));
-        if (body != m_resultText) {
+        if (body != m_resultText || (finished && m_body->isStreaming())) {
             m_resultText = body;
-            m_body->setMarkdownText(body);
+            m_body->setMarkdownText(body, !finished);
         }
         updateGeometry();
     }
@@ -453,34 +458,62 @@ AiConversationView::AiConversationView(QWidget *parent) : QScrollArea(parent)
     m_layout = new QVBoxLayout(m_content); m_layout->setContentsMargins(14, 12, 14, 28); m_layout->setSpacing(6);
     m_empty = new QLabel(tr("AI 运维助手\n\n描述你想完成的任务\n执行过程可随时展开，结果会单独呈现"), m_content);
     m_empty->setAlignment(Qt::AlignCenter); m_empty->setWordWrap(true);
-    m_layout->addWidget(m_empty); m_layout->addStretch(); setWidget(m_content);
+    m_layout->addWidget(m_empty);
+    m_loadEarlier = new QToolButton(m_content);
+    m_loadEarlier->setObjectName(QStringLiteral("aiLoadEarlier"));
+    m_loadEarlier->setFocusPolicy(Qt::StrongFocus);
+    m_loadEarlier->hide();
+    connect(m_loadEarlier, &QToolButton::clicked, this, &AiConversationView::loadEarlier);
+    m_layout->addWidget(m_loadEarlier, 0, Qt::AlignHCenter);
+    m_layout->addStretch(); setWidget(m_content);
     m_jump = new QToolButton(viewport()); m_jump->setText(tr("↓ 回到底部"));
     m_jump->setObjectName(QStringLiteral("aiJumpToLatest")); m_jump->setAutoRaise(false);
     m_jump->setFocusPolicy(Qt::StrongFocus); m_jump->hide();
     connect(m_jump, &QToolButton::clicked, this, &AiConversationView::scrollToLatest);
     m_renderTimer.setInterval(60); m_renderTimer.setSingleShot(true);
-    connect(&m_renderTimer, &QTimer::timeout, this, &AiConversationView::flush);
+    connect(&m_renderTimer, &QTimer::timeout, this, [this] { renderPending(false); });
+    for (auto *timer : {&m_followTimer, &m_rebuildTimer, &m_historyTimer}) {
+        timer->setSingleShot(true); timer->setInterval(0);
+    }
+    connect(&m_followTimer, &QTimer::timeout, this, [this] {
+        if (isVisible() && m_following && !m_loadingHistory) scrollToLatest();
+    });
+    connect(&m_historyTimer, &QTimer::timeout, this, &AiConversationView::loadEarlier);
+    connect(&m_rebuildTimer, &QTimer::timeout, this, [this] {
+        m_pendingPosition = m_following ? -1 : verticalScrollBar()->value();
+        clearWidgets();
+        if (m_model) for (int i = m_firstLoaded; i < m_model->turns().size(); ++i) m_dirty.insert(m_model->turns().at(i).id);
+        if (isVisible()) { flush(); scheduleRestore(); }
+    });
     m_clockTimer.setInterval(1000);
     connect(&m_clockTimer, &QTimer::timeout, this, [this] {
-        if (!m_model || !m_model->isBusy()) return;
+        if (!isVisible() || !m_model || !m_model->isBusy()) return;
         const auto *turn = m_model->currentTurn();
-        if (auto *widget = m_turnWidgets.value(turn->id)) widget->refreshPhase(*turn);
+        if (auto *widget = m_turnWidgets.value(turn->id))
+            if (nearViewport(widget)) widget->refreshPhase(*turn);
     });
     m_clockTimer.start();
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
-        if (!m_adjusting) m_following = verticalScrollBar()->maximum() - verticalScrollBar()->value() < 24;
+        if (!m_adjusting && !m_loadingHistory) {
+            m_following = verticalScrollBar()->maximum() - verticalScrollBar()->value() < 24;
+            if (!m_dirty.isEmpty() && isVisible() && !m_renderTimer.isActive()) m_renderTimer.start(0);
+        }
         updateJumpButton();
     });
     connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, [this] {
-        if (m_following) QTimer::singleShot(0, this, [this] { if (m_following) scrollToLatest(); });
+        if (m_following && !m_loadingHistory && !m_followTimer.isActive()) m_followTimer.start();
         updateJumpButton();
     });
 }
 
 void AiConversationView::clearWidgets()
 {
-    m_renderTimer.stop(); m_dirty.clear();
+    ++m_generation;
+    m_renderTimer.stop(); m_followTimer.stop(); m_rebuildTimer.stop(); m_historyTimer.stop(); m_dirty.clear();
+    m_loadingHistory = false;
+    m_adjusting = true;
     qDeleteAll(m_turnWidgets); m_turnWidgets.clear();
+    m_adjusting = false;
 }
 
 void AiConversationView::setModel(AiConversationModel *model)
@@ -488,92 +521,184 @@ void AiConversationView::setModel(AiConversationModel *model)
     if (m_model == model) return;
     if (m_model) {
         m_positions.insert(m_model, verticalScrollBar()->value());
+        m_historyStarts.insert(m_model, m_firstLoaded);
+        m_followStates.insert(m_model, m_following);
     }
     disconnect(m_changeConnection);
     disconnect(m_resetConnection);
     clearWidgets(); m_model = model;
-    m_following = !m_positions.contains(model);
+    m_following = m_followStates.value(model, !m_positions.contains(model));
+    const int turnCount = model ? int(model->turns().size()) : 0;
+    const int recentStart = qMax(0, turnCount - HistoryPageSize);
+    m_firstLoaded = qBound(0, m_historyStarts.value(model, recentStart), qMax(0, turnCount - 1));
+    m_pendingPosition = m_following ? -1 : m_positions.value(model, 0);
+    m_loadEarlier->hide();
     if (model) {
         m_changeConnection = connect(model, &AiConversationModel::changed, this, [this](quint64 id) {
+            // Changes outside the loaded history page are read from the model on demand.
+            if (!m_turnWidgets.contains(id) && (!m_model->currentTurn() || m_model->currentTurn()->id != id)) return;
             m_dirty.insert(id);
-            if (!m_model->isBusy()) flush();
-            else if (!m_renderTimer.isActive()) m_renderTimer.start();
+            if (!isVisible()) return;
+            if (!m_model->isBusy()) renderPending(false);
+            else if (!m_renderTimer.isActive()) m_renderTimer.start(60);
         });
-        m_resetConnection = connect(model, &AiConversationModel::reset, this, [this] { clearWidgets(); m_empty->show(); m_following = true; });
+        m_resetConnection = connect(model, &AiConversationModel::reset, this, [this] {
+            clearWidgets(); m_firstLoaded = 0; m_pendingPosition = -1;
+            m_empty->show(); m_loadEarlier->hide(); m_following = true;
+        });
         if (!m_observedModels.contains(model)) {
             m_observedModels.insert(model);
+            // A background tab can clear its conversation while disconnected
+            // from m_resetConnection. Its saved page/scroll offsets then expire.
+            connect(model, &AiConversationModel::reset, this, [this, model] {
+                m_positions.remove(model); m_historyStarts.remove(model); m_followStates.remove(model);
+            });
             connect(model, &QObject::destroyed, this, [this, model] {
-                m_positions.remove(model); m_observedModels.remove(model);
-                if (!m_model) { clearWidgets(); m_empty->show(); }
+                m_positions.remove(model); m_historyStarts.remove(model); m_followStates.remove(model);
+                m_observedModels.remove(model);
+                if (!m_model) { clearWidgets(); m_empty->show(); m_loadEarlier->hide(); }
             });
         }
-        for (const auto &turn : model->turns()) m_dirty.insert(turn.id);
+        for (int i = m_firstLoaded; i < model->turns().size(); ++i) m_dirty.insert(model->turns().at(i).id);
     }
-    flush();
-    const int position = m_positions.value(model, -1);
-    QTimer::singleShot(0, this, [this, guard = QPointer<AiConversationModel>(model), position] {
-        if (m_model != guard) return;
+    if (isVisible()) { flush(); scheduleRestore(); }
+}
+
+void AiConversationView::scheduleRestore()
+{
+    if (m_pendingPosition == -2) return;
+    const int position = m_pendingPosition;
+    const quint64 generation = m_generation;
+    m_pendingPosition = -2;
+    QTimer::singleShot(0, this, [this, generation, position] {
+        if (generation != m_generation || !m_model) return;
         if (position < 0) scrollToLatest();
-        else { m_adjusting = true; verticalScrollBar()->setValue(position); m_adjusting = false; updateJumpButton(); }
+        else {
+            m_adjusting = true; verticalScrollBar()->setValue(position); m_adjusting = false;
+            m_following = false; updateJumpButton();
+            if (!m_dirty.isEmpty()) m_renderTimer.start(0);
+        }
     });
 }
 
-void AiConversationView::flush()
+bool AiConversationView::nearViewport(const QWidget *widget) const
+{
+    const int top = widget->mapTo(viewport(), QPoint(0, 0)).y();
+    const int overscan = viewport()->height();
+    return top <= viewport()->height() + overscan && top + widget->height() >= -overscan;
+}
+
+void AiConversationView::flush() { renderPending(true); }
+
+void AiConversationView::renderPending(bool force)
 {
     m_renderTimer.stop();
     m_empty->setVisible(!m_model || m_model->turns().isEmpty());
-    if (!m_model) return;
+    if (!m_model || (!force && !isVisible())) return;
     const int position = verticalScrollBar()->value();
     const bool following = m_following;
     m_adjusting = true;
-    for (const auto &turn : m_model->turns()) {
+    const auto &turns = m_model->turns();
+    // Following new output keeps only a recent page of widgets resident. Data,
+    // expansion state and all older turns remain in the session-owned model.
+    if (following && !m_loadingHistory) {
+        const int start = qMax(m_firstLoaded, int(turns.size()) - HistoryPageSize);
+        for (int i = m_firstLoaded; i < start; ++i) {
+            const auto id = turns.at(i).id;
+            delete m_turnWidgets.take(id); m_dirty.remove(id);
+        }
+        m_firstLoaded = start;
+    }
+    for (int i = m_firstLoaded; i < turns.size(); ++i) {
+        const auto &turn = turns.at(i);
         if (!m_dirty.contains(turn.id)) continue;
         auto *widget = m_turnWidgets.value(turn.id);
+        if (widget && !force && !following && !nearViewport(widget)) continue;
         if (!widget) {
             widget = new AiTurnWidget(m_model, turn, m_content);
             m_turnWidgets.insert(turn.id, widget);
-            m_layout->insertWidget(m_layout->count() - 1, widget);
+            m_layout->insertWidget(2 + i - m_firstLoaded, widget);
         } else widget->sync(turn);
+        m_dirty.remove(turn.id);
     }
-    m_dirty.clear(); m_layout->activate();
+    m_loadEarlier->setText(tr("加载更早的对话（还有 %1 轮）").arg(m_firstLoaded));
+    m_loadEarlier->setVisible(m_firstLoaded > 0);
+    m_layout->activate();
     if (!following) verticalScrollBar()->setValue(position);
     m_following = following; m_adjusting = false;
     updateJumpButton();
-    if (following) QTimer::singleShot(0, this, [this] { if (m_following) scrollToLatest(); });
+    if (following && !m_followTimer.isActive()) m_followTimer.start();
+}
+
+void AiConversationView::loadEarlier()
+{
+    if (!m_model || m_firstLoaded <= 0 || m_loadingHistory) return;
+    m_loadingHistory = true; m_following = false; m_followTimer.stop();
+    const auto oldFirstId = m_model->turns().at(m_firstLoaded).id;
+    QPointer<QWidget> anchor = m_turnWidgets.value(oldFirstId);
+    const int anchorY = anchor ? anchor->mapTo(viewport(), QPoint(0, 0)).y() : 0;
+    const int previous = m_firstLoaded;
+    m_firstLoaded = qMax(0, previous - HistoryPageSize);
+    for (int i = m_firstLoaded; i < previous; ++i) m_dirty.insert(m_model->turns().at(i).id);
+    flush();
+    const quint64 generation = m_generation;
+    QTimer::singleShot(0, this, [this, generation, anchor, anchorY] {
+        if (generation != m_generation) return;
+        m_layout->activate();
+        m_adjusting = true;
+        if (anchor) verticalScrollBar()->setValue(verticalScrollBar()->value()
+            + anchor->mapTo(viewport(), QPoint(0, 0)).y() - anchorY);
+        m_adjusting = false; m_loadingHistory = false; m_following = false;
+        updateJumpButton();
+        if (isVisible() && !m_dirty.isEmpty()) m_renderTimer.start(0);
+    });
 }
 
 void AiConversationView::scrollToLatest()
 {
-    m_following = true; m_adjusting = true;
+    m_following = true;
+    if (!m_dirty.isEmpty()) renderPending(true);
+    m_adjusting = true;
     verticalScrollBar()->setValue(verticalScrollBar()->maximum());
     m_adjusting = false; updateJumpButton();
 }
 
 void AiConversationView::updateJumpButton()
 {
-    m_jump->adjustSize();
-    m_jump->move(qMax(4, (viewport()->width() - m_jump->width()) / 2), qMax(0, viewport()->height() - m_jump->height() - 12));
-    m_jump->setVisible(!m_following && verticalScrollBar()->maximum() > 0);
-    m_jump->raise();
+    const bool visible = !m_following && verticalScrollBar()->maximum() > 0;
+    if (m_jump->isHidden() == visible) m_jump->setVisible(visible);
+    if (visible) {
+        m_jump->adjustSize();
+        m_jump->move(qMax(4, (viewport()->width() - m_jump->width()) / 2), qMax(0, viewport()->height() - m_jump->height() - 12));
+        m_jump->raise();
+    }
 }
 
 void AiConversationView::changeEvent(QEvent *event)
 {
     QScrollArea::changeEvent(event);
     if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange
-        || event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange) {
-        QTimer::singleShot(0, this, [this] {
-            const int position = verticalScrollBar()->value();
-            clearWidgets();
-            if (m_model) for (const auto &turn : m_model->turns()) m_dirty.insert(turn.id);
-            flush();
-            if (!m_following) verticalScrollBar()->setValue(position);
-        });
-    }
+        || event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+        m_rebuildTimer.start();
 }
 
 void AiConversationView::resizeEvent(QResizeEvent *event)
 {
     QScrollArea::resizeEvent(event); updateJumpButton();
+    if (isVisible() && !m_dirty.isEmpty()) m_renderTimer.start(0);
+}
+
+void AiConversationView::showEvent(QShowEvent *event)
+{
+    QScrollArea::showEvent(event);
+    flush(); scheduleRestore();
+}
+
+void AiConversationView::wheelEvent(QWheelEvent *event)
+{
+    QScrollArea::wheelEvent(event);
+    if ((event->angleDelta().y() > 0 || event->pixelDelta().y() > 0)
+        && verticalScrollBar()->value() <= 32 && m_firstLoaded > 0 && !m_loadingHistory)
+        m_historyTimer.start();
 }
 } // namespace cubeshell

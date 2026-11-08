@@ -33,6 +33,6 @@ protected:
 // HTML must already be escaped/rendered by the caller. Resources never load.
 QTextBrowser *richText(const QString &html, const Colors &colors, QWidget *parent);
 void styleRichText(QTextBrowser *view, const Colors &colors);
-QPlainTextEdit *codeView(const QString &text, const Colors &colors, QWidget *parent);
+QPlainTextEdit *codeView(const QString &text, const Colors &colors, QWidget *parent, const QString &language = {});
 QToolButton *disclosureButton(const QString &text, const Colors &colors, QWidget *parent);
 } // namespace cubeshell::sessionui

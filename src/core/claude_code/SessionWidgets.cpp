@@ -299,7 +299,7 @@ void SessionRowWidget::addCode(QVBoxLayout *layout, const QString &title, const 
     copy->setObjectName(QStringLiteral("sessionCodeCopy_%1").arg(key));
     connect(copy, &QToolButton::clicked, this, [this, text] { QApplication::clipboard()->setText(text); emit copied(); });
     bar->addWidget(copy); cardLayout->addLayout(bar);
-    auto *editor = codeView(preview, m_colors, card);
+    auto *editor = codeView(preview, m_colors, card, language);
     editor->setProperty("codeKey", key);
     editor->setProperty("language", language);
     cardLayout->addWidget(editor);

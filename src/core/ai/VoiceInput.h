@@ -1,6 +1,6 @@
 #pragma once
 
-// VoiceInput.h — microphone recording + GLM-ASR speech recognition.
+// VoiceInput.h — microphone recording + configurable speech recognition.
 //
 // 对应Python: core/ai/voice_input.py::VoiceInputManager
 //             (+ _SpeechRecognitionThread 的识别/错误映射逻辑)
@@ -8,7 +8,7 @@
 // 实现差异（行为等价）：Python 用 QMediaRecorder 录 M4A 再经 afconvert 转
 // WAV；C++ 直接用 QAudioSource 采集 16kHz/Int16/Mono PCM，自行拼 WAV 头，
 // 免去外部转换步骤。识别调用改为 QNetworkAccessManager multipart POST
-// GLM-ASR HTTP 接口（model=glm-asr-2512），纯异步无工作线程。
+// OpenAI 兼容音频转写接口（默认智谱 glm-asr-2512），纯异步无工作线程。
 //
 // 录音过程中每 5s 自动分段识别（partialTextRecognized 实时回显），
 // 停止后等全部分段完成再发 textRecognized。
@@ -54,8 +54,8 @@ public:
     // 对应Python: VoiceInputManager.is_recording
     bool isRecording() const { return m_state == State::Recording; }
 
-    // 识别接口地址（默认智谱 GLM-ASR，可覆盖用于测试）。
-    void setTranscriptionUrl(const QString &url) { m_transcriptionUrl = url; }
+    // Optional test overrides; otherwise re-read independent voice settings at each start.
+    void setTranscriptionUrl(const QString &url) { m_transcriptionUrlOverride = url; }
     void setApiKey(const QString &key) { m_apiKeyOverride = key; }
 
     // --- 纯函数（供单测） ---
@@ -104,8 +104,12 @@ private:
                                 const QString &fallback);
 
     State m_state = State::Idle;
-    QString m_transcriptionUrl;
+    QString m_transcriptionUrlOverride;
     QString m_apiKeyOverride;
+    // Snapshot for one recording: settings changes cannot split its chunks across services.
+    QString m_transcriptionUrl;
+    QString m_asrModel;
+    QString m_apiKey;
 
     QAudioSource *m_audioSource = nullptr;
     QPointer<QIODevice> m_audioIo;          // QAudioSource::start() 返回

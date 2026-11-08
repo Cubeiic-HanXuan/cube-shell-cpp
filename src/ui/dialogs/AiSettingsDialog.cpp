@@ -8,6 +8,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 namespace cubeshell {
@@ -39,6 +40,12 @@ AiSettingsDialog::AiSettingsDialog(QWidget *parent)
     m_prefs = AiPreferences::load();
 
     auto *layout = new QVBoxLayout(this);
+    auto *tabs = new QTabWidget(this);
+    tabs->setObjectName(QStringLiteral("aiSettingsTabs"));
+    layout->addWidget(tabs);
+    auto *chatPage = new QWidget(tabs);
+    auto *chatLayout = new QVBoxLayout(chatPage);
+    tabs->addTab(chatPage, tr("聊天模型"));
 
     auto *form = new QGridLayout();
     int row = 0;
@@ -46,6 +53,7 @@ AiSettingsDialog::AiSettingsDialog(QWidget *parent)
     // ---- AI 服务提供商 ---- 对应Python: core/ai/ui.py:49-55
     form->addWidget(new QLabel(tr("AI 服务提供商"), this), row, 0);
     m_providerCombo = new QComboBox(this);
+    m_providerCombo->setObjectName(QStringLiteral("chatProviderCombo"));
     const QList<ProviderPreset> presets = AiPreferences::providerPresets();
     for (const ProviderPreset &preset : presets)
         m_providerCombo->addItem(preset.name, preset.key);   // userData 存 key
@@ -95,16 +103,65 @@ AiSettingsDialog::AiSettingsDialog(QWidget *parent)
     form->addWidget(m_systemPromptEdit, row, 1);
     ++row;
 
-    layout->addLayout(form);
+    chatLayout->addLayout(form);
 
     // ---- API Key ---- 对应Python: core/ai/ui.py:102-109
     auto *keyBox = new QHBoxLayout();
     keyBox->addWidget(new QLabel(tr("API Key"), this));
     m_keyEdit = new QLineEdit(this);
+    m_keyEdit->setObjectName(QStringLiteral("chatApiKeyEdit"));
     m_keyEdit->setEchoMode(QLineEdit::Password);
     m_keyEdit->setPlaceholderText(tr("使用系统钥匙串保存，不写入配置文件"));
     keyBox->addWidget(m_keyEdit);
-    layout->addLayout(keyBox);
+    chatLayout->addLayout(keyBox);
+    chatLayout->addStretch();
+
+    // Speech credentials must not follow the selected chat provider.
+    auto *voicePage = new QWidget(tabs);
+    auto *voiceLayout = new QVBoxLayout(voicePage);
+    tabs->addTab(voicePage, tr("语音识别"));
+    auto *voiceHint = new QLabel(tr(
+        "语音输入使用独立的语音转文字服务，不使用聊天模型的 API Key。\n"
+        "默认使用智谱 GLM-ASR，请填写可调用该语音接口的智谱开放平台 API Key。"
+        "也可配置兼容 OpenAI 音频转写协议的服务。"), voicePage);
+    voiceHint->setWordWrap(true);
+    voiceLayout->addWidget(voiceHint);
+
+    auto *voiceForm = new QGridLayout();
+    voiceForm->setColumnStretch(1, 1);
+    m_voiceUrlEdit = new QLineEdit(m_prefs.voiceTranscriptionUrl, voicePage);
+    m_voiceUrlEdit->setObjectName(QStringLiteral("voiceTranscriptionUrlEdit"));
+    m_voiceUrlEdit->setToolTip(tr("完整转写接口地址，包含 /audio/transcriptions；不是聊天 Base URL"));
+    voiceForm->addWidget(new QLabel(tr("转写接口 URL"), voicePage), 0, 0);
+    voiceForm->addWidget(m_voiceUrlEdit, 0, 1);
+    m_voiceModelEdit = new QLineEdit(m_prefs.voiceModel, voicePage);
+    m_voiceModelEdit->setObjectName(QStringLiteral("voiceModelEdit"));
+    voiceForm->addWidget(new QLabel(tr("语音模型"), voicePage), 1, 0);
+    voiceForm->addWidget(m_voiceModelEdit, 1, 1);
+    m_voiceKeyEdit = new QLineEdit(voicePage);
+    m_voiceKeyEdit->setObjectName(QStringLiteral("voiceApiKeyEdit"));
+    m_voiceKeyEdit->setEchoMode(QLineEdit::Password);
+    const bool voiceKeyFromEnv = !qEnvironmentVariable("CUBESHELL_VOICE_API_KEY").trimmed().isEmpty();
+    m_voiceKeyEdit->setEnabled(!voiceKeyFromEnv);
+    m_voiceKeyEdit->setPlaceholderText(voiceKeyFromEnv
+        ? tr("由 CUBESHELL_VOICE_API_KEY 环境变量提供")
+        : m_prefs.voiceApiKey().isEmpty()
+            ? tr("独立保存到系统钥匙串，不写入配置文件")
+            : tr("已保存（留空保留，输入新值可覆盖）"));
+    voiceForm->addWidget(new QLabel(tr("语音 API Key"), voicePage), 2, 0);
+    voiceForm->addWidget(m_voiceKeyEdit, 2, 1);
+    voiceLayout->addLayout(voiceForm);
+    auto *endpointHint = new QLabel(tr(
+        "请只填写可信的服务地址，录音和语音 API Key 将发送至此地址。"
+        "保存后，下次点击语音按钮即可生效。"), voicePage);
+    endpointHint->setWordWrap(true);
+    voiceLayout->addWidget(endpointHint);
+#ifndef CUBESHELL_WITH_VOICE
+    auto *unavailableHint = new QLabel(tr("当前构建未启用语音输入，配置可保存，但无法录音。"), voicePage);
+    unavailableHint->setWordWrap(true);
+    voiceLayout->addWidget(unavailableHint);
+#endif
+    voiceLayout->addStretch();
 
     // ---- 按钮 ---- 对应Python: core/ai/ui.py:111-120
     auto *btns = new QHBoxLayout();
@@ -141,6 +198,9 @@ void AiSettingsDialog::initProviderSelection()
     // 联动会把模型下拉重置到 preset 首项，这里恢复用户保存的模型名
     //（可能是不在列表里的自定义值）。对应Python: core/ai/ui.py:143
     m_modelCombo->setCurrentText(m_prefs.model);
+    // Opening the voice tab must not reset a saved chat endpoint to its preset.
+    if (!m_prefs.baseUrl.isEmpty())
+        m_baseUrlEdit->setText(m_prefs.baseUrl);
 }
 
 // 对应Python: core/ai/ui.py:145 _on_provider_changed
@@ -184,7 +244,7 @@ void AiSettingsDialog::save()
 {
     const QString provider = m_providerCombo->currentData().toString();
 
-    AiPreferences prefs;
+    AiPreferences prefs = m_prefs;
     prefs.provider = provider;
     // 空值回退默认。对应Python: core/ai/ui.py:189-199 的 `or "..."`
     const QString model = m_modelCombo->currentText().trimmed();
@@ -231,11 +291,11 @@ void AiSettingsDialog::save()
         ? QStringLiteral("你是一个资深 Linux 运维与终端助手。输出尽量可执行、可复制。")
         : systemPrompt;
 
-    // Python 侧 save_ai_prefs 内部吞掉异常只记日志；C++ 侧 save() 返回写入结果，
-    // 这里复用 Python 的错误文案把真实 I/O 失败暴露给用户（差异 D1）。
-    QString saveError;
-    if (!prefs.save(&saveError)) {
-        QMessageBox::warning(this, tr("错误"), tr("保存失败: %1").arg(saveError));
+    prefs.voiceTranscriptionUrl = m_voiceUrlEdit->text().trimmed();
+    prefs.voiceModel = m_voiceModelEdit->text().trimmed();
+    const QString voiceError = prefs.voiceConfigurationError();
+    if (!voiceError.isEmpty()) {
+        QMessageBox::warning(this, tr("错误"), voiceError);
         return;
     }
 
@@ -250,7 +310,21 @@ void AiSettingsDialog::save()
         }
     }
 
+    const QString voiceKey = m_voiceKeyEdit->text().trimmed();
+    if (!voiceKey.isEmpty() && !prefs.setVoiceApiKey(voiceKey)) {
+        QMessageBox::warning(this, tr("错误"), tr("保存语音 API Key 失败，请检查系统钥匙串是否可用"));
+        return;
+    }
+
+    // Persist the endpoint only after its credentials were successfully stored.
+    QString saveError;
+    if (!prefs.save(&saveError)) {
+        QMessageBox::warning(this, tr("错误"), tr("保存失败: %1").arg(saveError));
+        return;
+    }
+
     m_keyEdit->clear();
+    m_voiceKeyEdit->clear();
     accept();
 }
 

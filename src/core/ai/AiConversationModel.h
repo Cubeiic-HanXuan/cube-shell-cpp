@@ -10,8 +10,10 @@
 namespace cubeshell {
 
 struct AiConversationEntry {
-    enum Kind { Message, Command, Notice } kind = Message;
+    enum Kind { Message, Command, Notice, Activity } kind = Message;
     quint64 id = 0;
+    quint64 parentEntryId = 0;
+    AiActivity activity;
     int revision = 0;
     QString text;
     QString reasoning;
@@ -56,6 +58,8 @@ public:
     void setCommandResult(const AiCommandResult &result);
     void appendCommandOutput(quint64 stepId, const QString &text);
     void addNotice(const QString &text);
+    quint64 beginActivity(const AiActivity &activity, AiStepState state = AiStepState::Pending);
+    void updateActivity(quint64 id, AiStepState state, const QString &output, qint64 durationMs = 0);
     void finishTurn(AiTurnOutcome outcome, const QString &text, bool localReport = false);
     QString factualSummary(const QString &reason) const;
     void setProcessCollapsed(quint64 turnId, bool collapsed);
@@ -67,6 +71,7 @@ signals:
     void reset();
 
 private:
+    void updateCommandActivity(AiConversationTurn &turn, quint64 parentId);
     AiConversationEntry *entry(quint64 id, AiConversationTurn **turn = nullptr);
     QList<AiConversationTurn> m_turns;
     quint64 m_nextId = 1;

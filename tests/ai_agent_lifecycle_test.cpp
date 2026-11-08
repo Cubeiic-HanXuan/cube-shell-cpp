@@ -182,7 +182,22 @@ static void testMultipleCallsAndApproval()
     for (const auto &value : server.requests.last().value("messages").toArray())
         toolResults += value.toObject().value("role") == "tool";
     CHECK(toolResults == 2);
-    CHECK(agent.displayModel()->currentTurn()->entries.at(2).state == AiStepState::Skipped);
+    int activities = 0, skipped = 0, succeeded = 0;
+    for (const auto &entry : agent.displayModel()->currentTurn()->entries) {
+        if (entry.kind == AiConversationEntry::Activity) {
+            ++activities;
+            CHECK(entry.activity.name == "execute_ssh_commands");
+            CHECK(!entry.activity.input.isEmpty()); CHECK(!entry.activity.output.isEmpty());
+            if (entry.activity.callId == "one") CHECK(entry.state == AiStepState::Skipped);
+            if (entry.activity.callId == "two") CHECK(entry.state == AiStepState::Succeeded);
+        }
+        if (entry.kind == AiConversationEntry::Command) {
+            CHECK(entry.parentEntryId != 0);
+            skipped += entry.state == AiStepState::Skipped;
+            succeeded += entry.state == AiStepState::Succeeded;
+        }
+    }
+    CHECK(activities == 2); CHECK(skipped == 1); CHECK(succeeded == 1);
 
     Server bad;
     auto badTool = tool("bad"); badTool.insert("function", QJsonObject{{"name", "execute_ssh_commands"}, {"arguments", "{"}});

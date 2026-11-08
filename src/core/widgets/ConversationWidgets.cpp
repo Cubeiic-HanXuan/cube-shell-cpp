@@ -2,6 +2,7 @@
 // 显示文本与复制原文分离；外链只上报请求，不在富文本控件内自动加载资源。
 
 #include "widgets/ConversationWidgets.h"
+#include "widgets/CodeHighlighter.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
@@ -176,35 +177,6 @@ protected:
     void wheelEvent(QWheelEvent *event) override { event->ignore(); }
 };
 
-// 轻量只读高亮：后应用的字符串 / 注释规则覆盖关键字颜色，只改变格式，不改写原文。
-class CodeHighlighter : public QSyntaxHighlighter {
-public:
-    CodeHighlighter(QTextDocument *doc, const Colors &c) : QSyntaxHighlighter(doc)
-    {
-        const bool dark = c.canvas.lightness() < 128;
-        const auto rule = [this](const QString &pattern, const QColor &color) {
-            QTextCharFormat f; f.setForeground(color); m_rules.append({QRegularExpression(pattern), f});
-        };
-        rule(QStringLiteral("\\b(class|public|private|protected|static|const|return|if|else|for|while|def|import|from|function|let|var|void|int|bool|auto|namespace|using|package|new|async|await|try|catch|throw|true|false|null|None|self|SELECT|FROM|WHERE|JOIN|LIMIT)\\b"),
-             dark ? QColor("#baacf4") : QColor("#7351b5"));
-        rule(QStringLiteral("\\b[0-9]+(?:\\.[0-9]+)?\\b"), dark ? QColor("#e5b582") : QColor("#976015"));
-        rule(QStringLiteral("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'"), dark ? QColor("#98c5a3") : QColor("#347750"));
-        rule(QStringLiteral("(?:^|\\s)(?://|#).*$"), c.muted);
-    }
-protected:
-    void highlightBlock(const QString &text) override
-    {
-        for (const auto &rule : m_rules) {
-            auto matches = rule.first.globalMatch(text);
-            while (matches.hasNext()) {
-                const auto m = matches.next();
-                setFormat(m.capturedStart(), m.capturedLength(), rule.second);
-            }
-        }
-    }
-private:
-    QList<QPair<QRegularExpression, QTextCharFormat>> m_rules;
-};
 class CodeView;
 class Gutter : public QWidget {
 public:
@@ -217,7 +189,7 @@ private:
 // 只读代码区保留独立滚动与行号；达到滚动边界后把滚轮交还外层时间线。
 class CodeView : public QPlainTextEdit {
 public:
-    CodeView(const QString &text, const Colors &c, QWidget *parent) : QPlainTextEdit(parent), m_colors(c)
+    CodeView(const QString &text, const Colors &c, QWidget *parent, const QString &language) : QPlainTextEdit(parent), m_colors(c)
     {
         setObjectName(QStringLiteral("sessionCode"));
         setReadOnly(true); setFrameShape(QFrame::NoFrame);
@@ -238,7 +210,7 @@ public:
         connect(this, &QPlainTextEdit::updateRequest, this, [this](const QRect &, int dy) {
             if (dy) m_gutter->scroll(0, dy); else m_gutter->update();
         });
-        new CodeHighlighter(document(), c);
+        new CodeHighlighter(document(), c, language);
         const int lines = qMin(18, qMax(1, blockCount()));
         setFixedHeight(lines * fontMetrics().lineSpacing() + 20 + (text.size() > 200 ? 8 : 0));
     }
@@ -296,8 +268,8 @@ void styleRichText(QTextBrowser *view, const Colors &c)
 }
 QTextBrowser *richText(const QString &html, const Colors &c, QWidget *parent)
 { return new RichText(html, c, parent); }
-QPlainTextEdit *codeView(const QString &text, const Colors &c, QWidget *parent)
-{ return new CodeView(text, c, parent); }
+QPlainTextEdit *codeView(const QString &text, const Colors &c, QWidget *parent, const QString &language)
+{ return new CodeView(text, c, parent, language); }
 QToolButton *disclosureButton(const QString &text, const Colors &c, QWidget *parent)
 {
     auto *button = new QToolButton(parent);

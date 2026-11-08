@@ -23,6 +23,26 @@ enum class AiTurnOutcome { Complete, Incomplete, Failed, Cancelled };
 enum class AiStepState { Pending, Running, Succeeded, AllowedFailure,
                          Failed, Skipped, Cancelled, Unknown };
 
+// Presentation events, independent of a provider's wire protocol. Producers
+// must supply actual events; prose is never interpreted as a tool execution.
+enum class AiActivityKind { Tool, SubAgent, AgentMessage, Mcp, Skill };
+struct AiActivity {
+    AiActivityKind kind = AiActivityKind::Tool;
+    QString callId;
+    QString parentCallId;
+    QString name;
+    QString summary;
+    QString input;
+    QString output;
+    QString agent;
+    QString recipient;
+    QString server;
+    QString inputLanguage = QStringLiteral("json");
+    QString outputLanguage = QStringLiteral("text");
+    qint64 durationMs = 0;
+};
+QString aiActivityLabel(AiActivityKind kind);
+
 struct AiCommandResult {
     QString cmd;
     QString description;

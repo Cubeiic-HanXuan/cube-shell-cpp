@@ -40,6 +40,7 @@ struct Response {
 class Server : public QTcpServer {
 public:
     QList<QJsonObject> requests;
+    QList<QByteArray> rawRequests; // Includes headers and multipart bodies for ASR assertions.
     std::function<Response(const QJsonObject &, int)> respond;
     Server()
     {
@@ -58,6 +59,7 @@ public:
                         if (line.toLower().startsWith("content-length:")) length = line.mid(15).trimmed().toInt();
                     if (buffer.size() < end + 4 + length) return;
                     handled = true;
+                    rawRequests.append(buffer.left(end + 4 + length));
                     const auto body = QJsonDocument::fromJson(buffer.mid(end + 4, length)).object();
                     requests.append(body);
                     const auto response = respond ? respond(body, requests.size()) : Response{};

@@ -188,6 +188,18 @@ void SshAiAgent::onAiCompleted(const AiRequestResult &result)
         // The history retains exact call identities. No request is sent again
         // until every call has a corresponding (possibly skipped) result.
         m_conversation.addAssistantToolCalls(result.text, m_pendingToolCalls);
+        for (const auto &value : m_pendingToolCalls) {
+            const auto call = value.toObject();
+            const auto function = call.value(QStringLiteral("function")).toObject();
+            AiActivity activity;
+            activity.callId = call.value(QStringLiteral("id")).toString();
+            activity.name = function.value(QStringLiteral("name")).toString();
+            const auto args = QJsonDocument::fromJson(function.value(QStringLiteral("arguments")).toString().toUtf8());
+            activity.input = QString::fromUtf8(args.toJson(QJsonDocument::Indented));
+            activity.summary = tr("SSH 执行 · %1 个命令").arg(args.object().value(QStringLiteral("commands")).toArray().size());
+            activity.outputLanguage = QStringLiteral("json");
+            m_display->beginActivity(activity);
+        }
         m_pendingCommands = checkCommandsSafety(commands);
     } else {
         m_conversation.addAssistantMessage(result.text);
@@ -318,6 +330,13 @@ void SshAiAgent::closeToolBatch()
                 {QStringLiteral("note"), entry.text}});
         }
         m_conversation.addToolResult(id, QString::fromUtf8(QJsonDocument(results).toJson(QJsonDocument::Compact)));
+        // Keep the actual (sanitized) tool response alongside its input. Full
+        // captured stdout/stderr remains available in each command's row.
+        const auto entries = turn->entries;
+        for (const auto &entry : entries)
+            if (entry.kind == AiConversationEntry::Activity && entry.activity.callId == id)
+                m_display->updateActivity(entry.id, entry.state,
+                    QString::fromUtf8(QJsonDocument(results).toJson(QJsonDocument::Indented)), entry.activity.durationMs);
     }
     // Text-only compatibility tools still feed factual results back as text.
     for (const auto &command : m_batchCommands) {

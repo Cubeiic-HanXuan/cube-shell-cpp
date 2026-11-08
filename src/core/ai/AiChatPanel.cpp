@@ -116,7 +116,7 @@ AiChatPanel::AiChatPanel(QWidget *parent) : QWidget(parent)
     toolbar->addStretch(1);
     toolbar->addWidget(m_modeCombo);
 #ifdef CUBESHELL_WITH_VOICE
-    m_micBtn = sessionui::iconButton(sessionui::Glyph::Microphone, tr("开始或停止语音输入"), colors, inputFrame);
+    m_micBtn = sessionui::iconButton(sessionui::Glyph::Microphone, tr("开始或停止语音输入；配置入口：设置 → AI 设置 → 语音识别"), colors, inputFrame);
     m_micBtn->setObjectName(QStringLiteral("aiMic")); m_micBtn->setCheckable(true);
     toolbar->addWidget(m_micBtn);
     m_voiceInput = new VoiceInput(this);
@@ -139,7 +139,11 @@ AiChatPanel::AiChatPanel(QWidget *parent) : QWidget(parent)
     connect(m_voiceInput, &VoiceInput::textRecognized, this, [this, insertVoice](const QString &text) {
         insertVoice(text); m_inputEdit->setFocus();
     });
-    connect(m_voiceInput, &VoiceInput::errorOccurred, this, &AiChatPanel::appendAiMessage);
+    connect(m_voiceInput, &VoiceInput::errorOccurred, this, [this](const QString &message) {
+        // Preflight can fail while still Idle, before any stateChanged signal.
+        m_micBtn->setChecked(false);
+        appendAiMessage(message);
+    });
 #endif
     m_sendBtn = new QPushButton(inputFrame); m_sendBtn->setObjectName(QStringLiteral("aiSend"));
     m_sendBtn->setToolTip(tr("发送 (Enter)")); m_sendBtn->setAccessibleName(tr("发送"));

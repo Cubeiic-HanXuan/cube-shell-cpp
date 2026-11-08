@@ -27,14 +27,6 @@ namespace cubeshell {
 
 namespace {
 
-// 默认智谱 GLM-ASR 转写接口（OpenAI 兼容路径）。
-// 对应Python: zai SDK client.audio.transcriptions.create
-const char kDefaultTranscriptionUrl[] =
-    "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions";
-
-// 对应Python: _SpeechRecognitionThread 里 model="glm-asr-2512"
-const char kAsrModel[] = "glm-asr-2512";
-
 // PCM 段小于该字节数视为无有效语音，跳过识别。
 // 对应Python: os.path.getsize(...) < 512 则跳过
 constexpr int kMinChunkBytes = 512;
@@ -106,7 +98,7 @@ QString VoiceInput::mapHttpError(int status, const QString &body,
     const QString lower = body.toLower();
     if (status == 401 || lower.contains(QStringLiteral("api_key"))
         || lower.contains(QStringLiteral("unauthorized")))
-        return QStringLiteral("API Key 无效或已过期，请更新配置");
+        return tr("语音 API Key 无效或已过期，请在「设置 → AI 设置 → 语音识别」中更新，并确认密钥属于所配置的语音服务");
     if (lower.contains(QStringLiteral("timeout")))
         return QStringLiteral("网络请求超时，请检查网络连接");
     if (status == 413 || lower.contains(QStringLiteral("too large")))
@@ -120,7 +112,6 @@ QString VoiceInput::mapHttpError(int status, const QString &body,
 
 VoiceInput::VoiceInput(QObject *parent)
     : QObject(parent)
-    , m_transcriptionUrl(QString::fromLatin1(kDefaultTranscriptionUrl))
     , m_network(new QNetworkAccessManager(this))
 {
     // 分段定时器。对应Python: self._chunk_timer
@@ -261,6 +252,23 @@ void VoiceInput::startRecording()
 {
     if (m_state != State::Idle)
         return;
+
+    auto prefs = AiPreferences::load();
+    if (!m_transcriptionUrlOverride.isEmpty())
+        prefs.voiceTranscriptionUrl = m_transcriptionUrlOverride;
+    const QString configError = prefs.voiceConfigurationError();
+    if (!configError.isEmpty()) {
+        emit errorOccurred(configError);
+        return;
+    }
+    m_apiKey = (m_apiKeyOverride.isEmpty() ? prefs.voiceApiKey() : m_apiKeyOverride).trimmed();
+    if (m_apiKey.isEmpty()) {
+        emit errorOccurred(tr("未配置语音 API Key，请在「设置 → AI 设置 → 语音识别」中配置；聊天模型的 API Key 不用于语音识别"));
+        return;
+    }
+    m_transcriptionUrl = prefs.voiceTranscriptionUrl.trimmed();
+    m_asrModel = prefs.voiceModel.trimmed();
+
     const quint64 generation = ++m_generation;
     setState(State::RequestingPermission);
     const QPointer<VoiceInput> guard(this);
@@ -353,20 +361,12 @@ void VoiceInput::flushChunk()
 // 对应Python: _start_chunk_recognition + _SpeechRecognitionThread.run
 void VoiceInput::recognizeChunk(const QByteArray &pcm)
 {
-    QString apiKey = m_apiKeyOverride;
-    if (apiKey.isEmpty())
-        apiKey = AiPreferences::load().apiKey();
-    if (apiKey.isEmpty()) {
-        failRecording(QStringLiteral("未配置 API Key，请在「设置 -> AI 设置」中配置"));
-        return;
-    }
-
     auto *multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
 
     QHttpPart modelPart;
     modelPart.setHeader(QNetworkRequest::ContentDispositionHeader,
                         QStringLiteral("form-data; name=\"model\""));
-    modelPart.setBody(QByteArray(kAsrModel));
+    modelPart.setBody(m_asrModel.toUtf8());
     multiPart->append(modelPart);
 
     QHttpPart filePart;
@@ -380,7 +380,7 @@ void VoiceInput::recognizeChunk(const QByteArray &pcm)
 
     QNetworkRequest request{QUrl(m_transcriptionUrl)};
     request.setRawHeader("Authorization",
-                         QByteArrayLiteral("Bearer ") + apiKey.toUtf8());
+                         QByteArrayLiteral("Bearer ") + m_apiKey.toUtf8());
     request.setTransferTimeout(30000);
     // Qt 6.9 can crash in QHttp2Stream::uploadDeviceDestroyed while retiring
     // a multipart upload. ASR does not need HTTP/2 multiplexing.

@@ -16,6 +16,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QUrl>
 
 namespace cubeshell {
 
@@ -147,6 +148,8 @@ AiPreferences AiPreferences::load()
     prefs.maxTokens = data.value(QStringLiteral("max_tokens")).toInt(8192);
     prefs.temperature = data.value(QStringLiteral("temperature")).toDouble(1.0);
     prefs.systemPrompt = strOr("system_prompt", prefs.systemPrompt);
+    prefs.voiceTranscriptionUrl = strOr("voice_transcription_url", prefs.voiceTranscriptionUrl);
+    prefs.voiceModel = strOr("voice_model", prefs.voiceModel);
     return prefs;
 }
 
@@ -162,6 +165,8 @@ bool AiPreferences::save(QString *errorOut) const
     data.insert(QStringLiteral("max_tokens"), maxTokens);
     data.insert(QStringLiteral("temperature"), temperature);
     data.insert(QStringLiteral("system_prompt"), systemPrompt);
+    data.insert(QStringLiteral("voice_transcription_url"), voiceTranscriptionUrl);
+    data.insert(QStringLiteral("voice_model"), voiceModel);
 
     QSaveFile file(prefsFilePath());
     if (!file.open(QIODevice::WriteOnly)) {
@@ -243,6 +248,39 @@ QString AiPreferences::apiKey() const
 bool AiPreferences::setApiKey(const QString &key) const
 {
     return Secrets::setAiApiKey(key, provider);
+}
+
+QString AiPreferences::voiceConfigurationError() const
+{
+    const QUrl url(voiceTranscriptionUrl.trimmed(), QUrl::StrictMode);
+    if (!url.isValid() || url.host().isEmpty()
+        || (url.scheme() != QLatin1String("https") && url.scheme() != QLatin1String("http"))
+        || !url.userInfo().isEmpty() || url.hasFragment()) {
+        return QCoreApplication::translate("AiPreferences",
+            "语音识别接口地址无效，请在「设置 → AI 设置 → 语音识别」中填写完整的 HTTP(S) 转写接口地址");
+    }
+    if (voiceModel.trimmed().isEmpty()) {
+        return QCoreApplication::translate("AiPreferences",
+            "未配置语音模型，请在「设置 → AI 设置 → 语音识别」中填写模型名称");
+    }
+    return {};
+}
+
+QString AiPreferences::voiceApiKey() const
+{
+    const QString envKey = qEnvironmentVariable("CUBESHELL_VOICE_API_KEY").trimmed();
+    if (!envKey.isEmpty())
+        return envKey;
+    // Do not use Secrets::aiApiKey(): its generic AI_API_KEY fallback may belong
+    // to a completely different service from the configured transcription URL.
+    return Secrets::retrieveSecret(QLatin1String(vars::APP_NAME),
+                                   QStringLiteral("voice_api_key"));
+}
+
+bool AiPreferences::setVoiceApiKey(const QString &key) const
+{
+    return Secrets::storeSecret(QLatin1String(vars::APP_NAME),
+                               QStringLiteral("voice_api_key"), key);
 }
 
 } // namespace cubeshell

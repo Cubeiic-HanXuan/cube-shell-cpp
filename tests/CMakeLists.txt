@@ -778,10 +778,23 @@ target_include_directories(ai_composer_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/src/c
 target_link_libraries(ai_composer_ui_test PRIVATE Qt6::Widgets cube_core)
 add_test(NAME ai_composer_ui_test COMMAND ai_composer_ui_test)
 set_tests_properties(ai_composer_ui_test PROPERTIES TIMEOUT 60)
+# Compile the real ASR settings/UI with test-only config/keychain seams, avoiding
+# both the user's files and their OS keychain (including on headless CI).
+qt_add_executable(ai_settings_ui_test ai_settings_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/ai/AiPreferences.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/dialogs/AiSettingsDialog.cpp)
+target_include_directories(ai_settings_ui_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/ui)
+target_link_libraries(ai_settings_ui_test PRIVATE Qt6::Widgets)
+add_test(NAME ai_settings_ui_test COMMAND ai_settings_ui_test)
+set_tests_properties(ai_settings_ui_test PROPERTIES TIMEOUT 60)
 if(CUBESHELL_WITH_VOICE)
-    qt_add_executable(voice_input_test voice_input_test.cpp)
+    target_compile_definitions(ai_settings_ui_test PRIVATE CUBESHELL_WITH_VOICE)
+    qt_add_executable(voice_input_test voice_input_test.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/ai/AiPreferences.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/ai/VoiceInput.cpp)
     target_include_directories(voice_input_test PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
-    target_link_libraries(voice_input_test PRIVATE Qt6::Network cube_core)
+    target_link_libraries(voice_input_test PRIVATE Qt6::Network Qt6::Multimedia)
     add_test(NAME voice_input_test COMMAND voice_input_test)
     set_tests_properties(voice_input_test PROPERTIES TIMEOUT 60)
 endif()

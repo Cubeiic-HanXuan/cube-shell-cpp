@@ -42,7 +42,18 @@ public:
     QString systemPrompt = QStringLiteral(
         "你是一个资深 Linux 运维与终端助手。输出尽量可执行、可复制。");
 
-    // --- persistence (ai.json, key 名与 Python 完全一致) ---
+    // Voice recognition is independent of the chat provider and its credentials.
+    QString voiceTranscriptionUrl = QStringLiteral(
+        "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions");
+    QString voiceModel = QStringLiteral("glm-asr-2512");
+
+    // Empty on success; shared by the settings form and recording preflight.
+    QString voiceConfigurationError() const;
+    // Dedicated keychain account; never falls back to the chat key / AI_API_KEY.
+    QString voiceApiKey() const;
+    bool setVoiceApiKey(const QString &key) const;
+
+    // --- persistence (ai.json, 聊天 key 名与 Python 完全一致) ---
 
     // 对应Python: prefs.py::load_ai_prefs（失败/缺文件返回默认值）
     static AiPreferences load();

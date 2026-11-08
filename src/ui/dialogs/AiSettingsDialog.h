@@ -39,6 +39,9 @@ private:
     QCheckBox *m_streamCheck = nullptr;
     QLineEdit *m_systemPromptEdit = nullptr;
     QLineEdit *m_keyEdit = nullptr;
+    QLineEdit *m_voiceUrlEdit = nullptr;
+    QLineEdit *m_voiceModelEdit = nullptr;
+    QLineEdit *m_voiceKeyEdit = nullptr;
 };
 
 } // namespace cubeshell

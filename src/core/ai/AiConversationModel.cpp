@@ -2,6 +2,18 @@
 
 namespace cubeshell {
 
+QString aiActivityLabel(AiActivityKind kind)
+{
+    switch (kind) {
+    case AiActivityKind::Tool: return QStringLiteral("工具");
+    case AiActivityKind::SubAgent: return QStringLiteral("Agent");
+    case AiActivityKind::AgentMessage: return QStringLiteral("通信");
+    case AiActivityKind::Mcp: return QStringLiteral("MCP");
+    case AiActivityKind::Skill: return QStringLiteral("Skill");
+    }
+    return {};
+}
+
 QString aiPhaseLabel(AiPhase phase)
 {
     switch (phase) {
@@ -125,6 +137,9 @@ quint64 AiConversationModel::addCommand(AiCommand command)
     item.kind = AiConversationEntry::Command;
     command.stepId = item.id;
     item.command = command;
+    for (const auto &parent : m_turns.last().entries)
+        if (parent.kind == AiConversationEntry::Activity && !command.toolCallId.isEmpty()
+            && parent.activity.callId == command.toolCallId) { item.parentEntryId = parent.id; break; }
     m_turns.last().entries.append(item);
     emit changed(m_turns.last().id);
     return item.id;
@@ -138,6 +153,7 @@ void AiConversationModel::setCommandState(quint64 id, AiStepState state, const Q
     e->state = state;
     e->text = reason;
     ++e->revision;
+    updateCommandActivity(*turn, e->parentEntryId);
     emit changed(turn->id);
 }
 
@@ -152,6 +168,7 @@ void AiConversationModel::setCommandResult(const AiCommandResult &result)
         : result.exitCode == 0 ? AiStepState::Succeeded
         : result.allowFailure ? AiStepState::AllowedFailure : AiStepState::Failed;
     ++e->revision;
+    updateCommandActivity(*turn, e->parentEntryId);
     emit changed(turn->id);
 }
 
@@ -182,10 +199,74 @@ void AiConversationModel::addNotice(const QString &text)
     emit changed(m_turns.last().id);
 }
 
+quint64 AiConversationModel::beginActivity(const AiActivity &activity, AiStepState state)
+{
+    if (!isBusy()) return 0;
+    AiConversationEntry item;
+    for (const auto &parent : m_turns.last().entries) {
+        if (parent.kind != AiConversationEntry::Activity) continue;
+        if (!activity.callId.isEmpty() && parent.activity.callId == activity.callId) return parent.id;
+        if (!activity.parentCallId.isEmpty() && parent.activity.callId == activity.parentCallId) item.parentEntryId = parent.id;
+    }
+    item.id = m_nextId++;
+    item.kind = AiConversationEntry::Activity;
+    item.activity = activity;
+    item.state = state;
+    m_turns.last().entries.append(item);
+    emit changed(m_turns.last().id);
+    return item.id;
+}
+
+void AiConversationModel::updateActivity(quint64 id, AiStepState state, const QString &output, qint64 durationMs)
+{
+    AiConversationTurn *turn = nullptr;
+    auto *e = entry(id, &turn);
+    // Late events cannot resurrect a completed/cancelled turn.
+    if (!e || e->kind != AiConversationEntry::Activity || turn->phase == AiPhase::Finished) return;
+    e->state = state;
+    e->activity.output = output;
+    e->activity.durationMs = durationMs;
+    ++e->revision;
+    emit changed(turn->id);
+}
+
+void AiConversationModel::updateCommandActivity(AiConversationTurn &turn, quint64 parentId)
+{
+    if (!parentId || turn.phase == AiPhase::Finished) return;
+    auto *parent = entry(parentId);
+    if (!parent || parent->kind != AiConversationEntry::Activity) return;
+    bool running = false, pending = false, failed = false, unknown = false, allowed = false, cancelled = false, skipped = false;
+    qint64 duration = 0;
+    for (const auto &child : turn.entries) {
+        if (child.parentEntryId != parentId || child.kind != AiConversationEntry::Command) continue;
+        running |= child.state == AiStepState::Running;
+        pending |= child.state == AiStepState::Pending;
+        failed |= child.state == AiStepState::Failed;
+        unknown |= child.state == AiStepState::Unknown;
+        allowed |= child.state == AiStepState::AllowedFailure;
+        cancelled |= child.state == AiStepState::Cancelled;
+        skipped |= child.state == AiStepState::Skipped;
+        duration += child.result.durationMs;
+    }
+    parent->state = running ? AiStepState::Running : unknown ? AiStepState::Unknown
+        : failed ? AiStepState::Failed : pending ? AiStepState::Pending
+        : cancelled ? AiStepState::Cancelled : skipped ? AiStepState::Skipped
+        : allowed ? AiStepState::AllowedFailure : AiStepState::Succeeded;
+    parent->activity.durationMs = duration;
+    ++parent->revision;
+}
+
 void AiConversationModel::finishTurn(AiTurnOutcome outcome, const QString &text, bool localReport)
 {
     if (!isBusy()) return;
     auto &turn = m_turns.last();
+    for (auto &item : turn.entries) {
+        if (item.kind != AiConversationEntry::Activity) continue;
+        if (item.state == AiStepState::Running || item.state == AiStepState::Pending) {
+            item.state = outcome == AiTurnOutcome::Cancelled ? AiStepState::Cancelled : AiStepState::Unknown;
+            ++item.revision;
+        }
+    }
     turn.phase = AiPhase::Finished;
     turn.outcome = outcome;
     turn.finalText = text;

@@ -1,5 +1,5 @@
-// Native command review: purpose, exact shell source and safety evidence have
-// separate visual layers. Batch and single-step approval share the same card.
+// CommandConfirmDialog.cpp — 原生命令审批界面，批量与逐条审批复用同一命令卡片。
+// 用途说明、原始 Shell 文本和安全依据分层展示；复制/批准保留原命令，不使用展示摘要。
 #include "CommandConfirmDialog.h"
 #include "widgets/ConversationWidgets.h"
 
@@ -43,7 +43,7 @@ QLabel *label(const QString &text, const QColor &color, QWidget *parent,
     value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     value->setStyleSheet(QStringLiteral("background:transparent; color:%1; border:none;").arg(css(color)));
     QFont font = parent->font();
-    // Scale the inherited UI font, rather than fixing a platform-specific point size.
+    // 按继承的界面字体缩放，不固定平台相关的磅值，确保高密度屏幕文字尺寸一致。
     font.setPixelSize(qMax(10, qRound(QFontInfo(font).pixelSize() * scale)));
     font.setWeight(bold ? QFont::DemiBold : QFont::Normal);
     value->setFont(font);
@@ -94,14 +94,14 @@ void configureDialog(QDialog *dialog, const QSize &preferred)
     dialog->setModal(true);
     QFont base = dialog->font();
 #ifdef CUBESHELL_PLATFORM_OHOS
-    // OHOS point-size conversion misses screen density; keep UI text in pixels.
+    // OHOS 的磅值换算缺少屏幕密度缩放，使用像素字号并显式考虑 devicePixelRatio。
     base.setPixelSize(qMax(QFontInfo(base).pixelSize(), qRound(18 * dialog->devicePixelRatioF())));
 #else
     base.setPixelSize(qMax(14, QFontInfo(base).pixelSize()));
 #endif
     dialog->setFont(base);
     dialog->setMinimumSize(580, 420);
-    // Fit the active display, including laptops with a smaller work area.
+    // 按当前屏幕可用区域限制尺寸，避免小屏笔记本上对话框按钮被挤到工作区之外。
     const auto available = dialog->screen()->availableGeometry().size() - QSize(48, 80);
     dialog->setMinimumSize(dialog->minimumSize().boundedTo(available));
     dialog->resize(preferred.boundedTo(available));
@@ -129,7 +129,7 @@ QPushButton *actionButton(const QString &text, QWidget *parent, bool primary = f
     auto *button = new QPushButton(text, parent);
     button->setProperty("primary", primary);
     button->setCursor(Qt::PointingHandCursor);
-    button->setAutoDefault(false); // Enter in a preview must never approve a batch.
+    button->setAutoDefault(false); // 预览区按 Enter 不得因默认按钮机制意外批准批次
     button->setMinimumHeight(36);
     return button;
 }
@@ -142,8 +142,7 @@ QFrame *separator(const Colors &c, QWidget *parent)
     return line;
 }
 
-// Return the complete command unchanged. Highlighting and soft wrapping are
-// presentation only; neither rendered labels nor descriptions enter the clipboard.
+// 复制完整原命令，不含用途说明、风险标签等装饰文本；高亮和软换行只影响显示。
 QToolButton *copyButton(const QString &source, const Colors &c, QWidget *parent)
 {
     auto *copy = iconButton(Glyph::Copy, QStringLiteral("复制原始命令"), c, parent);
@@ -222,12 +221,10 @@ public:
         code->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
         code->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         code->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        // QPlainTextDocumentLayout reports height in visual lines. Grow with
-        // soft wraps, cap large scripts, then let the code view scroll internally.
+        // QPlainTextDocumentLayout 的高度以显示行数计；随软换行增高，超过八行后内部滚动。
         const auto fitCode = [code] {
             const qreal lines = code->document()->documentLayout()->documentSize().height();
-            // Keep the code view's document/viewport padding so a single line
-            // stays fully visible instead of gaining a needless inner scrollbar.
+            // 保留文档/视口内边距，避免仅一行内容也因高度不足出现多余滚动条。
             const int height = qCeil(qBound<qreal>(1, lines, 8) * code->fontMetrics().lineSpacing()) + 20;
             if (code->height() != height) code->setFixedHeight(height);
         };
@@ -237,8 +234,7 @@ public:
         codeLayout->addWidget(code);
         layout->addWidget(codePanel);
 
-        // No separate boilerplate row: evidence is available from the compact
-        // header action, and remains expanded by default for high/critical risk.
+        // 不另占一行重复风险提示，通过标题栏的“依据”展开详情；高风险/禁止项默认展开。
 
         m_details = new QWidget(this);
         m_details->setFont(font());
@@ -272,7 +268,7 @@ public:
         QObject::connect(m_toggle, &QToolButton::toggled, this, updateDetails);
         const bool expanded = command.safety.riskLevel >= RiskLevel::High;
         m_toggle->setChecked(expanded);
-        updateDetails(expanded); // setChecked(false) does not emit toggled.
+        updateDetails(expanded); // 初始即为 false 时 setChecked 不发信号，仍需主动同步可见性
     }
 
     void setDetailsExpanded(bool expanded) { m_toggle->setChecked(expanded); }
@@ -283,6 +279,8 @@ private:
     QWidget *m_details = nullptr;
 };
 
+// reviewOnly 仅减少需要构建的卡片，不修改原批次；审批后隐藏的查询仍按原顺序执行。
+// 筛选共用 requiresConfirmation，禁止项不能被当成“不需确认”而从审核界面消失。
 QScrollArea *commandArea(const QList<AiCommand> &commands, const Colors &c, QWidget *parent,
                          int firstIndex = 1, bool reviewOnly = false)
 {
@@ -358,6 +356,7 @@ QWidget *confirmationBox(QLineEdit **input, const Colors &c, QWidget *parent)
 CommandConfirmDialog::CommandConfirmDialog(const QList<AiCommand> &commands, QWidget *parent)
     : QDialog(parent), m_commands(commands)
 {
+    // 以原始命令重新评估，不能因为调用方附带了较低的安全等级就省略审批。
     const CommandSafetyChecker checker;
     for (auto &command : m_commands) command.safety = checker.check(command.cmd);
     m_maxRisk = computeMaxRisk();
@@ -404,6 +403,7 @@ void CommandConfirmDialog::setupUi()
     const auto syncDisclosure = [cards, expand, c] {
         bool allExpanded = !cards.isEmpty();
         for (auto *card : cards) allExpanded &= card->detailsExpanded();
+        // 汇总子卡片状态时不反向触发“展开全部”，避免一个卡片的变动改写其余卡片。
         const QSignalBlocker guard(expand);
         expand->setChecked(allExpanded);
         expand->setEnabled(!cards.isEmpty());
@@ -481,6 +481,7 @@ void CommandConfirmDialog::showHighRiskConfirm()
     m_btnExecute->setEnabled(false);
 }
 
+// 除校验输入内容外还检查当前风险和确认框可见性，隐藏确认框时的旧信号不能批准执行。
 void CommandConfirmDialog::onConfirmInput()
 {
     if (m_maxRisk != RiskLevel::High || m_confirmWidget->isHidden()) return;

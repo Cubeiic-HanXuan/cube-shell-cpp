@@ -1,3 +1,6 @@
+// MarkdownView.cpp — Markdown 解析结果的原生排版、代码复制与流式更新优化。
+// 语法由 Qt 解析；本层只补充视觉格式和交互，不使用正则重写 Markdown 的整体语义。
+
 #include "MarkdownView.h"
 #include "widgets/CodeHighlighter.h"
 #include "widgets/ConversationWidgets.h"
@@ -24,9 +27,8 @@ namespace cubeshell {
 using namespace sessionui;
 namespace {
 struct SourceFence { QString language; QStringList lines; };
-// Qt retains code language, but not the boundary between adjacent fences of
-// the same language. Recover those boundaries from source, then validate each
-// candidate against Qt's parsed blocks. Qt still owns all Markdown semantics.
+// Qt 保留代码语言，却可能丢失相邻同语言围栏之间的边界；从原文提取候选边界，
+// 再逐行与 Qt 已解析的代码块核对。这里只补边界，不取代 Qt 对 Markdown 的语义判定。
 QList<SourceFence> sourceFences(const QString &text)
 {
     static const QRegularExpression opening(QStringLiteral("^( {0,3})(`{3,}|~{3,})(.*)$"));
@@ -82,8 +84,7 @@ MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent)
         positionActions();
     });
     connect(this, &QTextBrowser::selectionChanged, this, [this] {
-        // Do not destroy the user's selection on every streaming delta. The
-        // latest frame is applied once they finish selecting/copying.
+        // 用户有选区时不因流式增量重建文档；选择/复制结束后只应用最新积压帧。
         if (!m_rendering && m_hasPending && !textCursor().hasSelection())
             QTimer::singleShot(0, this, [this] {
                 if (m_hasPending && !textCursor().hasSelection()) {
@@ -103,11 +104,12 @@ void MarkdownView::setMarkdownText(const QString &text, bool streaming)
         return;
     }
     m_hasPending = false;
+    // 即使最后一帧正文不变，流式转结束也要完整解析，补全结构与最终样式。
     const bool finalize = m_streaming && !streaming;
     m_streaming = streaming;
     if (!finalize && text == m_rendered && !document()->isEmpty()) return;
     if (streaming && appendPlainTail(text)) return;
-    render(text); // structural edits and final replies retain full Markdown semantics
+    render(text); // 结构变化与最终回复保留完整 Markdown 解析语义
 }
 
 bool MarkdownView::appendPlainTail(const QString &text)
@@ -115,8 +117,8 @@ bool MarkdownView::appendPlainTail(const QString &text)
     if (m_rendered.isEmpty() || !text.startsWith(m_rendered) || text.size() == m_rendered.size()) return false;
     const QString suffix = text.mid(m_rendered.size());
     const QString paragraph = m_rendered.mid(m_rendered.lastIndexOf(QLatin1Char('\n')) + 1);
-    // Only an existing literal root paragraph is appendable. Markup, tables,
-    // lists, code fences, escapes and newlines go through the real parser.
+    // 只有已存在的普通根段落允许直接追加；标记、表格、列表、围栏、转义和换行都重新解析。
+    // 保守排除可能影响结构的字符，宁可完整解析，也不能让增量路径改变渲染结果。
     static const QRegularExpression syntax(QStringLiteral("[\\n\\r`*_\\[\\]<>!#|\\\\~&:=.(){}+-]"));
     if (paragraph.isEmpty() || syntax.match(paragraph).hasMatch() || syntax.match(suffix).hasMatch()) return false;
     const auto block = document()->lastBlock();
@@ -131,6 +133,8 @@ bool MarkdownView::appendPlainTail(const QString &text)
     return true;
 }
 
+// 批量重建文档期间暂停可用的布局计算，并屏蔽中间回调；所有格式完成后再统一布局。
+// 先删除锚定旧文档的按钮与高亮器，避免新旧块状态交叉影响。
 void MarkdownView::render(const QString &text)
 {
     m_rendering = true;
@@ -142,7 +146,7 @@ void MarkdownView::render(const QString &text)
     m_rendered = text;
     for (const auto &action : m_actions) delete action.button;
     m_actions.clear(); m_quotes.clear();
-    // Highlighter owns block state and must not see intermediate frame edits.
+    // 高亮器持有块状态，不能观察到插帧、插标题过程中的临时文档结构。
     const auto highlighters = document()->findChildren<QSyntaxHighlighter *>();
     qDeleteAll(highlighters);
     const auto c = colors(palette());
@@ -165,6 +169,7 @@ void MarkdownView::render(const QString &text)
         }
         inQuote = quoted;
     }
+    // 引用块从后往前插帧，避免较早位置的插入使尚未处理的文档位置失效。
     for (auto it = quotes.crbegin(); it != quotes.crend(); ++it) {
         QTextCursor cursor(document()); cursor.setPosition(it->first); cursor.setPosition(it->second, QTextCursor::KeepAnchor);
         QTextFrameFormat ff; ff.setBackground(c.accentSoft); ff.setPadding(12);
@@ -206,7 +211,7 @@ void MarkdownView::render(const QString &text)
                 ranges.last().text += QLatin1Char('\n') + block.text();
             }
             if (remainingLines > 0) --remainingLines;
-            bf.setNonBreakableLines(false); // long commands wrap, never widen the conversation
+            bf.setNonBreakableLines(false); // 长命令在代码区折行，不撑宽整个对话面板
             bf.setTopMargin(0); bf.setBottomMargin(0);
             bf.setLineHeight(135, QTextBlockFormat::ProportionalHeight);
             cursor.setBlockFormat(bf);
@@ -252,7 +257,7 @@ void MarkdownView::render(const QString &text)
         }
         inCode = code;
     }
-    // Give GitHub tables a real grid, padded cells and a restrained header tint.
+    // 递归为 GitHub 风格表格设置网格、单元格内边距和表头底色，兼容嵌套文本帧。
     const auto styleTables = [&](auto &&self, QTextFrame *frame) -> void {
         for (auto *child : frame->childFrames()) {
             if (auto *table = qobject_cast<QTextTable *>(child)) {
@@ -270,7 +275,7 @@ void MarkdownView::render(const QString &text)
         }
     };
     styleTables(styleTables, document()->rootFrame());
-    // Work backwards so inserting a frame/header cannot invalidate later ranges.
+    // 代码区同样逆序插入边框帧与语言标题，避免插入操作破坏后续区间的位置。
     for (auto it = ranges.crbegin(); it != ranges.crend(); ++it) {
         QTextCursor cursor(document()); cursor.setPosition(it->start); cursor.setPosition(it->end, QTextCursor::KeepAnchor);
         QTextFrameFormat ff; ff.setBackground(c.code); ff.setBorder(1); ff.setBorderBrush(c.border);
@@ -302,8 +307,7 @@ void MarkdownView::render(const QString &text)
         });
         m_actions.append({anchor, copy}); copy->show();
     }
-    // insertFrame creates empty root boundary paragraphs. Keep them as small
-    // separators, not full blank text lines on both sides of every code/note.
+    // insertFrame 会在根层产生空的边界段落，将其压为小间隔，避免代码/引用两侧多出空行。
     for (auto block = document()->begin(); block.isValid(); block = block.next()) {
         QTextCursor cursor(block);
         if (!block.text().isEmpty() || block.textList() || cursor.currentFrame() != document()->rootFrame()) continue;
@@ -312,7 +316,7 @@ void MarkdownView::render(const QString &text)
     }
     formatting.endEditBlock();
     new CodeHighlighter(document(), c, {}, true);
-    // Apply synchronously as well: the first paint must already be highlighted.
+    // 在恢复布局前同步高亮，首帧即显示最终颜色，避免稍后异步高亮导致闪动。
     for (auto *highlighter : document()->findChildren<QSyntaxHighlighter *>()) highlighter->rehighlight();
 #if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
     document()->setLayoutEnabled(layoutEnabled);
@@ -324,9 +328,8 @@ void MarkdownView::render(const QString &text)
 QSize MarkdownView::sizeHint() const { return {300, heightForWidth(300)}; }
 int MarkdownView::heightForWidth(int width) const
 {
-    // Layout probes sizeHint() at 300px even when the visible widget is wider.
-    // Never leave that probe width on the live document: it would wrap into
-    // extra, clipped lines after the parent has already assigned its height.
+    // 父布局可能先用 sizeHint 的 300 像素试算，再分配更宽的实际空间。
+    // 测量后必须恢复原宽度，否则文档仍按试算宽度多折行，而控件高度已经固定，会裁掉正文。
     const int measuredWidth = qMax(40, width - 2);
     const auto cached = m_heightCache.constFind(measuredWidth);
     if (cached != m_heightCache.cend()) return cached.value();

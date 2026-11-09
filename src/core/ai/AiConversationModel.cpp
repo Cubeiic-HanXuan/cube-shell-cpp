@@ -1,3 +1,6 @@
+// AiConversationModel.cpp — 时间线记录更新、命令活动汇总与本地事实摘要。
+// 条目内容变化递增 revision，轮次变化发送 changed；视图自行决定何时渲染。
+
 #include "AiConversationModel.h"
 
 namespace cubeshell {
@@ -63,6 +66,8 @@ bool AiConversationModel::isBusy() const
     return currentTurn() && currentTurn()->phase != AiPhase::Finished;
 }
 
+// 轮次与条目共用单调递增 ID，执行结果即使迟到也不会误命中新条目。
+// 时钟从用户提交开始计时，包含模型等待、审批、执行及总结的完整耗时。
 quint64 AiConversationModel::beginTurn(const QString &input, const QString &model)
 {
     if (isBusy()) return 0;
@@ -86,6 +91,8 @@ quint64 AiConversationModel::beginMessage()
     return item.id;
 }
 
+// 回调通常更新最新轮次，从后向前查找；返回的指针仅供当前同步操作使用，
+// 不应跨越向 QList 追加条目的操作保存，以免容器重分配后失效。
 AiConversationEntry *AiConversationModel::entry(quint64 id, AiConversationTurn **turn)
 {
     for (auto t = m_turns.rbegin(); t != m_turns.rend(); ++t) {
@@ -106,6 +113,7 @@ void AiConversationModel::appendDelta(quint64 id, const QString &text, const QSt
     if (!e || turn->phase == AiPhase::Finished) return;
     e->text += text;
     e->reasoning += reasoning;
+    // 只有普通等待阶段在收到正文时切为回复中；验证/诊断/总结阶段保留其业务含义。
     if (turn->phase == AiPhase::Waiting && !text.isEmpty()) turn->phase = AiPhase::Responding;
     ++e->revision;
     emit changed(turn->id);
@@ -129,6 +137,8 @@ void AiConversationModel::setPhase(AiPhase phase)
     emit changed(m_turns.last().id);
 }
 
+// 先创建命令条目再交给执行器，待审批/跳过的命令也有稳定位置。
+// 通过 toolCallId 挂到已记录的工具活动下；旧式文本命令没有调用 ID，保持为顶层条目。
 quint64 AiConversationModel::addCommand(AiCommand command)
 {
     if (!isBusy()) return 0;
@@ -162,6 +172,8 @@ void AiConversationModel::setCommandResult(const AiCommandResult &result)
     AiConversationTurn *turn = nullptr;
     auto *e = entry(result.stepId, &turn);
     if (!e) return;
+    // 最终捕获结果替换实时预览，不能再追加，否则输出会重复。
+    // 负退出码优先判为未知；allowFailure 只影响已知的非零退出。
     e->result = result;
     if (e->livePreviewLimited) { e->text.clear(); e->livePreviewLimited = false; }
     e->state = !result.resultKnown || result.exitCode < 0 ? AiStepState::Unknown
@@ -177,6 +189,8 @@ void AiConversationModel::appendCommandOutput(quint64 id, const QString &text)
     AiConversationTurn *turn = nullptr;
     auto *e = entry(id, &turn);
     if (!e || e->state != AiStepState::Running || e->livePreviewLimited) return;
+    // 只限制界面的实时预览，避免长输出持续复制并触发布局；单位是 QString 字符数。
+    // 命令完成后 setCommandResult 会用执行器捕获的结果整体替换此预览。
     constexpr int previewLimit = 512 * 1024;
     const int remaining = qMax(0, previewLimit - int(e->result.stdoutText.size()));
     e->result.stdoutText += text.left(remaining);
@@ -199,6 +213,8 @@ void AiConversationModel::addNotice(const QString &text)
     emit changed(m_turns.last().id);
 }
 
+// 外部生产者可能重复上报同一活动，非空 callId 在本轮内保持幂等。
+// 父活动必须先出现；这里只建立 ID 关联，不生成虚构的父节点或推断执行事件。
 quint64 AiConversationModel::beginActivity(const AiActivity &activity, AiStepState state)
 {
     if (!isBusy()) return 0;
@@ -221,7 +237,7 @@ void AiConversationModel::updateActivity(quint64 id, AiStepState state, const QS
 {
     AiConversationTurn *turn = nullptr;
     auto *e = entry(id, &turn);
-    // Late events cannot resurrect a completed/cancelled turn.
+    // 结束/取消后的迟到事件不能重新激活本轮，也不能覆盖已经落定的活动状态。
     if (!e || e->kind != AiConversationEntry::Activity || turn->phase == AiPhase::Finished) return;
     e->state = state;
     e->activity.output = output;
@@ -248,6 +264,8 @@ void AiConversationModel::updateCommandActivity(AiConversationTurn &turn, quint6
         skipped |= child.state == AiStepState::Skipped;
         duration += child.result.durationMs;
     }
+    // 父活动由子命令的真实状态汇总：运行中优先，其次是未知/失败。
+    // 有允许失败的命令时保留该提示，不能仅因批次已结束就显示为全部成功。
     parent->state = running ? AiStepState::Running : unknown ? AiStepState::Unknown
         : failed ? AiStepState::Failed : pending ? AiStepState::Pending
         : cancelled ? AiStepState::Cancelled : skipped ? AiStepState::Skipped
@@ -256,6 +274,8 @@ void AiConversationModel::updateCommandActivity(AiConversationTurn &turn, quint6
     ++parent->revision;
 }
 
+// 活动未收到明确结束事件时不能默认为成功，结束轮次后收拢为取消/未知。
+// 命令条目的真实结果另由控制器填写，晚到结果仍可补记，但不会改写本轮结论。
 void AiConversationModel::finishTurn(AiTurnOutcome outcome, const QString &text, bool localReport)
 {
     if (!isBusy()) return;
@@ -287,7 +307,7 @@ QString AiConversationModel::factualSummary(const QString &reason) const
         QString label = aiStepLabel(e.state);
         if (e.state == AiStepState::Failed || e.state == AiStepState::AllowedFailure)
             label += QStringLiteral("（exit %1）").arg(e.result.exitCode);
-        // Indented code protects arbitrary command text from Markdown formatting.
+        // 用缩进代码块保护命令中的 Markdown 符号，多行命令的每一行都要缩进。
         text += QStringLiteral("- %1%2\n\n    %3\n\n")
             .arg(label, e.command.description.isEmpty() ? QString() : QStringLiteral(" · ") + e.command.description,
                  e.command.cmd.split(QLatin1Char('\n')).join(QStringLiteral("\n    ")));

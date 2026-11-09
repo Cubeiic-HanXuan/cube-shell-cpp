@@ -1,3 +1,6 @@
+// AiChatPanel.cpp — 面板交互、模式选择及自适应输入区布局。
+// 会话记录与任务调度均在面板外，切换会话只重新绑定模型，不搬运或重建业务状态。
+
 #include "AiChatPanel.h"
 #include "AiConversationView.h"
 #include "AiPreferences.h"
@@ -26,6 +29,7 @@
 
 namespace cubeshell {
 namespace {
+// 自绘模式弹出项，为当前项保留勾选标记和完整文本宽度，避免原生样式压缩中文标签。
 class ChatModeDelegate final : public QStyledItemDelegate {
 public:
     explicit ChatModeDelegate(QComboBox *combo) : QStyledItemDelegate(combo->view()), m_combo(combo) {}
@@ -140,7 +144,7 @@ AiChatPanel::AiChatPanel(QWidget *parent) : QWidget(parent)
         insertVoice(text); m_inputEdit->setFocus();
     });
     connect(m_voiceInput, &VoiceInput::errorOccurred, this, [this](const QString &message) {
-        // Preflight can fail while still Idle, before any stateChanged signal.
+        // 权限/配置预检可能在 Idle 状态直接失败，不一定触发 stateChanged，需主动复位按钮。
         m_micBtn->setChecked(false);
         appendAiMessage(message);
     });
@@ -157,6 +161,7 @@ AiChatPanel::AiChatPanel(QWidget *parent) : QWidget(parent)
     connect(m_stopBtn, &QPushButton::clicked, this, &AiChatPanel::stopRequested);
     inputLayout->addLayout(toolbar); composerLayout->addWidget(inputFrame); layout->addWidget(composer);
 
+    // 文本变化与文档折行可能连续触发布局信号；延迟到下一轮统一测量，避免递归调整高度。
     m_composerTimer.setSingleShot(true);
     connect(&m_composerTimer, &QTimer::timeout, this, &AiChatPanel::updateComposerMetrics);
     connect(m_inputEdit, &QPlainTextEdit::textChanged, this, [this] {
@@ -173,6 +178,8 @@ AiChatPanel::AiChatPanel(QWidget *parent) : QWidget(parent)
 
 AiChatPanel::ChatMode AiChatPanel::chatMode() const { return static_cast<ChatMode>(m_modeCombo->currentData().toInt()); }
 
+// 先切断旧模型对面板的通知；各会话的数据仍由其自身持有，滚动恢复交给视图处理。
+// 新模型销毁时只复位面板忙碌态，QPointer 自动清空，避免保留悬空会话引用。
 void AiChatPanel::setConversationModel(AiConversationModel *model)
 {
     if (m_model == model) return;
@@ -192,7 +199,7 @@ void AiChatPanel::setBusy(bool busy)
     m_sendBtn->setVisible(!busy);
     m_stopBtn->setVisible(busy); m_clearBtn->setEnabled(!busy);
     updateSendButton();
-    // Input remains editable so the next question can be prepared while running.
+    // 忙碌期间仍可编辑下一条问题；实际提交由 onSend 的忙碌检查阻止。
 }
 
 void AiChatPanel::appendAiMessage(const QString &message)
@@ -224,6 +231,7 @@ void AiChatPanel::onSend()
 
 bool AiChatPanel::eventFilter(QObject *object, QEvent *event)
 {
+    // 样式表依赖动态属性，改变焦点属性后需重新 polish，边框颜色才能立即更新。
     if (object == m_inputEdit && (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut)) {
         m_inputFrame->setProperty("inputFocused", event->type() == QEvent::FocusIn);
         m_inputFrame->style()->unpolish(m_inputFrame);
@@ -315,17 +323,17 @@ void AiChatPanel::updateComposerMetrics()
 #ifdef CUBESHELL_WITH_VOICE
     m_micBtn->setFixedSize(toolSide, toolSide); m_micBtn->setIconSize(QSize(iconSide, iconSide));
 #endif
-    // Popup widgets can retain the previous application font after a theme change.
+    // 弹出列表可能保留主题切换前的字体，需与模式按钮同步更新后再读取 sizeHint。
     m_modeCombo->setFont(font());
     m_modeCombo->view()->setFont(font());
-    // Let the style account for padding and the arrow; never squeeze the mode label.
+    // 让当前样式计算内边距和下拉箭头占位，不用固定宽度挤压模式名称。
     m_modeCombo->setFixedSize(m_modeCombo->sizeHint().expandedTo(QSize(0, toolSide)));
     m_modeCombo->view()->setMinimumWidth(qMax(160, m_modeCombo->sizeHint().width()));
     const auto composerMargins = m_inputFrame->parentWidget()->layout()->contentsMargins();
     setMinimumWidth(qMax(300, m_inputFrame->minimumSizeHint().width() + composerMargins.left() + composerMargins.right()));
 
-    // Keep a compact resting height; grow for wrapped/pasted text, not because
-    // the parent layout has spare space. Long input scrolls inside this cap.
+    // 空闲输入区保持紧凑，只因折行/粘贴内容增长，不因父布局有剩余空间而撑高。
+    // 上限同时考虑七行文字与面板高度占比，超长输入在编辑器内部滚动。
     const int minimum = 2 * lineHeight + 4;
     const int maximum = qMax(minimum, qMin(7 * lineHeight + 4, int(height() * .36) - actionSide - 48));
     int preferred = qBound(minimum, m_inputFrame->width() / 5, 4 * lineHeight + 4);
@@ -333,6 +341,7 @@ void AiChatPanel::updateComposerMetrics()
         QRect(0, 0, qMax(40, m_inputEdit->viewport()->width() - 4), 10000),
         Qt::TextWordWrap, m_inputEdit->placeholderText()).height() + 4;
     preferred = qMin(maximum, qMax(preferred, placeholderHeight));
+    // QTextBlock 是逻辑段落，实际显示行数需读取 layout；超过八行后无需继续遍历长输入。
     int lines = 0;
     for (auto block = m_inputEdit->document()->begin(); block.isValid() && lines < 8; block = block.next())
         lines += qMax(1, block.layout() ? block.layout()->lineCount() : 1);

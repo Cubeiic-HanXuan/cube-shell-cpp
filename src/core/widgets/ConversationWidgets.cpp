@@ -1,4 +1,4 @@
-// SessionWidgets.cpp — 原生消息气泡、执行步骤、只读代码块及目录卡片的绘制。
+// ConversationWidgets.cpp — 对话共用的矢量图标、富文本、只读代码区与省略标签。
 // 显示文本与复制原文分离；外链只上报请求，不在富文本控件内自动加载资源。
 
 #include "widgets/ConversationWidgets.h"
@@ -170,6 +170,8 @@ public:
     }
     QSize minimumSizeHint() const override { return {0, 0}; }
     QSize sizeHint() const override { return {300, heightForWidth(300)}; }
+    // 文档宽度探测只用于算高度；恢复旧宽度，避免 sizeHint 试算改变真实控件的折行。
+    // 相同内容/字体下缓存少量宽度，减少外层布局反复测量的成本。
     int heightForWidth(int width) const override
     {
         width = qMax(40, width - 2);
@@ -241,6 +243,7 @@ public:
     {
         p.fillRect(m_gutter->rect(), m_colors.code);
         p.setFont(font()); p.setPen(m_colors.muted);
+        // 只从可见首块绘制到视口底部，长命令输出无需遍历全部文档行号。
         QTextBlock block = firstVisibleBlock();
         int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
         while (block.isValid() && top <= height()) {

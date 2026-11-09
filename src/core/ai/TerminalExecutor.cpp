@@ -222,8 +222,8 @@ void TerminalExecutor::onRawData(const QString &text)
 
     const QString clean = cleanChunkLocked(text);
     appendOutputLocked(clean);
-    // Generated IDs and exit codes are 32-bit decimal values. Retain enough
-    // overlap for a complete split marker; never rescan the accumulated log.
+    // 命令 ID 和退出码是 32 位十进制值，保留 64 字符重叠足以覆盖跨包哨兵。
+    // 仅扫描新片段及其前缀重叠区，不能每次到包都重新扫描全部历史输出。
     constexpr qsizetype markerOverlap = 64;
     const qsizetype scanFrom = qMax(m_outputStart, m_outputBuffer.size() - clean.size() - markerOverlap);
     QRegularExpressionMatchIterator it = s_sentinelRe.globalMatch(m_outputBuffer, scanFrom);
@@ -270,8 +270,7 @@ QString TerminalExecutor::extractOutput(const QString &cleanBuffer, int sentinel
 
     QStringList lines = body.split(QLatin1Char('\n'));
 
-    // A command such as printf has no trailing newline: its final fragment is
-    // real output, not a prompt to discard.
+    // printf 等命令可能不输出末尾换行，最后一个非空片段仍是真实输出，不能当作提示符丢弃。
     if (!lines.isEmpty() && lines.last().isEmpty()) lines.removeLast();
     // 首行是命令回显："<提示符> _CUBE_ID=N; <cmd>"。
     if (!lines.isEmpty() && lines.first().contains(QLatin1String("_CUBE_ID=")))
@@ -302,6 +301,8 @@ void TerminalExecutor::resetOutputLocked()
     m_outputTruncated = false;
 }
 
+// 超长输出先移动逻辑起点，累计足够的过期前缀后再一次压缩物理缓冲。
+// 这样保留末尾有效内容，同时避免每个小片段都触发大段字符串搬移。
 void TerminalExecutor::appendOutputLocked(const QString &text)
 {
     m_outputBuffer += text;
@@ -309,7 +310,7 @@ void TerminalExecutor::appendOutputLocked(const QString &text)
         m_outputStart = m_outputBuffer.size() - kMaxBufferChars;
         m_outputTruncated = true;
     }
-    // Amortize copying the retained tail while keeping physical storage bounded.
+    // 以四分之一缓冲上限为压缩阈值，摊薄拷贝成本并限制实际占用。
     if (m_outputStart >= kMaxBufferChars / 4) {
         m_outputBuffer.remove(0, m_outputStart);
         m_outputStart = 0;
@@ -318,11 +319,12 @@ void TerminalExecutor::appendOutputLocked(const QString &text)
 
 QString TerminalExecutor::capturedOutputLocked() const
 {
-    // Incomplete escapes on timeout/cancellation remain visible rather than
-    // silently losing output. Normal packet processing never rescans this tail.
+    // 超时/取消时拼回未收齐的转义尾巴，不能静默丢失输出；正常收包不反复扫描这一段。
     return stripAnsi((m_outputBuffer.mid(m_outputStart) + m_pendingAnsi).right(kMaxBufferChars));
 }
 
+// ANSI 控制序列可能被任意拆包；只保留可能未完成的支持序列，下一包接上后再清理。
+// 不认识或异常过长的序列原样放行，且不能把命令结束哨兵吞进等待缓冲。
 QString TerminalExecutor::cleanChunkLocked(const QString &text)
 {
     const QString data = m_pendingAnsi + text;
@@ -337,8 +339,7 @@ QString TerminalExecutor::cleanChunkLocked(const QString &text)
         const auto match = s_ansiRe.match(data, escape, QRegularExpression::NormalMatch,
                                         QRegularExpression::AnchorAtOffsetMatchOption);
         if (match.hasMatch()) { position = match.capturedEnd(); continue; }
-        // Keep only a possible incomplete supported sequence, not arbitrary log
-        // text. CSI, OSC/ST and charset introducers may straddle any packet.
+        // 只缓存可能未完成的 CSI、OSC/ST 或字符集引导序列，不把任意日志尾部当作控制码。
         bool incomplete = escape + 1 == data.size();
         if (!incomplete) {
             const QChar kind = data.at(escape + 1);
@@ -359,8 +360,7 @@ QString TerminalExecutor::cleanChunkLocked(const QString &text)
                 break;
             }
         }
-        // Malformed/unbounded escapes must not swallow visible output or the
-        // completion marker forever. Preserve them as the old normalizer did.
+        // 畸形或无界转义不能永久吞掉可见内容与结束标记，保持旧清理器的行为，保留原文。
         clean += data.at(escape);
         position = escape + 1;
     }

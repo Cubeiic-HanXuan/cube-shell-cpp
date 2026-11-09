@@ -1,5 +1,5 @@
-// Static, conservative shell assessment. This is not a shell interpreter or a
-// sandbox: only explicitly understood query forms qualify for auto-execution.
+// CommandSafetyChecker.cpp — 保守的 Shell 静态风险评估，不是解释器或执行沙箱。
+// 先分词识别引号/操作符，再合并各命令与展开表达式的风险；只有明确支持的查询形式可免确认。
 #include "CommandSafetyChecker.h"
 
 #include <QDir>
@@ -46,6 +46,7 @@ QString riskLevelColor(RiskLevel level)
 
 namespace {
 
+// 评估只提升风险、不降低已有结论；复合命令合并时保留所有去重依据与提权标记。
 struct Assessment {
     RiskLevel level = RiskLevel::Safe;
     QStringList warnings;
@@ -65,12 +66,13 @@ struct Assessment {
     }
 };
 
+// text 保存去除语法引号后的词，额外标记保留原始语义，避免把数据误当作控制操作。
 struct Token {
     QString text;
-    bool op = false;
-    bool dynamic = false;
+    bool op = false; // 真正的 Shell 操作符，不含引号包裹的同名文本
+    bool dynamic = false; // 含变量/通配符等，无法静态确定实际值
     bool quoted = false;
-    bool assignment = false; // the NAME= prefix itself must be unquoted/unescaped
+    bool assignment = false; // NAME= 前缀自身必须未经引用或转义，才能作为环境赋值
 };
 struct ShellTokens {
     QList<Token> tokens;
@@ -85,9 +87,8 @@ bool oneOf(const QString &value, std::initializer_list<const char *> values)
     return false;
 }
 
-// Consume $(...), ${...}, and backticks as ONE word fragment. Shell operators
-// inside them are not operators of the enclosing command. Nested executable
-// fragments are checked separately, but dynamic expansion always needs approval.
+// 将 $(...)、${...} 和反引号整体作为同一个词片段消费，内部操作符不属于外层命令。
+// 其中可执行的脚本另行递归检查；即便子脚本看似安全，动态展开本身仍需人工确认。
 bool consumeExpansion(const QString &s, qsizetype &i, ShellTokens &out, int depth)
 {
     if (depth > 16) return false;
@@ -117,8 +118,7 @@ bool consumeExpansion(const QString &s, qsizetype &i, ShellTokens &out, int dept
                 && oneOf(s.mid(i + 1, 1), {"(", "{"}))) {
             ShellTokens nested;
             if (!consumeExpansion(s, i, nested, depth + 1)) return false;
-            // Executable bodies are recursively analyzed later. Only parameter
-            // expansions need to forward their nested executable fragments here.
+            // 命令替换的完整正文稍后递归分析；参数展开自身不是脚本，需单独转交其内的命令片段。
             if (braces) out.nestedScripts.append(nested.nestedScripts);
             continue;
         }
@@ -132,6 +132,8 @@ bool consumeExpansion(const QString &s, qsizetype &i, ShellTokens &out, int dept
     return false;
 }
 
+// 有限词法扫描：保留单/双引号差异，识别重定向与列表分隔符，不做变量展开或真实执行。
+// 遇到不支持/不完整语法记录错误，由上层提升到需确认，不冒充已安全解析。
 ShellTokens tokenize(const QString &s)
 {
     ShellTokens out;
@@ -153,7 +155,7 @@ ShellTokens tokenize(const QString &s)
             if (++i >= s.size()) { out.error = QStringLiteral("不完整的转义"); break; }
             const QChar next = s.at(i);
             if (next == QLatin1Char('\n')) continue;
-            // In double quotes, backslash only escapes $, `, ", \\ and newline.
+            // 双引号内反斜杠只转义美元符、反引号、双引号、反斜杠和换行，其他位置保留它。
             if (quote == QLatin1Char('"') && !oneOf(QString(next), {"$", "`", "\"", "\\"}))
                 word.text += QLatin1Char('\\');
             word.text += next;
@@ -189,7 +191,7 @@ ShellTokens tokenize(const QString &s)
             if (i == s.size()) break;
         } else if (c == ' ' || c == '\t') { flush(); continue; }
         if (s.at(i) == QLatin1Char('\n') || QStringLiteral(";&|<>()").contains(c)) {
-            // A digit immediately before a redirection is an IO number, not an argument.
+            // 紧邻重定向的未引用数字是文件描述符，不应作为命令参数（例如 2> 中的 2）。
             if ((c == QLatin1Char('>') || c == QLatin1Char('<')) && started && !word.quoted
                 && QRegularExpression(QStringLiteral("^[0-9]+$")).match(word.text).hasMatch()) {
                 word = {}; started = false;
@@ -220,7 +222,7 @@ ShellTokens tokenize(const QString &s)
 
 QString executableName(const QString &word)
 {
-    // Do not trust an arbitrary ./ls or /tmp/cat just because its basename matches.
+    // 仅规范化已知系统目录，不能因 ./ls 或 /tmp/cat 的文件名相同就信任为系统查询命令。
     for (const char *dir : {"/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"}) {
         const QString prefix = QLatin1String(dir);
         if (word.startsWith(prefix) && !word.mid(prefix.size()).contains('/'))
@@ -242,8 +244,8 @@ bool harmlessEnvironment(const QString &word)
                        "LC_NUMERIC", "LC_COLLATE", "LC_MONETARY", "TZ", "TERM", "COLUMNS", "LINES"});
 }
 
-// Parse known global options with explicit arity. Never find a subcommand by
-// blindly skipping '-...' tokens: option values can themselves say 'status'.
+// 按显式声明的参数个数解析已知全局选项；不能简单跳过所有 '-' 开头项来寻找子命令，
+// 因为选项值本身也可能叫 status，错误跳过会把写操作误判为查询。
 QStringList afterOptions(const QStringList &args, const QSet<QString> &flags,
                          const QSet<QString> &valued, bool *ok)
 {
@@ -277,8 +279,7 @@ bool hasOption(const QStringList &args, std::initializer_list<const char *> long
     return false;
 }
 
-// GNU tools may parse options even after their script/filename operands.
-// Extra program/extension options must not hide behind a verified first script.
+// GNU 工具可能继续解析脚本/文件名之后的选项；不能只验证第一段只读脚本就放过后置的执行选项。
 bool onlyFileOperands(const QStringList &args)
 {
     for (const auto &arg : args) {
@@ -305,7 +306,7 @@ Assessment assessCommand(QStringList words, int depth)
         return result;
     };
     if (depth > 8) return uncertain(QStringLiteral("命令嵌套过深，需人工确认"));
-    // Peel only understood wrappers, preserving the highest risk they introduce.
+    // 仅剥离已理解的 sudo/env/command/timeout 包装，保留包装层已经引入的最高风险。
     while (!words.isEmpty()) {
         if (isAssignment(words.first())) {
             if (!harmlessEnvironment(words.first()))
@@ -351,8 +352,7 @@ Assessment assessCommand(QStringList words, int depth)
         return result;
     };
 
-    // Destructive rules operate on executable/argument boundaries, NOT prose or
-    // filenames containing words such as 'reboot', 'mkfs' or 'shutdown'.
+    // 破坏性规则按可执行文件名与参数边界匹配；说明文字或文件名包含 reboot/mkfs 等词不算执行。
     if (name == "mkfs" || name.startsWith("mkfs.") || name == "wipefs")
         return risk(RiskLevel::Critical, QStringLiteral("格式化或擦除文件系统"));
     if (name == "dd") {
@@ -410,8 +410,7 @@ Assessment assessCommand(QStringList words, int depth)
             return risk(RiskLevel::Medium, QStringLiteral("sed 原地编辑文件"));
         bool ok;
         auto operands = afterOptions(args, {"-n", "--quiet", "--silent", "-E", "-r"}, {}, &ok);
-        // Deliberately narrow: arbitrary sed supports e/w commands, including
-        // suffix flags on s///. Unknown programs must not be labelled read-only.
+        // 只放行有限的打印形式；sed 的 e/w 命令及替换后缀可执行程序或写文件，不能按工具名认定只读。
         static const QRegularExpression printRange(QStringLiteral("^\\s*(?:(?:[0-9]+|\\$)(?:,(?:[0-9]+|\\$))?)?[p=q]\\s*$"));
         if (ok && !operands.isEmpty() && printRange.match(operands.first()).hasMatch()
             && onlyFileOperands(operands.mid(1))) return result;
@@ -508,7 +507,7 @@ Assessment assessCommand(QStringList words, int depth)
         return risk(RiskLevel::High, QStringLiteral("NetworkManager 配置或连接操作"));
     }
     if (name == "docker") {
-        // Global options (host/context/config) are deliberately not guessed.
+        // 不猜测 host/context/config 等全局选项；无法确定执行目标时保守要求人工确认。
         if (!args.isEmpty() && oneOf(args.first(), {"ps", "images", "inspect", "logs", "stats", "top", "port", "diff", "version", "info", "history"})) return result;
         if (args.size() >= 2) {
             const QString scope = args.first(), verb = args.at(1);
@@ -546,7 +545,7 @@ Assessment assessCommand(QStringList words, int depth)
         return result;
     }
     if (name == "printf") {
-        // Bash's %n assigns a shell variable; -v captures output into a variable.
+        // Bash printf 的 %n 会修改变量，-v 会把输出写入变量，不能一概视为纯文本打印。
         bool ok;
         const auto rest = afterOptions(args, {}, {}, &ok);
         static const QRegularExpression assignsVariable(QStringLiteral("%[-+ #0]*[0-9]*(?:\\.[0-9]+)?n"));
@@ -565,6 +564,8 @@ Assessment assessCommand(QStringList words, int depth)
     return uncertain(QStringLiteral("未确认“%1”的命令及参数是只读操作，需人工确认").arg(name));
 }
 
+// 顶层组合规则：嵌套脚本、管道每段和重定向都独立贡献风险，最终只取最高等级。
+// 长度/递归上限控制静态分析成本；未知语法提升为 Medium，绝不因解析不了就自动放行。
 Assessment analyze(const QString &command, int depth)
 {
     Assessment result;
@@ -614,8 +615,7 @@ Assessment analyze(const QString &command, int depth)
             const bool fd = oneOf(token.text, {">&", "<&"});
             static const QRegularExpression descriptor(QStringLiteral("^(?:[0-9]+|-)$"));
             if (target.dynamic) result.raise(RiskLevel::Medium, QStringLiteral("重定向目标包含动态展开"));
-            // Heredocs are intentionally not parsed as shell commands: their body
-            // is data, not a list of executable statements.
+            // 不将 here-document 的正文继续当作 Shell 命令列表解析；正文是输入数据，整体交给人工确认。
             if (oneOf(token.text, {"<<", "<<<"})) {
                 flush();
                 result.raise(RiskLevel::Medium, QStringLiteral("Here-document/Here-string 需要人工确认"));
@@ -643,6 +643,8 @@ Assessment analyze(const QString &command, int depth)
 
 } // namespace
 
+// 将内部评估归一为共享契约：Critical 才是硬禁止，其余等级通过确认门槛控制执行。
+// 警告保留细节，reason 提供概述，供批量/逐条审批使用同一组依据。
 SafetyCheckResult CommandSafetyChecker::check(const QString &command) const
 {
     const Assessment assessment = analyze(command, 0);

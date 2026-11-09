@@ -1,3 +1,6 @@
+// AiConversationView.cpp — 轮次、活动和命令的原生时间线展示。
+// 性能分层：轮次分页、屏外延迟刷新、折叠详情按需创建、revision 跳过未变条目。
+
 #include "AiConversationView.h"
 #include "MarkdownView.h"
 #include "ChatHistory.h"
@@ -43,6 +46,7 @@ void copyFeedback(QToolButton *button, const QString &text)
     });
 }
 
+// 命令/工具详情中的只读输出区。保留完整输入供复制，显示高度最多十八行，内部独立滚动。
 class OutputBlock : public QWidget {
 public:
     OutputBlock(const QString &title, QWidget *parent, const QString &language = QStringLiteral("text")) : QWidget(parent)
@@ -68,6 +72,8 @@ public:
     {
         if (m_text == text) return;
         const int position = m_editor->verticalScrollBar()->value();
+        // 流式追加只插入后缀，避免反复替换全文；最终结果被清理或截断时回退整体替换。
+        // 更新前后保留内部滚动位置，不强行把正在查阅输出的用户拉到末尾。
         if (text.startsWith(m_text)) {
             QTextCursor cursor(m_editor->document()); cursor.movePosition(QTextCursor::End);
             cursor.insertText(text.mid(m_text.size()));
@@ -84,6 +90,8 @@ private:
     QPlainTextEdit *m_editor;
 };
 
+// 单个时间线条目，构造时只建立摘要行；展开后才创建命令、输入和输出文档。
+// 数据与展开状态均回写/读取模型，控件被分页回收后仍可恢复原有展示。
 class EntryWidget : public QWidget {
 public:
     EntryWidget(AiConversationModel *model, quint64 turnId, const AiConversationEntry &entry, QWidget *parent)
@@ -131,8 +139,7 @@ public:
             connect(copy, &QToolButton::clicked, this, [this, copy] { copyFeedback(copy, m_copyText); });
             messageBar->addWidget(copy);
             m_messageHeader = new QWidget(this);
-            // The header is owned separately so a reasoning-only entry does not
-            // leave an empty message label above its disclosure.
+            // 消息标题单独放入容器；只有思考内容、没有正文时连标题一起隐藏，避免空占位。
             m_messageHeader->setLayout(messageBar); layout->addWidget(m_messageHeader);
             m_body = new MarkdownView(this);
             m_body->setObjectName(QStringLiteral("aiMessage_%1").arg(m_id));
@@ -150,6 +157,7 @@ public:
     }
     void sync(const AiConversationEntry &entry, bool expanded, bool streaming)
     {
+        // 版本相同仍需检查展开和流式状态：展开要补建详情，流式结束要完整解析 Markdown。
         if (entry.revision == m_revision && expanded == m_expanded && streaming == m_streaming) return;
         m_revision = entry.revision; m_expanded = expanded; m_streaming = streaming;
         const auto c = colors(palette());
@@ -182,6 +190,7 @@ public:
             const auto duration = command ? entry.result.durationMs : activity.durationMs;
             m_duration->setText(duration > 0 ? aiDurationLabel(duration) : QString());
             m_duration->setStyleSheet(QStringLiteral("color:%1;").arg(css(c.muted)));
+            // 输出文档及高亮器相对昂贵，首次展开时才创建；折叠期间也不刷新已有详情文档。
             if (expanded && !m_details) {
                 m_details = new QWidget(this);
                 auto *details = new QVBoxLayout(m_details); details->setContentsMargins(0, 4, 0, 4);
@@ -216,6 +225,7 @@ public:
                 }
             }
         } else {
+            // 最终正文已移到独立结果区，这里只保留可展开的思考摘要，避免重复展示报告。
             const bool showBody = !entry.finalAnswer && !entry.text.isEmpty();
             m_copyText = entry.text;
             m_body->setVisible(showBody); m_messageHeader->setVisible(showBody);
@@ -291,6 +301,7 @@ private:
 };
 } // namespace
 
+// 一轮对话由用户问题、可折叠过程区和独立结果区组成；耗时标签可独立更新，不触碰正文。
 class AiTurnWidget : public QWidget {
 public:
     AiTurnWidget(AiConversationModel *model, const AiConversationTurn &turn, QWidget *parent)
@@ -347,6 +358,8 @@ public:
         auto *menu = new QMenu(more);
         menu->addAction(tr("复制 Markdown 原文"), this, [this] { copyFeedback(m_copy, m_resultText); });
         auto *plain = menu->addAction(tr("复制纯文本"), this, [this] {
+            // 从原 Markdown 转纯文本，不能复制装饰后的视图文本，否则会混入代码标题/按钮文案。
+            // 临时文档同样禁用 HTML 和外部资源，复制操作不应触发网络或文件读取。
             class SafeDocument : public QTextDocument {
                 QVariant loadResource(int, const QUrl &) override { return {}; }
             } doc;
@@ -369,6 +382,7 @@ public:
         QMap<AiActivityKind, int> activities;
         bool reasoning = false;
         QString preview;
+        // 命令失败已计入次数，父工具的汇总失败不重复累加；无子命令的活动单独计数。
         QSet<quint64> commandParents;
         for (const auto &entry : turn.entries)
             if (entry.kind == AiConversationEntry::Command && entry.parentEntryId) commandParents.insert(entry.parentEntryId);
@@ -387,10 +401,8 @@ public:
             if (entry.kind == AiConversationEntry::Message && !entry.finalAnswer) preview = entry.text;
         }
         const bool process = commands > 0 || messages > 1 || reasoning || notices > 0 || !activities.isEmpty();
-        // Plain replies render once, in the reply area. Instantiate process
-        // rows only when the turn actually acquires an execution timeline.
-        // A collapsed process keeps its data in the model, but does not create
-        // or refresh hidden text documents. Expansion catches up from revisions.
+        // 普通回复只在结果区显示一次；确有命令、思考或多条过程消息时才建立时间线。
+        // 过程折叠后数据仍在模型，但不创建/刷新隐藏文档；再次展开时按 revision 补齐。
         if (process && !turn.processCollapsed) for (const auto &entry : turn.entries) {
             auto *widget = m_rows.value(entry.id);
             if (!widget) { widget = new EntryWidget(m_model, turn.id, entry, m_entries); m_rows.insert(entry.id, widget); m_entryLayout->addWidget(widget); }
@@ -470,6 +482,7 @@ AiConversationView::AiConversationView(QWidget *parent) : QScrollArea(parent)
     m_jump->setObjectName(QStringLiteral("aiJumpToLatest")); m_jump->setAutoRaise(false);
     m_jump->setFocusPolicy(Qt::StrongFocus); m_jump->hide();
     connect(m_jump, &QToolButton::clicked, this, &AiConversationView::scrollToLatest);
+    // 流式信号按短时间窗口合并，时钟每秒仅刷新状态标签；布局跟随安排在下一轮事件循环。
     m_renderTimer.setInterval(60); m_renderTimer.setSingleShot(true);
     connect(&m_renderTimer, &QTimer::timeout, this, [this] { renderPending(false); });
     for (auto *timer : {&m_followTimer, &m_rebuildTimer, &m_historyTimer}) {
@@ -506,6 +519,7 @@ AiConversationView::AiConversationView(QWidget *parent) : QScrollArea(parent)
     });
 }
 
+// 重建只作用于显示控件；递增代号，阻止旧的零延迟滚动/历史锚点回调修改新页面。
 void AiConversationView::clearWidgets()
 {
     ++m_generation;
@@ -535,7 +549,7 @@ void AiConversationView::setModel(AiConversationModel *model)
     m_loadEarlier->hide();
     if (model) {
         m_changeConnection = connect(model, &AiConversationModel::changed, this, [this](quint64 id) {
-            // Changes outside the loaded history page are read from the model on demand.
+            // 未加载的旧轮次无需加入刷新队列；以后加载时直接读取模型中的最新记录。
             if (!m_turnWidgets.contains(id) && (!m_model->currentTurn() || m_model->currentTurn()->id != id)) return;
             m_dirty.insert(id);
             if (!isVisible()) return;
@@ -548,8 +562,8 @@ void AiConversationView::setModel(AiConversationModel *model)
         });
         if (!m_observedModels.contains(model)) {
             m_observedModels.insert(model);
-            // A background tab can clear its conversation while disconnected
-            // from m_resetConnection. Its saved page/scroll offsets then expire.
+            // 切出会话后已断开当前页 reset 连接，但后台仍可能清空记录。
+            // 生命周期监听持续保留，此时旧分页/滚动缓存一并失效，避免切回时恢复错误位置。
             connect(model, &AiConversationModel::reset, this, [this, model] {
                 m_positions.remove(model); m_historyStarts.remove(model); m_followStates.remove(model);
             });
@@ -564,6 +578,7 @@ void AiConversationView::setModel(AiConversationModel *model)
     if (isVisible()) { flush(); scheduleRestore(); }
 }
 
+// 文本高度和滚动范围需要布局后才稳定；捕获代号，防止连续切换会话时旧恢复任务串入。
 void AiConversationView::scheduleRestore()
 {
     if (m_pendingPosition == -2) return;
@@ -599,8 +614,8 @@ void AiConversationView::renderPending(bool force)
     const bool following = m_following;
     m_adjusting = true;
     const auto &turns = m_model->turns();
-    // Following new output keeps only a recent page of widgets resident. Data,
-    // expansion state and all older turns remain in the session-owned model.
+    // 跟随新输出时仅保留最近一页控件；模型记录与展开状态不删除。
+    // 主动查阅旧历史时不回收，避免用户正读的内容从页面中消失。
     if (following && !m_loadingHistory) {
         const int start = qMax(m_firstLoaded, int(turns.size()) - HistoryPageSize);
         for (int i = m_firstLoaded; i < start; ++i) {
@@ -613,6 +628,7 @@ void AiConversationView::renderPending(bool force)
         const auto &turn = turns.at(i);
         if (!m_dirty.contains(turn.id)) continue;
         auto *widget = m_turnWidgets.value(turn.id);
+        // 非跟随模式下暂缓屏外文档更新，dirty 标记继续保留；滚入附近或强制刷新时再追上。
         if (widget && !force && !following && !nearViewport(widget)) continue;
         if (!widget) {
             widget = new AiTurnWidget(m_model, turn, m_content);
@@ -630,6 +646,8 @@ void AiConversationView::renderPending(bool force)
     if (following && !m_followTimer.isActive()) m_followTimer.start();
 }
 
+// 向顶部插入历史会改变滚动范围，因此记录原首轮的视区坐标，布局完成后补偿位置差。
+// 加载期间关闭跟随和页回收；QPointer 与代号共同防止锚点被销毁后继续使用。
 void AiConversationView::loadEarlier()
 {
     if (!m_model || m_firstLoaded <= 0 || m_loadingHistory) return;

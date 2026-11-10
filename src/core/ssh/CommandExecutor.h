@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 
 class QThread;
 
@@ -40,6 +41,7 @@ struct ExecResult {
     bool timedOut = false;
     bool cancelled = false;
     QString errorMessage; // transport/channel level failure (empty on success)
+    int sshErrorCode = 0;  // libssh2 错误码，与远端进程的 exitCode 分开保存
 
     bool ok() const { return errorMessage.isEmpty() && !timedOut && !cancelled; }
 };
@@ -58,7 +60,12 @@ public:
 
     // client must outlive this executor. The executor does not take ownership.
     explicit CommandExecutor(SshClient *client, QObject *parent = nullptr);
+    // UI 重连场景使用共享所有权：工作线程退出前旧连接必须仍然存活。
+    explicit CommandExecutor(std::shared_ptr<SshClient> client, QObject *parent = nullptr);
     ~CommandExecutor() override;
+
+    SshClient *client() const { return m_client; }
+    bool hasUsableConnection() const;
 
     // --- synchronous execution (blocking; call from a worker thread) ---
 
@@ -150,6 +157,7 @@ private:
 
     void streamLoop(const QString &cmd, bool pty, int timeoutMs);
 
+    std::shared_ptr<SshClient> m_ownedClient; // 可选；析构体 join 后才释放
     SshClient *m_client;
     QThread *m_streamThread = nullptr;
     std::atomic<bool> m_streaming{false};

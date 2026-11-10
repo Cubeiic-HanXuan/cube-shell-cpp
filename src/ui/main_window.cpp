@@ -229,6 +229,7 @@ MainWindow::~MainWindow()
     // 置位析构标志：~QWidget 删子对象时各 tab 的 destroyed lambda 会检查它，
     // 避免在 hash 销毁中状态下访问 m_aiAgents（退出时 hash 随本对象整体销毁）。
     m_destroying = true;
+    bindMonitorToTab(nullptr); // 子标签析构前撤销回调，避免访问已析构的监控订阅成员。
     const auto agents = m_aiAgents.values();
     m_aiAgents.clear();
     qDeleteAll(agents); // stop workers before their tabs/executors are destroyed
@@ -309,15 +310,9 @@ void MainWindow::setupUi()
     });
     // 对应Python: _on_remote_monitoring_changed（启/停当前会话的 RemoteMonitor）
     connect(m_deviceList, &DeviceListWidget::remoteMonitoringToggled,
-            this, [this](bool on) {
-        if (m_monitorTab && m_monitorTab->monitor()) {
-            if (on)
-                m_monitorTab->monitor()->start();
-            else
-                m_monitorTab->monitor()->stop();
-        }
-        if (!on)
-            resetStatusItems();
+            this, [this](bool) {
+        // 每次切换都更新订阅代次，避免关闭前已排队的数据把底部面板重新显示。
+        subscribeCurrentMonitor();
     });
 
     // 焦点落到任一 pane 内部时把它记为活动 pane —— 多分屏下不能再靠
@@ -2045,11 +2040,11 @@ void MainWindow::closeTabIn(QTabWidget *tabs, int index)
         m_nginxExecutor = nullptr;
     }
 #endif
-    // 进程管理对话框同样只引用不持有 executor，一并撤下。
-    if (m_processExecutor && m_processExecutor->parent() == w) {
+    // 先取消进程管理的任务并撤下连接，再销毁它所属的标签页。
+    if (m_processSession == w) {
         if (m_processManagerDialog)
-            m_processManagerDialog->setExecutor(nullptr);
-        m_processExecutor = nullptr;
+            m_processManagerDialog->setClient(nullptr);
+        m_processSession = nullptr;
     }
     // AI Agent 清理：标签关闭时销毁对应的 SshAiAgent（其 executor 随标签销毁，
     // 必须先于标签 deleteLater 停掉执行线程）。
@@ -2810,36 +2805,73 @@ void MainWindow::syncBrowserToTerminalCwd()
 void MainWindow::bindMonitorToTab(QWidget *tabWidget)
 {
     auto *tab = qobject_cast<SshSessionTab *>(tabWidget);
-    if (tab == m_monitorTab)
+    if (tab == m_monitorTab) {
+        if (tab && m_monitorSource != tab->monitor())
+            subscribeCurrentMonitor();
         return;
+    }
 
-    // 取消旧订阅。
-    if (m_monitorTab && m_monitorTab->monitor())
-        disconnect(m_monitorTab->monitor(), nullptr, this, nullptr);
+    disconnect(m_monitorReadyConnection);
+    disconnect(m_monitorDisconnectedConnection);
+    disconnect(m_monitorDestroyedConnection);
     m_monitorTab = tab;
-    resetStatusItems();
+    if (tab) {
+        const QPointer<SshSessionTab> watched(tab);
+        // 无论订阅时是否已有 monitor，都持续监听后续重连创建的新对象。
+        m_monitorReadyConnection = connect(tab, &SshSessionTab::monitorReady, this,
+                [this, watched]() {
+                    if (watched && m_monitorTab == watched)
+                        subscribeCurrentMonitor();
+                });
+        m_monitorDisconnectedConnection = connect(tab, &SshSessionTab::disconnected, this,
+                [this, watched]() {
+                    if (watched && m_monitorTab == watched)
+                        clearMonitorSubscription();
+                });
+        m_monitorDestroyedConnection = connect(tab, &QObject::destroyed, this,
+                [this, watched]() {
+                    if (m_monitorTab == watched) {
+                        m_monitorTab = nullptr;
+                        clearMonitorSubscription();
+                    }
+                });
+    }
+    subscribeCurrentMonitor();
+}
 
-    if (!tab)
+void MainWindow::clearMonitorSubscription()
+{
+    ++m_monitorGeneration;
+    if (m_monitorSource)
+        disconnect(m_monitorSource, nullptr, this, nullptr);
+    m_monitorSource = nullptr;
+    resetStatusItems();
+}
+
+void MainWindow::subscribeCurrentMonitor()
+{
+    clearMonitorSubscription();
+    if (!m_monitorTab)
         return;
 
-    auto subscribe = [this, tab]() {
-        if (m_monitorTab != tab)     // 标签已切走，忽略迟到的 monitorReady
-            return;
-        RemoteMonitor *mon = tab->monitor();
-        if (!mon)
-            return;
-        // RemoteMonitor 的信号从监控线程发射 → 必须 Qt::QueuedConnection。
-        // 状态栏 8 项指标同步更新。对应Python: refresh_status_bar
-        connect(mon, &RemoteMonitor::statsUpdated,
-                this, &MainWindow::updateStatusStats, Qt::QueuedConnection);
-        // 未勾选远程监控时不采集。对应Python: _on_remote_monitoring_changed
-        if (!m_deviceList->remoteMonitoringEnabled())
-            mon->stop();
-    };
-    if (tab->monitor())
-        subscribe();
-    else
-        connect(tab, &SshSessionTab::monitorReady, this, subscribe);
+    m_monitorSource = m_monitorTab->monitor();
+    if (m_monitorSource) {
+        const auto source = m_monitorSource;
+        const auto tab = m_monitorTab;
+        const quint64 generation = m_monitorGeneration;
+        connect(source, &RemoteMonitor::statsUpdated, this,
+                [this, source, tab, generation](const RemoteStats &stats) {
+                    // disconnect 无法撤回已经入队的信号；同时检查代次、对象和开关。
+                    if (generation != m_monitorGeneration || !source || !tab
+                        || m_monitorTab != tab || m_monitorSource != source
+                        || tab->monitor() != source || !source->isRunning()
+                        || !m_deviceList->remoteMonitoringEnabled())
+                        return;
+                    updateStatusStats(stats);
+                }, Qt::QueuedConnection);
+    }
+    // 先安装订阅再启动采集；未连接时也记住复选框选择，供下一次重连使用。
+    m_monitorTab->setMonitoringEnabled(m_deviceList->remoteMonitoringEnabled());
 }
 
 // 状态栏 8 项指标刷新（主线程，经 QueuedConnection 进入）。
@@ -3099,6 +3131,12 @@ void MainWindow::openSshSessionWithCommand(const DeviceEntry &stub, const QStrin
                 m_tabBrowsers.insert(tab, browser);
             }
         }
+        // 对话框可以在重连过程中保持打开：按新 SshClient 重建执行器，不复用旧对象。
+        if (m_processSession == tab && m_processManagerDialog) {
+            m_processManagerDialog->setClient(tab->terminal()->sshClient());
+            if (m_processManagerDialog->isVisible())
+                m_processManagerDialog->refresh();
+        }
         updateLeftPanel();
         updateTerminalInfo();
     });
@@ -3150,12 +3188,9 @@ void MainWindow::openSshSessionWithCommand(const DeviceEntry &stub, const QStrin
             m_nginxExecutor = nullptr;
         }
 #endif
-        // 进程管理对话框同理：撤下该会话的 executor，避免刷新到已断连接。
-        if (m_processExecutor && m_processExecutor->parent() == tab) {
-            if (m_processManagerDialog)
-                m_processManagerDialog->setExecutor(nullptr);
-            m_processExecutor = nullptr;
-        }
+        // 断开旧执行器但保留标签归属，便于该标签重连成功后自动重新绑定。
+        if (m_processSession == tab && m_processManagerDialog)
+            m_processManagerDialog->setClient(nullptr);
     });
     connect(tab, &SshSessionTab::mfaRequested, this, [this](const QString &prompt) {
         setStatus(tr("MFA 验证：%1").arg(prompt));
@@ -4067,30 +4102,14 @@ void MainWindow::showNatDialog()
 // 对应Python: cube-shell.py:1390-1399 showProcessManagerDialog
 void MainWindow::showProcessManager()
 {
-    // 当前活动 SSH 会话的 CommandExecutor（objectName "processExecutor"，
-    // 会话内复用）；不是 SSH 会话或尚未连上时置空，对话框自行显示
-    // "未连接 SSH 服务器"。
-    CommandExecutor *executor = nullptr;
     auto *session = qobject_cast<SshSessionTab *>(activeTabWidget()->currentWidget());
-    std::shared_ptr<SshClient> client;
-    if (session && session->terminal())
-        client = session->terminal()->sshClient();
-    if (client) {
-        executor = session->findChild<CommandExecutor *>(
-            QStringLiteral("processExecutor"));
-        if (!executor) {
-            executor = new CommandExecutor(client.get(), session);
-            executor->setObjectName(QStringLiteral("processExecutor"));
-        }
-    }
-
+    const auto client = session && session->terminal()
+        ? session->terminal()->sshClient() : std::shared_ptr<SshClient>();
     if (!m_processManagerDialog)
-        m_processManagerDialog = new ProcessManagerDialog(nullptr, this);
-    m_processManagerDialog->setExecutor(executor);
-    m_processExecutor = executor;
-    // Python 仅在 isConnected 时刷新（cube-shell.py:1392-1396）。
-    if (executor)
-        m_processManagerDialog->refresh();
+        m_processManagerDialog = new ProcessManagerDialog(this);
+    m_processSession = session;
+    m_processManagerDialog->setClient(client);
+    m_processManagerDialog->refresh();
     m_processManagerDialog->show();
     m_processManagerDialog->raise();
     m_processManagerDialog->activateWindow();

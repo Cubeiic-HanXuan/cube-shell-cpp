@@ -288,6 +288,14 @@ public:
     // True if the SSH session transport is still alive and authenticated.
     bool isTransportAlive() const;
 
+    // 将已确认的底层收发/断线错误标记为连接失效，唤醒其它 I/O 并仅通知一次。
+    // EAGAIN、命令退出码和服务器拒绝创建通道不属于传输故障，不会断开连接。
+    // 可从工作线程调用；不要持有 sessionLock() 调用（代理关闭可能涉及其它锁）。
+    void reportTransportError(int code, const QString &message);
+
+signals:
+    void transportFailed(const QString &message);
+
 private:
     bool authenticate(SshError &error);
     bool authPassword(SshError &error);
@@ -389,6 +397,7 @@ private:
     // 必须把它算进去——libssh2_userauth_authenticated 只是本地标志，socket
     // 死了它仍为真，连接池据此会把死连接继续租出去（open 必失败）。
     std::atomic<bool> m_socketShutdown{false};
+    std::atomic<bool> m_transportErrorReported{false};
     _LIBSSH2_SESSION *m_session = nullptr;
     _LIBSSH2_CHANNEL *m_channel = nullptr;
 

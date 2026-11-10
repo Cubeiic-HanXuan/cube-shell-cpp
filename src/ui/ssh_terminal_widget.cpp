@@ -399,12 +399,25 @@ void SshTerminalWidget::startConnect(const QString &password)
             if (!self)
                 return;
             self->m_pendingClient.reset();
-            self->m_client = client;   // take ownership (unique_ptr from shared copy)
+            self->m_client = client;   // 终端持有本次新连接
+            self->m_disconnectNotified = false;
+            // exec/监控工作线程也能发现断线；身份检查屏蔽重连前已入队的旧通知。
+            connect(client.get(), &SshClient::transportFailed, self,
+                    [self, source = std::weak_ptr<SshClient>(client)](const QString &reason) {
+                        const auto failedClient = source.lock();
+                        if (self && failedClient && self->m_client == failedClient)
+                            self->notifyConnectionLost(reason);
+                    }, Qt::QueuedConnection);
             self->m_bridge = new SshBridge(self->m_term->session(), self->m_client.get(), self);
             // 重连后 bridge 是新建的：若此前已开录制，把同一个 recorder 挂回去。
             if (self->m_recorder)
                 self->m_bridge->setRecorder(self->m_recorder);
-            connect(self->m_bridge, &SshBridge::channelClosed, self, &SshTerminalWidget::onDisconnected);
+            connect(self->m_bridge, &SshBridge::channelClosed, self,
+                    [self, source = std::weak_ptr<SshClient>(client)]() {
+                        const auto closedClient = source.lock();
+                        if (self && closedClient && self->m_client == closedClient)
+                            self->onDisconnected();
+                    }, Qt::QueuedConnection);
             connect(self->m_bridge, &SshBridge::shellMfaPromptDetected, self, &SshTerminalWidget::onMfaPrompt);
             // cwdChanged 从读线程发射 → 显式 QueuedConnection 切回 UI 线程。
             connect(self->m_bridge, &SshBridge::cwdChanged,
@@ -451,12 +464,14 @@ void SshTerminalWidget::reconnect()
     m_started = false;
     m_authAttempt = 0;
     m_teardown = false;
-    m_client.reset();
     if (m_bridge) {
+        disconnect(m_bridge, nullptr, this, nullptr);
         m_bridge->stop();
         m_bridge->deleteLater();
         m_bridge = nullptr;
     }
+    // bridge 停止前仍可能使用裸指针；最后才释放终端持有的旧连接。
+    m_client.reset();
     connectToHost();
 }
 
@@ -477,10 +492,21 @@ void SshTerminalWidget::onMfaPrompt(const QString &prompt)
     emit mfaRequested(prompt);
 }
 
+void SshTerminalWidget::notifyConnectionLost(const QString &reason)
+{
+    if (!reason.isEmpty() || !m_disconnectNotified)
+        showReconnectOverlay(reason);
+    if (m_disconnectNotified)
+        return;
+    m_disconnectNotified = true;
+    if (m_client && m_client->isConnected())
+        m_client->shutdownSocket();
+    emit disconnected();
+}
+
 void SshTerminalWidget::onDisconnected()
 {
-    showReconnectOverlay(QString());
-    emit disconnected();
+    notifyConnectionLost();
 }
 
 } // namespace cubeshell

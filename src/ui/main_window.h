@@ -32,6 +32,7 @@ class LocalFileBrowserWidget;
 class TerminalTabWidget;
 class UpdateChecker;
 class SshSessionTab;
+class RemoteMonitor;
 class TunnelPool;
 class BastionClient;
 class CommandExecutor;
@@ -220,8 +221,11 @@ private:
     // 对应Python: _on_follow_folder_changed → refreshDirs
     void syncBrowserToTerminalCwd();
 
+    friend struct RemoteMonitorReconnectTestAccess;
     // --- 远程监控（状态栏 8 项指标） ---
     void bindMonitorToTab(QWidget *tabWidget);
+    void subscribeCurrentMonitor();
+    void clearMonitorSubscription();
     // 状态栏 8 项指标更新/复位。对应Python: refresh_status_bar
     void updateStatusStats(const RemoteStats &stats);
     void resetStatusItems();
@@ -378,7 +382,12 @@ private:
 
     QDockWidget *m_aiDock = nullptr;       // AI 助手停靠面板（默认隐藏）
     AiChatPanel *m_aiPanel = nullptr;
-    SshSessionTab *m_monitorTab = nullptr; // 当前订阅监控的会话标签
+    QPointer<SshSessionTab> m_monitorTab; // 当前订阅监控的会话标签
+    QPointer<RemoteMonitor> m_monitorSource; // 标签未变时，重连也会更换采集对象
+    QMetaObject::Connection m_monitorReadyConnection;
+    QMetaObject::Connection m_monitorDisconnectedConnection;
+    QMetaObject::Connection m_monitorDestroyedConnection;
+    quint64 m_monitorGeneration = 0; // 拦截切换/关闭监控前已经入队的旧帧
 
     TunnelPool *m_tunnelPool = nullptr;
     BastionClient *m_bastion = nullptr;
@@ -411,7 +420,7 @@ private:
     // 远程进程管理（懒加载）。
     // 对应Python: cube-shell.py:1390-1399 showProcessManagerDialog
     ProcessManagerDialog *m_processManagerDialog = nullptr;
-    QPointer<CommandExecutor> m_processExecutor;
+    QPointer<SshSessionTab> m_processSession; // 断线时保留归属，重连后绑定该标签的新连接
 
     // 内网穿透（懒加载）。
     // 对应Python: cube-shell.py::_ensure_nat_dialog 的 self._nat_dialog

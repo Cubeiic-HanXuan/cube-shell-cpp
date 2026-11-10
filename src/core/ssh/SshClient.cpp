@@ -107,7 +107,11 @@ void SshClient::setKeepaliveGracePeriod(int seconds)
     m_keepaliveGracePeriod = seconds;
 }
 
-bool SshClient::isConnected() const { return m_session != nullptr; }
+bool SshClient::isConnected() const
+{
+    // session 对象可能在断线后仍被工作线程持有；存在对象不代表传输还可用。
+    return !m_socketShutdown.load() && m_sock >= 0 && m_session != nullptr;
+}
 bool SshClient::isChannelOpen() const { return m_channel != nullptr; }
 
 // Fill an SshError from the current libssh2 session error.
@@ -257,6 +261,7 @@ bool SshClient::connectToHost(SshPromptCallback promptCallback, SshError &error)
     }
 
     m_sock = sock;
+    m_transportErrorReported = false;
     m_socketShutdown = false; // 新 socket 就绪，清除可能残留的 shutdown 标记
 
     return finishHandshake(sock, budget, error);
@@ -282,6 +287,7 @@ bool SshClient::connectOverSocket(qintptr sock, ProxyTransportPtr transport,
     }
 
     m_sock = sock;
+    m_transportErrorReported = false;
     m_socketShutdown = false;
 
     return finishHandshake(sock, QDeadlineTimer(effectiveConnectTimeoutMs()), error);
@@ -1096,6 +1102,8 @@ void SshClient::shutdownSocket()
     // 第 3 跳还在连的时候关标签页，就只能等到 OS 超时。标志由 proxyConnect
     // 一路传到每个 select 切片里，最多多等一个切片（kSelectSliceMs）。
     m_dialCancelled = true;
+    // 先发布失效状态，再唤醒代理与 socket；即使尚无 fd 也不能继续执行命令。
+    m_socketShutdown = true;
 
     // 载体也要一起叫醒（代理命令的泵线程 / 跳板链的中继线程）。不叫醒的话它会
     // 一直守着一个已经没人读的 fd，关掉一个标签页就留下一个线程 + 一个子进程。
@@ -1374,17 +1382,28 @@ void SshClient::freeChannel(_LIBSSH2_CHANNEL *channel)
     libssh2_channel_free(channel);
 }
 
+void SshClient::reportTransportError(int code, const QString &message)
+{
+    if (code != LIBSSH2_ERROR_SOCKET_SEND && code != LIBSSH2_ERROR_SOCKET_RECV
+        && code != LIBSSH2_ERROR_SOCKET_DISCONNECT)
+        return;
+    if (m_transportErrorReported.exchange(true))
+        return;
+    shutdownSocket();
+    qCWarning(sshLog).noquote() << "SSH transport failed:" << code << message;
+    emit transportFailed(message);
+}
+
 bool SshClient::isTransportAlive() const
 {
-    // socket 已被 shutdown（取消传输/关标签页）：authenticated 标志仍是真，
-    // 但传输已经死了，必须报死——否则连接池会把死连接租出去。
-    if (m_socketShutdown.load())
+    // 这是对已知状态的检查，不是网络探测；下一次 I/O 仍可能发现新的断线。
+    if (!isConnected())
         return false;
     QMutexLocker locker(&const_cast<SshClient *>(this)->m_sessionMutex);
-    if (!m_session)
+    if (!isConnected())
         return false;
-    // authenticated() returns 0 when authenticated, non-zero otherwise.
-    return libssh2_userauth_authenticated(const_cast<_LIBSSH2_SESSION *>(m_session)) != 0;
+    // libssh2_userauth_authenticated() 非零表示已认证。
+    return libssh2_userauth_authenticated(m_session) != 0;
 }
 
 } // namespace cubeshell

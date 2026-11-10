@@ -10,6 +10,7 @@
 #include <QMutexLocker>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QStringList>
 #include <QThread>
 
@@ -33,6 +34,19 @@ CommandExecutor::CommandExecutor(SshClient *client, QObject *parent)
     : QObject(parent)
     , m_client(client)
 {
+}
+
+CommandExecutor::CommandExecutor(std::shared_ptr<SshClient> client, QObject *parent)
+    : CommandExecutor(client.get(), parent)
+{
+    m_ownedClient = std::move(client);
+}
+
+bool CommandExecutor::hasUsableConnection() const
+{
+    // UI 只读取已知连接状态，不等待可能正被其它通道占用的 session 锁；
+    // 工作线程进入 runCommandInternal() 时再检查认证状态。
+    return m_client && m_client->isConnected();
 }
 
 CommandExecutor::~CommandExecutor()
@@ -118,13 +132,16 @@ bool CommandExecutor::looksLikeSudoPasswordPrompt(const QString &text)
 // ==========================================================================
 
 // Fill an ExecResult error from the current libssh2 session error.
-static void fillExecError(LIBSSH2_SESSION *session, ExecResult &result, const QString &context)
+static void fillExecError(LIBSSH2_SESSION *session, ExecResult &result, const QString &context,
+                          int returnedCode = 0)
 {
     char *msg = nullptr;
     int len = 0;
-    const int code = session ? libssh2_session_last_error(session, &msg, &len, 0) : 0;
+    const int lastCode = session ? libssh2_session_last_error(session, &msg, &len, 0) : 0;
+    const int code = returnedCode != 0 ? returnedCode : lastCode;
+    result.sshErrorCode = code;
     result.errorMessage = context;
-    if (msg && len > 0)
+    if (code == lastCode && msg && len > 0)
         result.errorMessage += QStringLiteral(": ") + QString::fromLatin1(msg, len);
     result.errorMessage += QStringLiteral(" (code %1)").arg(code);
 }
@@ -154,7 +171,8 @@ static bool waitReadableCancellable(SshClient *client, int timeoutMs,
 // waiting on EAGAIN so the interactive shell channel is never starved.
 // Returns false on error or when the cancel flag is raised mid-write.
 static bool channelWriteAll(SshClient *client, LIBSSH2_CHANNEL *channel,
-                            const QByteArray &data, std::atomic<bool> *cancelFlag)
+                            const QByteArray &data, std::atomic<bool> *cancelFlag,
+                            int &errorCode)
 {
     QRecursiveMutex &lock = client->sessionLock();
     qsizetype written = 0;
@@ -173,8 +191,10 @@ static bool channelWriteAll(SshClient *client, LIBSSH2_CHANNEL *channel,
                 return false;
             continue;
         }
-        if (n < 0)
+        if (n < 0) {
+            errorCode = int(n);
             return false;
+        }
         written += n;
     }
     return true;
@@ -194,12 +214,25 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
                                                const ChunkCallback &onChunk)
 {
     ExecResult result;
-    if (!client || !client->isConnected()) {
-        result.errorMessage = QStringLiteral("Not connected");
+    if (!client || !client->isTransportAlive()) {
+        result.errorMessage = QStringLiteral("SSH 连接不可用，请重新连接后重试");
         return result;
     }
     LIBSSH2_SESSION *session = client->rawSession();
     QRecursiveMutex &lock = client->sessionLock();
+
+    // 在所有 session 锁释放后统一上报传输失败。单独保存错误快照，避免返回值
+    // 被移动后 guard 读到空字符串；普通命令失败不应使整个 SSH 会话断开。
+    int transportCode = 0;
+    QString transportMessage;
+    const auto reportFailure = qScopeGuard([&]() {
+        client->reportTransportError(transportCode, transportMessage);
+    });
+    auto recordError = [&](const QString &context, int code = 0) {
+        fillExecError(session, result, context, code);
+        transportCode = result.sshErrorCode;
+        transportMessage = result.errorMessage;
+    };
 
     QElapsedTimer clock;
     clock.start();
@@ -229,7 +262,7 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             if (channel)
                 break;
             if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
-                fillExecError(session, result, QStringLiteral("Unable to open exec channel"));
+                recordError(QStringLiteral("Unable to open exec channel"));
                 restoreBlocking();
                 return result;
             }
@@ -264,6 +297,9 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             QMutexLocker locker(&lock);
             if (rc == 0 && result.errorMessage.isEmpty() && !result.timedOut && !result.cancelled)
                 result.exitCode = libssh2_channel_get_exit_status(channel);
+            else if (rc < 0 && rc != LIBSSH2_ERROR_EAGAIN && !isCancelled()
+                     && result.errorMessage.isEmpty())
+                recordError(QStringLiteral("关闭命令通道失败"), rc);
             libssh2_channel_free(channel);
         }
         restoreBlocking();
@@ -285,7 +321,7 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
         }
         if (rc != 0) {
             QMutexLocker locker(&lock);
-            fillExecError(session, result, QStringLiteral("request_pty failed"));
+            recordError(QStringLiteral("request_pty failed"), rc);
             locker.unlock();
             finish();
             return result;
@@ -309,7 +345,7 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
         }
         if (rc != 0) {
             QMutexLocker locker(&lock);
-            fillExecError(session, result, QStringLiteral("exec failed"));
+            recordError(QStringLiteral("exec failed"), rc);
             locker.unlock();
             finish();
             return result;
@@ -319,12 +355,13 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
     // --- stdin (sudo password / script upload), then EOF ---
     // 对应Python: ssh_agent.py::_execute_single 的 stdin.write(password) + flush
     if (!stdinData.isEmpty()) {
-        if (!channelWriteAll(client, channel, stdinData, cancelFlag)) {
+        int writeError = 0;
+        if (!channelWriteAll(client, channel, stdinData, cancelFlag, writeError)) {
             QMutexLocker locker(&lock);
             if (isCancelled())
                 result.cancelled = true;
             else
-                fillExecError(session, result, QStringLiteral("stdin write failed"));
+                recordError(QStringLiteral("stdin write failed"), writeError);
             locker.unlock();
             finish();
             return result;
@@ -369,11 +406,18 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             if (n > 0) {
                 outChunk = QByteArray(buf, int(n));
                 got = true;
+            } else if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) {
+                recordError(QStringLiteral("读取命令输出失败"), int(n));
             }
-            ssize_t m = libssh2_channel_read_stderr(channel, buf, sizeof(buf));
-            if (m > 0) {
-                errChunk = QByteArray(buf, int(m));
-                got = true;
+            // 不让第二次读覆盖第一次错误；保留底层错误码供断线判定。
+            if (result.errorMessage.isEmpty()) {
+                ssize_t m = libssh2_channel_read_stderr(channel, buf, sizeof(buf));
+                if (m > 0) {
+                    errChunk = QByteArray(buf, int(m));
+                    got = true;
+                } else if (m < 0 && m != LIBSSH2_ERROR_EAGAIN) {
+                    recordError(QStringLiteral("读取命令错误输出失败"), int(m));
+                }
             }
             if (!got && libssh2_channel_eof(channel))
                 eof = true;
@@ -389,11 +433,16 @@ ExecResult CommandExecutor::runCommandInternal(SshClient *client, const QString 
             if (onChunk)
                 pendingStdin += onChunk(errChunk, true);
         }
-        if (!pendingStdin.isEmpty()) {
-            channelWriteAll(client, channel, pendingStdin, cancelFlag);
+        if (!pendingStdin.isEmpty() && result.errorMessage.isEmpty()) {
+            int writeError = 0;
+            if (!channelWriteAll(client, channel, pendingStdin, cancelFlag, writeError)) {
+                QMutexLocker locker(&lock);
+                if (isCancelled()) result.cancelled = true;
+                else recordError(QStringLiteral("stdin write failed"), writeError);
+            }
             pendingStdin.clear();
         }
-        if (eof)
+        if (eof || !result.errorMessage.isEmpty() || result.cancelled)
             break;
         if (!got) {
             // 切片等待 + 取消检查：stop() 置 cancelFlag 后下一轮（≤25ms）即返回，
@@ -531,13 +580,15 @@ void CommandExecutor::streamLoop(const QString &cmd, bool pty, int timeoutMs)
     if (!pending.isEmpty())
         emit outputChunk(pending);
 
+    // 完成信号的接收方可能立即发起下一次刷新，先发布空闲状态。
+    // execStream() 仍会 join 旧线程，不会让两个工作线程同时运行。
+    m_streaming.store(false);
     if (!r.errorMessage.isEmpty())
         emit streamError(r.errorMessage);
     else if (r.timedOut)
         emit streamError(QStringLiteral("command timed out"));
 
     emit streamFinished(r.ok() ? r.exitCode : -1, r.stdoutText, r.stderrText);
-    m_streaming.store(false);
 }
 
 } // namespace cubeshell

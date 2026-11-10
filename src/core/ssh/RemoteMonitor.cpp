@@ -39,9 +39,12 @@ RemoteMonitor::RemoteMonitor(std::shared_ptr<SshClient> client, QObject *parent)
 
 RemoteMonitor::~RemoteMonitor()
 {
-    // stop() 在 socket 已 shutdown 的前提下快速 join 线程，保证线程不会在本对象
-    // 析构后仍访问 this（线程体按值捕获 this 指针）。
-    stop();
+    // UI 使用 retire() 时这里的线程已结束；直接销毁（如栈上单测）也必须
+    // 保证捕获 this 的线程先退出，不能将其遗留到 QObject 析构之后。
+    if (!stop()) {
+        m_thread->wait();
+        delete m_thread;
+    }
 }
 
 void RemoteMonitor::setIntervalMs(int intervalMs)
@@ -56,9 +59,11 @@ int RemoteMonitor::intervalMs() const
 
 void RemoteMonitor::start()
 {
-    if (m_running.load())
+    if (m_retiring || m_running.load())
         return;
-    stop(); // 清理上一次可能仍挂在后台的线程（stop 自身是有界/非阻塞的）
+    // 不能在尚未退出的旧线程旁启动第二个线程，也不能重新启动已失效的连接。
+    if (!stop() || !m_client || !m_client->isConnected())
+        return;
     m_running.store(true);
     m_cancelFlag.store(false);
     m_thread = QThread::create([this]() { monitorLoop(); });
@@ -66,32 +71,37 @@ void RemoteMonitor::start()
     m_thread->start();
 }
 
-void RemoteMonitor::stop()
+bool RemoteMonitor::stop()
 {
     m_running.store(false);
-    m_cancelFlag.store(true); // abort an in-flight runCommand promptly
+    m_cancelFlag.store(true);
     m_sleepCond.wakeAll();
-    QThread *t = m_thread;
-    m_thread = nullptr;
-    if (!t)
-        return;
-
-    // 必须在回收线程对象前确认线程已退出：线程体按值捕获了 this（monitorLoop
-    // 读 m_running/m_cancelFlag/m_client/m_sleepCond），若放任线程后台跑而本对象
-    // 先析构，就是 use-after-free → 整个进程段错误。这里能安全 join 而不卡 UI，
-    // 是因为调用方（~SshSessionTab）已先 shutdownSocket()，把所有阻塞在
-    // select/read 的等待强制唤醒；叠加 cancelFlag + 读循环里 ≤25ms 的取消切片，
-    // 线程几乎立即退出。给一个有界超时兜底：正常路径远快于此，超时只在极端
-    // （线程卡死在内核）才会触发，此时仍优先保证不崩——但实践中不会到达。
-    // 之所以不用"超时后 deleteLater 后台自删"，正是上面那条 UAF：对象可能先死。
-    if (t->wait(3000)) {
-        delete t;
-    } else {
-        // 兜底：线程 3s 还没退（理论上 socket 断后不该发生）。用 finished 信号
-        // deleteLater 自删，避免泄漏；此时不 delete 是因为线程可能仍持有栈上引用。
-        connect(t, &QThread::finished, t, &QObject::deleteLater);
+    if (!m_thread)
+        return true;
+    if (!m_thread->wait(3000)) {
+        // 线程仍会访问 this；保留句柄，交给 retire() 延迟回收整个监控对象。
         qWarning() << "RemoteMonitor::stop: monitor thread did not exit within 3s";
+        return false;
     }
+    delete m_thread;
+    m_thread = nullptr;
+    return true;
+}
+
+void RemoteMonitor::retire()
+{
+    if (m_retiring)
+        return;
+    m_retiring = true;
+    setParent(nullptr); // 标签页可以先销毁，但工作线程使用的对象必须继续存活。
+    if (stop()) {
+        deleteLater();
+        return;
+    }
+    connect(m_thread, &QThread::finished, this, &QObject::deleteLater, Qt::QueuedConnection);
+    // 处理 wait 超时后、连接 finished 信号前，线程恰好已经退出的窗口。
+    if (m_thread->isFinished())
+        deleteLater();
 }
 
 bool RemoteMonitor::sleepInterruptible(int ms)
@@ -121,8 +131,8 @@ static QString formatUptime(double secs)
 // 对应Python: ssh_func.py::get_datas（监控主循环）
 void RemoteMonitor::monitorLoop()
 {
-    // m_client 是 shared_ptr：本线程运行期间 SshClient 必然存活，即便走到了
-    // stop() 的兜底路径、RemoteMonitor/SshTerminalWidget 已开始析构。
+    // 监控持有旧连接直至采集线程退出；retire() 或析构 join 同时保证 this 存活，
+    // 不能只保留 SshClient 而让线程继续访问已经销毁的监控对象。
     SshClient *client = m_client.get();
     if (!client) {
         qCWarning(monitorLog) << "monitor started without a valid client";

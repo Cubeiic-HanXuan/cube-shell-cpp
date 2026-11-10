@@ -505,6 +505,35 @@ target_link_libraries(sftp_browser_test PRIVATE
     cube_core
 )
 
+# 进程管理：连接替换、旧回调隔离、旧快照提示，以及真实 channel-open 发送失败。
+qt_add_executable(process_manager_test process_manager_test.cpp)
+target_include_directories(process_manager_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${LIBSSH2_INCLUDE_DIRS}
+)
+target_link_libraries(process_manager_test PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets cube_ui cube_core
+)
+add_test(NAME process_manager_test COMMAND process_manager_test)
+add_test(NAME process_manager_integration_test COMMAND process_manager_test --integration)
+set_tests_properties(process_manager_test PROPERTIES TIMEOUT 30)
+set_tests_properties(process_manager_integration_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 60)
+
+# SSH 监控重连：对象换代/旧帧隔离/线程回收 + 真实终端重连后底部指标恢复。
+qt_add_executable(remote_monitor_reconnect_test remote_monitor_reconnect_test.cpp)
+target_include_directories(remote_monitor_reconnect_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+)
+target_link_libraries(remote_monitor_reconnect_test PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets cube_ui cube_core
+)
+add_test(NAME remote_monitor_reconnect_test COMMAND remote_monitor_reconnect_test)
+add_test(NAME remote_monitor_reconnect_integration_test COMMAND remote_monitor_reconnect_test --integration)
+set_tests_properties(remote_monitor_reconnect_test PROPERTIES TIMEOUT 30)
+set_tests_properties(remote_monitor_reconnect_integration_test PROPERTIES SKIP_RETURN_CODE 2 TIMEOUT 90)
+
 # SFTP 重连：离屏生命周期回归 + 可选真实 sshd 的目录/上传/下载恢复。
 qt_add_executable(sftp_reconnect_test sftp_reconnect_test.cpp)
 target_include_directories(sftp_reconnect_test PRIVATE

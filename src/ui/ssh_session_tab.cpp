@@ -49,27 +49,8 @@ SshSessionTab::SshSessionTab(const DeviceEntry &device, QWidget *parent)
         // 时 client 比 SftpClient 后析构（m_monitor 的注释同此约定）。
         if (m_term->sshClient())
             m_sftp->setClient(m_term->sshClient());
-        // 连接成功后启动监控采集线程。
-        // 对应Python: ssh_func.py::get_datas 的后台线程启动
-        if (!m_monitor && m_term->sshClient()) {
-            // 直接传 shared_ptr：监控对象共享 SshClient 所有权，其线程运行期间
-            // client 必然存活，杜绝极端路径下的 use-after-free。
-            m_monitor = new RemoteMonitor(m_term->sshClient(), this);
-            m_monitor->start();
-            emit monitorReady();
-        }
-        // keepalive 定时器：连接成功后启动，周期性发送 SSH keepalive。
-        if (!m_keepalive && m_term->sshClient()) {
-            m_keepalive = new SshKeepaliveTimer(m_term->sshClient(), this);
-            connect(m_keepalive, &SshKeepaliveTimer::connectionDied,
-                    this, [this](const QString &reason) {
-                        // 心跳失败先显示重连层，不直接报错关标签页。
-                        if (m_term)
-                            m_term->showReconnectOverlay(reason);
-                        emit disconnected();
-                    });
-            m_keepalive->start();
-        }
+        // 重连会产生新的 SshClient，监控和心跳必须一起绑定新连接。
+        bindConnectionServices(m_term->sshClient());
         emit connected();
     });
     connect(m_term, &SshTerminalWidget::connectionFailed, this, &SshSessionTab::connectionFailed);
@@ -96,10 +77,52 @@ SshSessionTab::~SshSessionTab()
     //     SshBridge::stop，其内部同样因 socket 已断而快速退出）。
     if (m_term && m_term->sshClient())
         m_term->sshClient()->shutdownSocket();
-    if (m_monitor)
-        m_monitor->stop();
-    if (m_keepalive)
-        m_keepalive->stop();
+    releaseConnectionServices();
+}
+
+void SshSessionTab::releaseConnectionServices()
+{
+    m_servicesClient.reset();
+    if (m_monitor) {
+        // 老采集线程即使暂时没退，也由自身完成后回收，不能随标签先析构。
+        m_monitor->retire();
+        m_monitor = nullptr;
+    }
+    delete m_keepalive; // QTimer 和回调在 UI 线程中回收，不涉及后台线程。
+    m_keepalive = nullptr;
+}
+
+void SshSessionTab::bindConnectionServices(const std::shared_ptr<SshClient> &client)
+{
+    if (client && m_servicesClient.lock() == client && m_monitor && m_keepalive)
+        return; // 重复的 connected 通知不重建、不重复订阅。
+    releaseConnectionServices();
+    if (!client)
+        return;
+    m_servicesClient = client;
+    m_monitor = new RemoteMonitor(client, this);
+    m_keepalive = new SshKeepaliveTimer(client, this);
+    connect(m_keepalive, &SshKeepaliveTimer::connectionDied, this,
+            [this, source = std::weak_ptr<SshClient>(client)](const QString &reason) {
+                const auto failedClient = source.lock();
+                // 旧定时器已入队的通知不能把重连后的新会话再次标成断线。
+                if (failedClient && m_servicesClient.lock() == failedClient
+                    && m_term && m_term->sshClient() == failedClient)
+                    m_term->notifyConnectionLost(reason);
+            });
+    m_keepalive->start();
+    // 在第一帧采集前安装 UI 订阅；订阅方也可以在这里同步复选框状态。
+    emit monitorReady();
+    setMonitoringEnabled(m_monitoringEnabled);
+}
+
+void SshSessionTab::setMonitoringEnabled(bool enabled)
+{
+    m_monitoringEnabled = enabled;
+    if (!m_monitor)
+        return;
+    if (enabled) m_monitor->start();
+    else m_monitor->stop();
 }
 
 void SshSessionTab::connectToHost()

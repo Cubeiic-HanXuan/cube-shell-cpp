@@ -18,10 +18,9 @@
 //
 // Threading: start() spawns a dedicated QThread; statsUpdated() /
 // systemInfoReady() are emitted from that thread — consumers MUST connect
-// with Qt::QueuedConnection. stop() REQUESTS the loop to stop and waits only
-// briefly (bounded) for it to finish; if the thread is stuck in a blocking
-// SSH call it is left to finish in the background and self-deletes via
-// deleteLater, so the UI thread is never parked waiting on network I/O.
+// with Qt::QueuedConnection. stop() requests cancellation and waits briefly.
+// A timed-out worker stays attached to this object and cannot be restarted in
+// parallel. UI owners use retire() to defer destruction until the worker exits.
 
 #include <QHash>
 #include <QList>
@@ -65,8 +64,8 @@ public:
     // 对应Python: ssh_func.py::SshClient.monitor_interval = 2.0
     static constexpr int kDefaultIntervalMs = 2000;
 
-    // client 以 shared_ptr 持有：监控线程运行期间 SshClient 必然存活，即便
-    // 本对象/SshTerminalWidget 已先开始析构（极端兜底路径），也不会 UAF。
+    // client 以 shared_ptr 持有：重连后旧监控即使还在 retire() 的收尾阶段，
+    // 其使用的旧 SshClient 也不会因终端已经换了连接而提前释放。
     explicit RemoteMonitor(std::shared_ptr<SshClient> client, QObject *parent = nullptr);
     ~RemoteMonitor() override;
 
@@ -80,12 +79,13 @@ public:
     // 对应Python: get_datas 的启动（后台线程）
     void start();
 
-    // Request the loop to stop. Waits only a bounded time for the thread to
-    // finish; if it is still blocked in an SSH call it is left running to
-    // self-delete, so this never parks the UI thread on network I/O.
-    // Safe to call multiple times / when not running.
-    // 对应Python: conn.active = False + close_sig
-    void stop();
+    // 请求停止，最多等待 3 秒；超时仍保留线程句柄，防止重复启动或过早析构。
+    // 返回 true 表示已完全停止。UI 更换/关闭连接时请使用 retire() 释放对象。
+    bool stop();
+
+    // 撤下 QObject 父对象，停止采集，并在线程真正退出后 deleteLater。
+    // 适用于重连：即使旧线程暂未退出，也不能继续访问已销毁的监控对象。
+    void retire();
 
 signals:
     // Emitted once after start, with the parsed `hostnamectl` output.
@@ -100,6 +100,7 @@ signals:
     void monitorError(const QString &message);
 
 private:
+    friend struct RemoteMonitorReconnectTestAccess;
     void monitorLoop();
     // Interruptible sleep; returns false when stop() was requested meanwhile.
     bool sleepInterruptible(int ms);
@@ -107,6 +108,7 @@ private:
     // 监控线程访问的 SshClient；以 shared_ptr 持有，保证线程存活期间对象有效。
     std::shared_ptr<SshClient> m_client;
     QThread *m_thread = nullptr;
+    bool m_retiring = false; // 仅由所属/UI 线程访问；退休后禁止重新 start
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_cancelFlag{false}; // aborts an in-flight SSH call on stop()
     std::atomic<int> m_intervalMs{kDefaultIntervalMs};

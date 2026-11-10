@@ -1,39 +1,39 @@
 #pragma once
 
-// ProcessManagerDialog.h — 远程进程管理对话框。
-// 对应Python: cube-shell.py::_ensure_process_manager_dialog / showProcessManagerDialog
-//           + processInitUI / update_process_list / apply_filter / kill_selected_process
-//
-// 数据来源为 CommandExecutor 的流式执行：`ps aux --no-headers` 拉取进程列表，
-// `kill -15 <pid...>` 终止进程。streamFinished()/streamError() 来自工作线程 ——
-// 以 Qt::QueuedConnection 接入；executor 可能被其它组件复用，通过 m_task
-// 标记只消费本对话框发起的那次执行。
+// 远程进程管理：对话框独占执行器，并以共享所有权保持其 SSH 连接存活。
+// 更换实际连接时先撤销旧回调、取消并回收工作线程，再创建新执行器；
+// 不能按标签页里的对象名复用重连前的执行器。
 
+#include <QDateTime>
 #include <QDialog>
 #include <QHash>
 #include <QList>
 #include <QString>
 #include <QStringList>
+#include <memory>
 
 class QLabel;
 class QLineEdit;
+class QPushButton;
 class QTableWidget;
 
 namespace cubeshell {
 
 class CommandExecutor;
+class SshClient;
+struct ProcessManagerDialogTestAccess;
 
 class ProcessManagerDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit ProcessManagerDialog(CommandExecutor *executor = nullptr,
-                                  QWidget *parent = nullptr);
+    explicit ProcessManagerDialog(QWidget *parent = nullptr);
+    ~ProcessManagerDialog() override;
 
-    // 连接切换时替换 executor（nullptr = 未连接）。executor 不被持有。
-    void setExecutor(CommandExecutor *executor);
+    // 同一连接重复设置不打断任务；nullptr 表示断线，保留列表但明确标记为旧数据。
+    // 换到新的非空连接则清空旧列表，避免跨服务器展示或终止旧 PID。
+    void setClient(std::shared_ptr<SshClient> client);
 
 public slots:
-    // 对应Python: cube-shell.py::update_process_list
     void refresh();
 
 private slots:
@@ -41,12 +41,10 @@ private slots:
     void onFilterChanged(const QString &text);
     void onStreamFinished(int exitCode, const QString &stdoutText, const QString &stderrText);
     void onStreamError(const QString &message);
-    // 对应Python: cube-shell.py::showContextMenu
     void onTableContextMenu(const QPoint &pos);
 
 private:
-    // ps aux 一行解析后的进程信息。
-    // 对应Python: cube-shell.py::get_filtered_process_list 的 process dict
+    friend struct ProcessManagerDialogTestAccess;
     struct RemoteProcess {
         QString pid;
         QString user;
@@ -56,22 +54,29 @@ private:
         QString command;
     };
 
-    // 本对话框正在等待的流式命令（None = 空闲）。
     enum class Task { None, Refresh, Kill };
-
-    // 对应Python: get_filtered_process_list 的 ss -tulnpe 解析（pid -> 端口列表）
     QHash<QString, QStringList> parseSsOutput(const QString &ssOutput);
-    void parseProcessList(const QString &psOutput,
+    // 全部解析成功才提交新快照，失败时不覆盖上次成功的列表。
+    bool parseProcessList(const QString &psOutput,
                           const QHash<QString, QStringList> &pidPorts = {});
     void applyFilter();
+    void updateStatus(); // 只更新单行提示和按钮状态，不改动表格或滚动位置
+    void markStale(const QString &message);
+    void releaseExecutor();
 
-    CommandExecutor *m_executor; // not owned
+    CommandExecutor *m_executor = nullptr; // owned，先 join 再销毁
+    quint64 m_generation = 0; // 隔离已进入 Qt 事件队列的旧连接回调
     Task m_task = Task::None;
+    bool m_taskFailed = false; // streamError 后等待配对的 streamFinished，再允许下一次任务
     QList<RemoteProcess> m_all;
+    QDateTime m_lastUpdated;
+    bool m_stale = true;
+    QString m_notice;
 
     QLineEdit *m_search = nullptr;
     QTableWidget *m_table = nullptr;
     QLabel *m_status = nullptr;
+    QPushButton *m_killButton = nullptr;
 };
 
 } // namespace cubeshell

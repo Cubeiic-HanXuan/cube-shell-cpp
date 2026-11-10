@@ -69,6 +69,8 @@ public:
 public slots:
     // 显示断线重连覆盖层（心跳检测、网络异常等路径调用）。
     void showReconnectOverlay(const QString &reason = QString());
+    // 统一终端 EOF、心跳与 exec 传输错误的断线通知，同一代连接仅通知一次。
+    void notifyConnectionLost(const QString &reason = QString());
 
 signals:
     // Emitted on the UI thread.
@@ -122,6 +124,7 @@ private:
     SshBridge *m_bridge = nullptr;         // child QObject
 
     bool m_started = false;
+    bool m_disconnectNotified = false;
 
     // 会话日志录制器（shared_ptr 以便安全挂到读线程跑的 SshBridge 上）。
     // 为 nullptr 或 !isActive() 表示未在录制。

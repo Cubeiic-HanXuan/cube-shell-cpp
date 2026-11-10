@@ -505,6 +505,21 @@ target_link_libraries(sftp_browser_test PRIVATE
     cube_core
 )
 
+# SSH 隧道表单：等宽字段、模式文字不截断，以及深/浅主题和大字体回归。
+qt_add_executable(add_tunnel_ui_test
+    add_tunnel_ui_test.cpp
+    ${CMAKE_SOURCE_DIR}/resources/qdarktheme/qdarktheme.qrc
+)
+target_include_directories(add_tunnel_ui_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/ui
+)
+target_link_libraries(add_tunnel_ui_test PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets cube_ui cube_core
+)
+add_test(NAME add_tunnel_ui_test COMMAND add_tunnel_ui_test)
+set_tests_properties(add_tunnel_ui_test PROPERTIES TIMEOUT 30)
+
 # 进程管理：连接替换、旧回调隔离、旧快照提示，以及真实 channel-open 发送失败。
 qt_add_executable(process_manager_test process_manager_test.cpp)
 target_include_directories(process_manager_test PRIVATE

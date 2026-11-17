@@ -88,6 +88,14 @@
     "supports_thinking": true
   },
   {
+    "key": "teapotrouter",
+    "name": "TeaPotRouter",
+    "base_url": "https://api.teapotrouter.com/v1",
+    "anthropic_base_url": "https://api.teapotrouter.com",
+    "models": ["claude-sonnet-5-5", "claude-fable-5-2", "claude-opus-5-5", "claude-haiku-4-5", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"],
+    "supports_thinking": true
+  },
+  {
     "key": "custom",
     "name": "自定义",
     "base_url": "",
